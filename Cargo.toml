@@ -13,6 +13,8 @@ members = [
     "crates/harness-extensions",
     "crates/harness-audio",
     "crates/harness-docs",
+    "crates/harness-media",
+    "crates/harness-3d",
 ]
 
 [workspace.package]
@@ -39,10 +41,13 @@ cpal = "0.15"
 hound = "3.5"
 lopdf = "0.35"
 
+# 3D Geometry Inspection
+gltf = "1.4"
+
 # Browser & Desktop Automation
 chromiumoxide = { version = "0.8", default-features = false, features = ["tokio-runtime"] }
 xcap = "0.9"
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 enigo = { version = "0.6", default-features = false }
 
 # TUI & Terminal
@@ -91,3 +96,5 @@ harness-models = { path = "crates/harness-models" }
 harness-extensions = { path = "crates/harness-extensions" }
 harness-audio = { path = "crates/harness-audio" }
 harness-docs = { path = "crates/harness-docs" }
+harness-media = { path = "crates/harness-media" }
+harness-3d = { path = "crates/harness-3d" }

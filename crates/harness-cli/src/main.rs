@@ -22,15 +22,19 @@ use harness_tools::{
     EditFileTool, ExecuteShellTool, FindFilesTool, GitWorktreeTool, GrepSearchTool, PtyShellTool,
     ReadFileTool, WriteFileTool,
 };
+use harness_3d::register_3d_tools;
 use harness_audio::register_audio_tools;
 use harness_docs::register_docs_tools;
 use harness_extensions::{register_enabled_mcp_extensions, ExtensionSupervisor};
+use harness_media::register_media_tools;
 use harness_ui::{run_tui, start_web_dashboard};
 
 mod audio_cli;
 mod docs_cli;
 mod ext_cli;
+mod media_cli;
 mod models_cli;
+mod threed_cli;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ExecutionMode {
@@ -125,6 +129,159 @@ enum Commands {
         #[command(subcommand)]
         action: DocsCommands,
     },
+    /// Visual Studio: Image generation, upscaling, fast processing, and declarative FFmpeg video editing
+    Media {
+        #[command(subcommand)]
+        action: MediaCommands,
+    },
+    /// 3D & Game Studio: Pure-Rust glTF/OBJ inspection, image-to-3D generation, headless Blender, and Unity tools
+    #[command(name = "3d")]
+    ThreeD {
+        #[command(subcommand)]
+        action: ThreeDCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ThreeDCommands {
+    /// Inspect a 3D mesh (.glb, .gltf, .obj) natively in pure Rust with game-ready diagnostics
+    Inspect {
+        /// Path to the 3D model file
+        path: String,
+    },
+    /// Generate a valid glTF 2.0 binary sample cube (.glb) for testing and the offline 3D viewer
+    Sample {
+        /// Optional output path (defaults to .dex/media/3d/sample_cube.glb)
+        #[arg(long)]
+        out: Option<String>,
+    },
+    /// Generate a 3D .glb mesh from a reference image and/or text prompt via local 3D sidecar
+    Generate {
+        /// Path to input image (e.g. from .dex/media/images/)
+        #[arg(long)]
+        image: Option<String>,
+        /// Optional text prompt describing the 3D object
+        #[arg(long)]
+        prompt: Option<String>,
+        /// Backend selector: auto, trellis, hunyuan3d, triposr, http
+        #[arg(long, default_value = "auto")]
+        backend: String,
+    },
+    /// Convert and optionally decimate a 3D mesh via headless Blender (.glb/.gltf/.fbx/.obj/.blend)
+    Convert {
+        /// Input 3D model path
+        input: String,
+        /// Target output 3D model path
+        #[arg(long)]
+        out: String,
+        /// Optional polygon decimation ratio (0.05..=1.0) for LODs
+        #[arg(long)]
+        decimate: Option<f32>,
+    },
+    /// Render an auto-framed studio preview PNG of a 3D model via headless Blender
+    Preview {
+        /// Input 3D model path
+        input: String,
+        /// Optional output PNG path (defaults to .dex/media/3d/previews/)
+        #[arg(long)]
+        out: Option<String>,
+    },
+    /// Inspect a Unity project on disk (version, URP/HDRP/Built-in pipeline, scenes, C# scripts)
+    UnityInspect {
+        /// Root directory of the Unity project (containing Assets/)
+        project: String,
+    },
+    /// Export a 3D model and companion textures safely into a Unity project's Assets/ directory
+    UnityExport {
+        /// Source 3D model path (.glb, .gltf, .fbx, .obj)
+        mesh: String,
+        /// Root directory of the Unity project
+        #[arg(long)]
+        project: String,
+        /// Relative subdirectory inside Assets/ (default: Assets/DexGenerated)
+        #[arg(long)]
+        subdir: Option<String>,
+        /// Overwrite existing files at destination
+        #[arg(long, default_value_t = false)]
+        overwrite: bool,
+    },
+    /// List stored 3D models in .dex/media/3d/ with file size and triangle count
+    List,
+}
+
+#[derive(Subcommand, Debug)]
+enum MediaCommands {
+    /// Generate an image from a text prompt (MLX / ComfyUI / HTTP)
+    Imagine {
+        /// Text prompt describing the image
+        prompt: String,
+        /// Optional negative prompt
+        #[arg(long)]
+        negative: Option<String>,
+        /// Output width in pixels
+        #[arg(long, default_value_t = 1024)]
+        width: u32,
+        /// Output height in pixels
+        #[arg(long, default_value_t = 1024)]
+        height: u32,
+        /// Denoising steps
+        #[arg(long, default_value_t = 20)]
+        steps: u32,
+        /// Backend selector: auto, mlx, comfyui, http
+        #[arg(long, default_value = "auto")]
+        backend: String,
+        /// Optional ComfyUI workflow JSON inside .dex/workflows/
+        #[arg(long)]
+        workflow: Option<String>,
+    },
+    /// Upscale an image (neural MLX/ComfyUI or deterministic pure-Rust Lanczos3 fallback)
+    Upscale {
+        /// Path to source image
+        path: String,
+        /// Scale multiplier (2..=8)
+        #[arg(long, default_value_t = 2)]
+        scale: u32,
+        /// Backend selector: auto, mlx, comfyui
+        #[arg(long, default_value = "auto")]
+        backend: String,
+    },
+    /// Fast pure-Rust image resize and format conversion (PNG/JPG/WebP)
+    Process {
+        /// Path to source image
+        path: String,
+        /// Resize dimensions in WxH format (e.g. 512x512)
+        #[arg(long)]
+        resize: Option<String>,
+        /// Output format: png, jpg, webp
+        #[arg(long)]
+        format: Option<String>,
+        /// Optional output file path
+        #[arg(long)]
+        out: Option<String>,
+    },
+    /// Inspect video metadata (duration, resolution, FPS, codecs) via ffprobe
+    InspectVideo {
+        /// Path to video file
+        path: String,
+    },
+    /// Extract keyframes from a video as PNG images into .dex/media/frames/
+    ExtractFrames {
+        /// Path to video file
+        path: String,
+        /// Extraction rate in frames per second
+        #[arg(long, default_value_t = 1.0)]
+        fps: f64,
+    },
+    /// Render a declarative JSON TimelineSpec safely via ffmpeg
+    RenderTimeline {
+        /// Path to a JSON TimelineSpec file
+        timeline: String,
+        /// Optional output video file path
+        #[arg(long)]
+        out: Option<String>,
+    },
+    /// List generated images and videos stored in .dex/media/{images,video}/
+    List,
 }
 
 #[derive(Subcommand, Debug)]
@@ -251,23 +408,44 @@ enum ModelCommands {
         #[arg(short, long, default_value = "Q4_K_M")]
         quant: String,
     },
-    /// Import a local .gguf file into Dex registry (and optionally register into Ollama)
+    /// Import a local .gguf file or MLX model directory into Dex registry (and optionally register into Ollama)
     Import {
-        /// Path to the .gguf file on disk
+        /// Path to a .gguf file or MLX model directory on disk
         path: String,
         /// Alias name for the model
         #[arg(short, long)]
         name: Option<String>,
-        /// Also register the imported model in the local Ollama instance
+        /// Also register the imported GGUF model in the local Ollama instance
         #[arg(long, default_value_t = false)]
         to_ollama: bool,
     },
-    /// List all local models in Dex registry and Ollama
+    /// List all discovered local models (GGUF, MLX, PT) across configured folders and local servers
     List,
+    /// Manage local directories scanned for GGUF, MLX, and Safetensors models (~/.dex/models/config.json)
+    Dirs {
+        #[command(subcommand)]
+        action: ModelDirCommands,
+    },
     /// Remove a model from the Dex registry and disk
     Rm {
         /// Model identifier to remove (e.g. local:my-model, hf:..., or ollama:...)
         model_id: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ModelDirCommands {
+    /// List configured model folders (including auto-detected ~/.lmstudio/models)
+    List,
+    /// Add an existing folder to scan for local GGUF/MLX/PT models
+    Add {
+        /// Folder path (supports ~/)
+        path: String,
+    },
+    /// Remove a folder from the model scanner configuration
+    Rm {
+        /// Folder path to remove
+        path: String,
     },
 }
 
@@ -313,6 +491,16 @@ impl SecurityHook {
                 | "desktop_keyboard"
                 | "browser_click"
                 | "browser_type"
+                | "image_generate"
+                | "image_upscale"
+                | "image_process"
+                | "video_generate"
+                | "video_extract_frames"
+                | "video_edit"
+                | "mesh_generate_3d"
+                | "blender_convert_mesh"
+                | "blender_render_preview"
+                | "unity_export_asset"
         )
     }
 }
@@ -380,7 +568,14 @@ fn build_provider(provider_type: &str, model: &str, api_base: Option<&str>) -> R
             }
             Ok(Arc::new(p))
         }
-        other => anyhow::bail!("Unsupported provider '{other}'. Supported: ollama, openai"),
+        "lmstudio" | "lm_studio" | "bionic" | "mlx" => {
+            let mut p = OpenAiProvider::lm_studio(model);
+            if let Some(base) = api_base {
+                p = p.with_base_url(base);
+            }
+            Ok(Arc::new(p))
+        }
+        other => anyhow::bail!("Unsupported provider '{other}'. Supported: ollama, openai, lmstudio"),
     }
 }
 
@@ -435,13 +630,23 @@ fn build_tools(
         SpawnSubagentTool::new(provider, master_copy).with_event_bus(event_bus.clone()),
     ));
 
-    // Deferred Audio (STT, TTS, Music, SFX) and Docs/OCR tools
+    // Deferred Audio (STT, TTS, Music, SFX), Docs/OCR, Visual Studio (Image/Video), and 3D/GameDev tools
     register_audio_tools(
         &mut registry,
         Some(ext_supervisor.clone()),
         Some(event_bus.clone()),
     );
-    register_docs_tools(&mut registry, Some(ext_supervisor), Some(event_bus.clone()));
+    register_docs_tools(
+        &mut registry,
+        Some(ext_supervisor.clone()),
+        Some(event_bus.clone()),
+    );
+    register_media_tools(
+        &mut registry,
+        Some(ext_supervisor.clone()),
+        Some(event_bus.clone()),
+    );
+    register_3d_tools(&mut registry, Some(ext_supervisor), Some(event_bus.clone()));
 
     // Dynamic deferred tool discovery (`search_tools`)
     registry.register_search_tools(Some(event_bus));
@@ -550,6 +755,11 @@ async fn main() -> Result<()> {
                 ModelCommands::List => {
                     models_cli::list_models().await?;
                 }
+                ModelCommands::Dirs { action } => match action {
+                    ModelDirCommands::List => models_cli::list_model_dirs().await?,
+                    ModelDirCommands::Add { path } => models_cli::add_model_dir(&path).await?,
+                    ModelDirCommands::Rm { path } => models_cli::remove_model_dir(&path).await?,
+                },
                 ModelCommands::Rm { model_id } => {
                     models_cli::remove_model(&model_id).await?;
                 }
@@ -629,6 +839,95 @@ async fn main() -> Result<()> {
                 }
                 DocsCommands::Parse { path } => {
                     docs_cli::run_parse(&path, event_bus).await?;
+                }
+            }
+            return Ok(());
+        }
+        Some(Commands::Media { action }) => {
+            match action {
+                MediaCommands::Imagine {
+                    prompt,
+                    negative,
+                    width,
+                    height,
+                    steps,
+                    backend,
+                    workflow,
+                } => {
+                    media_cli::imagine(
+                        &prompt, negative, width, height, steps, &backend, workflow, event_bus,
+                    )
+                    .await?;
+                }
+                MediaCommands::Upscale {
+                    path,
+                    scale,
+                    backend,
+                } => {
+                    media_cli::upscale(&path, scale, &backend, event_bus).await?;
+                }
+                MediaCommands::Process {
+                    path,
+                    resize,
+                    format,
+                    out,
+                } => {
+                    media_cli::process(&path, resize.as_deref(), format, out).await?;
+                }
+                MediaCommands::InspectVideo { path } => {
+                    media_cli::inspect_video_cli(&path).await?;
+                }
+                MediaCommands::ExtractFrames { path, fps } => {
+                    media_cli::extract_frames_cli(&path, fps).await?;
+                }
+                MediaCommands::RenderTimeline { timeline, out } => {
+                    media_cli::render_timeline_cli(&timeline, out.as_deref(), event_bus).await?;
+                }
+                MediaCommands::List => {
+                    media_cli::list_media().await?;
+                }
+            }
+            return Ok(());
+        }
+        Some(Commands::ThreeD { action }) => {
+            match action {
+                ThreeDCommands::Inspect { path } => {
+                    threed_cli::inspect_model(&path).await?;
+                }
+                ThreeDCommands::Sample { out } => {
+                    threed_cli::create_sample(out.as_deref()).await?;
+                }
+                ThreeDCommands::Generate {
+                    image,
+                    prompt,
+                    backend,
+                } => {
+                    threed_cli::generate_model(image, prompt, &backend, event_bus).await?;
+                }
+                ThreeDCommands::Convert {
+                    input,
+                    out,
+                    decimate,
+                } => {
+                    threed_cli::convert_model(&input, &out, decimate, event_bus).await?;
+                }
+                ThreeDCommands::Preview { input, out } => {
+                    threed_cli::preview_model(&input, out.as_deref(), event_bus).await?;
+                }
+                ThreeDCommands::UnityInspect { project } => {
+                    threed_cli::unity_inspect(&project).await?;
+                }
+                ThreeDCommands::UnityExport {
+                    mesh,
+                    project,
+                    subdir,
+                    overwrite,
+                } => {
+                    threed_cli::unity_export(&mesh, &project, subdir.as_deref(), overwrite)
+                        .await?;
+                }
+                ThreeDCommands::List => {
+                    threed_cli::list_models().await?;
                 }
             }
             return Ok(());
@@ -825,5 +1124,29 @@ mod tests {
     #[test]
     fn test_cli_command_structure_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn test_security_hook_covers_disk_writing_media_tools() {
+        for tool in [
+            "image_generate",
+            "image_upscale",
+            "image_process",
+            "video_generate",
+            "video_extract_frames",
+            "video_edit",
+            "mesh_generate_3d",
+            "blender_convert_mesh",
+            "blender_render_preview",
+            "unity_export_asset",
+        ] {
+            assert!(
+                SecurityHook::is_modifying_or_sensitive(tool),
+                "Expected '{tool}' to be gated by SecurityHook"
+            );
+        }
+        assert!(!SecurityHook::is_modifying_or_sensitive("video_inspect"));
+        assert!(!SecurityHook::is_modifying_or_sensitive("mesh_inspect"));
+        assert!(!SecurityHook::is_modifying_or_sensitive("unity_inspect_project"));
     }
 }

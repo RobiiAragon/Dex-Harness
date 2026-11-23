@@ -41,6 +41,8 @@ crates/
 ├── harness-extensions/  # Extensions Hub: MCP + Sidecar supervisor with idle RAM auto-unload & deferred tool bridge
 ├── harness-audio/       # Native microphone capture (cpal/hound), Whisper STT, TTS (sidecar + macOS say), Music & SFX
 ├── harness-docs/        # Native Apple Vision OCR (macOS) / Tesseract fallback & Docling / pure-Rust PDF parser
+├── harness-media/       # Visual Studio: MLX/ComfyUI/HTTP image & video gen, Lanczos3 upscale, pure-Rust image ops, FFmpeg timeline editor
+├── harness-3d/          # 3D & Game Studio: pure-Rust glTF/OBJ inspector, image-to-3D sidecars, headless Blender, Unity project bridge
 ├── harness-ui/          # Ratatui TUI dashboard & Axum WebSocket web monitor
 ├── harness-cli/         # Unified executable (binary name: `dex`)
 └── harness-desktop/     # Native macOS Desktop Application (`Dex.app`) via Tauri v2
@@ -60,6 +62,46 @@ dex audio transcribe .dex/media/audio/recordings/rec.wav --timestamps
 dex audio speak "Hola desde Dex-Harness" --voice Monica
 dex docs ocr ./screenshot.png
 dex docs parse ./report.pdf
+```
+
+---
+
+## 🎨 Visual Studio: Image, Upscaling & Declarative Video Editing (`harness-media`)
+
+- **Multi-Backend Image & Video Generation:** Automatically routes to local Apple Silicon MLX (`mlx-gen` / `mflux-generate`), ComfyUI workflows (`.dex/workflows/*.json` with safe placeholder injection), or OpenAI-compatible HTTP endpoints while broadcasting live `MediaGenerationProgress` and `MediaGenerated` events.
+- **Pure-Rust Fast Image Ops & Lanczos3 Upscaling:** Non-blocking crop, resize, WebP/PNG/JPG conversion, and deterministic 2x–8x Lanczos3 upscaling fallback (`image` crate inside `spawn_blocking`).
+- **Safe Declarative FFmpeg Video Editing:** Typed JSON `TimelineSpec` (clip trims, concat, external audio overlay, SRT subtitles, scaling, FPS, container selection) compiled directly to typed `ffmpeg` CLI arguments with zero shell interpolation, plus `ffprobe` metadata inspection and keyframe extraction.
+- **Native Desktop Studio (`Dex.app`):** Dedicated **🎨 Media Studio** tab with generator form, ComfyUI workflow picker, live progress bar, reactive image/video gallery, 1-click **Upscale 2x**, **Enviar al Agente**, and **Finder** reveal (`open -R`).
+
+```bash
+dex media imagine "Isometric cyberpunk workshop in Tokyo, cinematic lighting" --width 1024 --height 1024 --steps 20 --backend auto
+dex media upscale ./artwork.png --scale 2 --backend auto
+dex media process ./artwork.png --resize 512x512 --format webp --out ./thumb.webp
+dex media inspect-video ./clip.mp4
+dex media extract-frames ./clip.mp4 --fps 1
+dex media render-timeline ./timeline.json --out ./final.mp4
+dex media list
+```
+
+---
+
+## 🧊 3D & Game Studio (`harness-3d`)
+
+- **Pure-Rust glTF 2.0 / OBJ Geometry Inspector:** Analyzes `.glb`, `.gltf`, and `.obj` files natively inside `spawn_blocking` (vertices, triangles, materials, normals, UVs, animations, bounding box dimensions, and real-time *game-ready* diagnostics) plus built-in binary `.glb` sample cube synthesis (`dex 3d sample`).
+- **Image-to-3D Sidecar Orchestrator:** Lazily wakes `trellis-3d` via `ExtensionSupervisor` (or connects to Hunyuan3D / TripoSR / custom `DEX_3D_ENDPOINT`), saves `.glb` meshes into `.dex/media/3d/`, auto-inspects geometry, and streams `MediaGenerationProgress` & `MediaGenerated`.
+- **Headless Blender Bridge:** Autodetects Blender (`BLENDER_BIN`, `$PATH`, `/Applications/Blender.app`), converts between `.glb`/`.gltf`/`.fbx`/`.obj`/`.blend` with optional LOD polygon decimation (`0.05..=1.0`), and renders auto-framed 3-point studio PNG previews via injection-safe generated Python scripts.
+- **Direct Unity Project Tools:** Inspects Unity projects directly on disk (`ProjectVersion.txt`, `URP`/`HDRP`/`Built-in` pipeline detection, `.unity` scenes, C# script counts) and exports 3D assets + companion textures safely into `Assets/` with anti-path-traversal and overwrite guards.
+- **100% Offline WebGL2 `.glb` Viewer in `Dex.app`:** Zero-CDN pure-JavaScript WebGL2 viewer inside the **🧊 3D & Game Studio** tab with binary glTF 2.0 parsing, orbit/zoom controls, Solid/Wireframe mode, reference grid, live HUD metrics, and 1-click Blender/Unity actions.
+
+```bash
+dex 3d sample
+dex 3d inspect .dex/media/3d/sample_cube.glb
+dex 3d generate --image .dex/media/images/concept.png --backend auto
+dex 3d convert .dex/media/3d/sample_cube.glb --out ./hero_lod1.fbx --decimate 0.5
+dex 3d preview .dex/media/3d/sample_cube.glb
+dex 3d unity-inspect ~/UnityProjects/MyGame
+dex 3d unity-export .dex/media/3d/sample_cube.glb --project ~/UnityProjects/MyGame --subdir Assets/DexGenerated
+dex 3d list
 ```
 
 ---
@@ -168,6 +210,19 @@ cargo tauri build --bundles app --debug --no-sign
 | `desktop_screenshot`| `harness-computer`| Desktop | Captures primary desktop monitor and saves to `.dex/screenshots/`. |
 | `desktop_mouse`| `harness-computer`| Desktop | Simulates mouse movement, clicks, and drags with coordinate boundary checks. |
 | `desktop_keyboard`| `harness-computer`| Desktop | Simulates keyboard typing and special keys (Return, Escape, Tab, etc.). |
+| `image_generate` | `harness-media` | ImageVideo (Deferred) | Generates images via MLX (`mlx-gen`/`mflux`), ComfyUI workflows, or HTTP endpoints. |
+| `image_upscale` | `harness-media` | ImageVideo (Deferred) | Upscales images 2x–8x via neural sidecars or deterministic pure-Rust Lanczos3 fallback. |
+| `image_process` | `harness-media` | ImageVideo (Deferred) | Fast native pure-Rust crop, resize, and PNG/JPG/WebP conversion. |
+| `video_generate` | `harness-media` | ImageVideo (Deferred) | Generates short text-to-video / image-to-video clips via MLX or ComfyUI. |
+| `video_inspect` | `harness-media` | ImageVideo (Deferred) | Inspects video duration, resolution, FPS, codecs, and bitrate via `ffprobe`. |
+| `video_extract_frames` | `harness-media` | ImageVideo (Deferred) | Extracts keyframes as PNGs into `.dex/media/frames/` for visual inspection or OCR. |
+| `video_edit` | `harness-media` | ImageVideo (Deferred) | Renders declarative JSON `TimelineSpec` edits safely via `ffmpeg`. |
+| `mesh_inspect` | `harness-3d` | ThreeD (Deferred) | Pure-Rust `.glb`/`.gltf`/`.obj` inspector with bounding box and *game-ready* warnings. |
+| `mesh_generate_3d` | `harness-3d` | ThreeD (Deferred) | Generates `.glb` meshes from images/prompts via TRELLIS 2 / Hunyuan3D / TripoSR / HTTP sidecars. |
+| `blender_convert_mesh` | `harness-3d` | ThreeD (Deferred) | Headless Blender format converter (`.glb`/`.fbx`/`.obj`/`.blend`) with LOD decimation. |
+| `blender_render_preview` | `harness-3d` | ThreeD (Deferred) | Renders an auto-framed studio preview PNG of a 3D mesh in headless Blender. |
+| `unity_inspect_project` | `harness-3d` | GameDev (Deferred) | Detects Unity version, render pipeline (URP/HDRP/Built-in), `.unity` scenes, and C# scripts. |
+| `unity_export_asset` | `harness-3d` | GameDev (Deferred) | Safely copies a 3D model and companion textures into a Unity project's `Assets/` folder. |
 
 ---
 

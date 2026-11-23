@@ -21,6 +21,7 @@ pub struct OpenAiProvider {
 
 impl OpenAiProvider {
     pub const DEFAULT_BASE_URL: &'static str = "https://api.openai.com/v1";
+    pub const LM_STUDIO_BASE_URL: &'static str = "http://127.0.0.1:1234/v1";
 
     pub fn new(model: impl Into<String>) -> Self {
         Self {
@@ -29,6 +30,19 @@ impl OpenAiProvider {
             model: model.into(),
             client: Client::builder()
                 .timeout(Duration::from_secs(120))
+                .build()
+                .unwrap_or_else(|_| Client::new()),
+        }
+    }
+
+    /// Creates a provider configured for a local LM Studio / Bionic OpenAI-compatible server (`:1234/v1`).
+    pub fn lm_studio(model: impl Into<String>) -> Self {
+        Self {
+            base_url: Self::LM_STUDIO_BASE_URL.to_string(),
+            api_key: Some("lm-studio".to_string()),
+            model: model.into(),
+            client: Client::builder()
+                .timeout(Duration::from_secs(180))
                 .build()
                 .unwrap_or_else(|_| Client::new()),
         }

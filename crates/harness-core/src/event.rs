@@ -72,6 +72,14 @@ pub enum DexEvent {
         recording: bool,
         level_db: f32,
     },
+    /// Step-by-step progress emitted during image/video generation or timeline rendering.
+    MediaGenerationProgress {
+        task_id: String,
+        kind: String,
+        step: u32,
+        total_steps: u32,
+        message: String,
+    },
 }
 
 /// Central publish-subscribe asynchronous event bus based on `tokio::sync::broadcast`.

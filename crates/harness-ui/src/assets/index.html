@@ -206,6 +206,8 @@
         if (ev.data.recording) {
           appendLog(`\n🎙️ [Voice Capture] Active (${ev.data.level_db.toFixed(1)} dB)`);
         }
+      } else if (ev.type === 'MediaGenerationProgress') {
+        appendLog(`\n🎨 [Media ${ev.data.kind}] ${ev.data.step}/${ev.data.total_steps}: ${ev.data.message}`);
       }
     }
 

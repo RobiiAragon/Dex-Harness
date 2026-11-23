@@ -3,8 +3,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{bail, Context, Result};
 use harness_core::cookbook::HardwareProfile;
 use harness_models::{
-    HfClient, MemoryFit, ModelDownloader, ModelMetadata, ModelRegistry, ModelSource, OllamaBridge,
-    import_local_gguf,
+    detect_local_servers, import_local_model, scan_model_dirs, HfClient, MemoryFit,
+    ModelDirsConfig, ModelDownloader, ModelMetadata, ModelRegistry, ModelSource, OllamaBridge,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -113,6 +113,7 @@ pub async fn pull_model(source: &str, preferred_quant: &str) -> Result<()> {
                 repo_id: None,
                 filename: None,
                 quantization: None,
+                format: Some("ollama".to_string()),
                 size_bytes: 0,
                 created_at: now,
             })
@@ -181,6 +182,7 @@ pub async fn pull_model(source: &str, preferred_quant: &str) -> Result<()> {
         repo_id: Some(source.to_string()),
         filename: Some(selected.filename.clone()),
         quantization: Some(selected.quantization.clone()),
+        format: Some(selected.format.to_lowercase()),
         size_bytes: selected.size_bytes,
         created_at: now,
     };
@@ -199,7 +201,7 @@ pub async fn pull_model(source: &str, preferred_quant: &str) -> Result<()> {
 }
 
 pub async fn import_model(path: &str, custom_name: Option<&str>, to_ollama: bool) -> Result<()> {
-    println!("📥 Importing local GGUF model from '{path}'...");
+    println!("Importing local model from '{path}'...");
     let p = Path::new(path);
     let bridge = if to_ollama {
         Some(OllamaBridge::default())
@@ -207,13 +209,14 @@ pub async fn import_model(path: &str, custom_name: Option<&str>, to_ollama: bool
         None
     };
 
-    let metadata = import_local_gguf(p, custom_name, true, to_ollama, bridge.as_ref())
+    let metadata = import_local_model(p, custom_name, true, to_ollama, bridge.as_ref())
         .await
-        .context("Failed to import local GGUF model")?;
+        .context("Failed to import local model (.gguf file or MLX folder)")?;
 
-    println!("✅ Model imported successfully!");
+    println!("Model imported successfully:");
     println!("   ID: {}", metadata.id);
     println!("   Name: {}", metadata.name);
+    println!("   Format: {}", metadata.format.as_deref().unwrap_or("gguf").to_uppercase());
     println!("   Quantization: {}", metadata.quantization.as_deref().unwrap_or("Unknown"));
     println!("   Path: {}", metadata.file_path.as_deref().unwrap_or(""));
     if to_ollama {
@@ -223,58 +226,96 @@ pub async fn import_model(path: &str, custom_name: Option<&str>, to_ollama: bool
     Ok(())
 }
 
-pub async fn list_models() -> Result<()> {
-    println!("📋 Local Dex Model Registry (~/.dex/models/registry.json):");
-    let registry = ModelRegistry::load_or_default().await;
+pub async fn list_model_dirs() -> Result<()> {
+    let cfg = ModelDirsConfig::load_or_default().await;
+    println!("Configured Model Directories ({}):", cfg.config_path.display());
+    for dir in &cfg.model_dirs {
+        let exists = tokio::fs::try_exists(ModelDirsConfig::expand_tilde(dir))
+            .await
+            .unwrap_or(false);
+        let status = if exists { "active" } else { "missing" };
+        println!("   - [{status}] {dir}");
+    }
+    Ok(())
+}
 
-    if registry.list().is_empty() {
-        println!("   (No models installed in Dex registry yet. Run 'dex models search' or 'dex models pull' to install.)\n");
+pub async fn add_model_dir(path: &str) -> Result<()> {
+    let mut cfg = ModelDirsConfig::load_or_default().await;
+    let added = cfg
+        .add_dir(path)
+        .await
+        .with_context(|| format!("Failed to add model folder '{path}'"))?;
+    println!("Added model directory: {added}");
+    Ok(())
+}
+
+pub async fn remove_model_dir(path: &str) -> Result<()> {
+    let mut cfg = ModelDirsConfig::load_or_default().await;
+    if cfg.remove_dir(path).await.context("Failed to update model dirs config")? {
+        println!("Removed model directory: {path}");
+    } else {
+        println!("Model directory '{path}' was not in configuration.");
+    }
+    Ok(())
+}
+
+pub async fn list_models() -> Result<()> {
+    let dirs_cfg = ModelDirsConfig::load_or_default().await;
+    let scanned = scan_model_dirs(&dirs_cfg.resolved_paths())
+        .await
+        .unwrap_or_default();
+
+    println!("Local Model Folders ({} configured):", dirs_cfg.model_dirs.len());
+    for d in &dirs_cfg.model_dirs {
+        println!("   - {d}");
+    }
+    println!();
+
+    println!("Discovered Local Models (GGUF / MLX / PT): {}", scanned.len());
+    if scanned.is_empty() {
+        println!("   (No local models found in configured folders.)\n");
     } else {
         println!(
-            "{:<32} {:<12} {:<10} {:<10} {:<30}",
-            "ID", "SOURCE", "QUANT", "SIZE", "FILENAME"
+            "{:<34} {:<7} {:<12} {:<10} {:<24}",
+            "NAME", "FORMAT", "QUANT", "SIZE", "CAPS"
         );
         println!(
-            "{:-<32} {:-<12} {:-<10} {:-<10} {:-<30}",
+            "{:-<34} {:-<7} {:-<12} {:-<10} {:-<24}",
             "", "", "", "", ""
         );
-        for m in registry.list() {
-            let size_str = if m.size_bytes > 0 {
-                format!("{:.1} GB", m.size_bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-            } else {
+        for m in &scanned {
+            let size_str = format!("{:.2} GB", m.size_bytes as f64 / (1024.0 * 1024.0 * 1024.0));
+            let caps = if m.capabilities.is_empty() {
                 "-".to_string()
+            } else {
+                m.capabilities.join(",")
             };
             println!(
-                "{:<32} {:<12} {:<10} {:<10} {:<30}",
-                truncate_str(&m.id, 30),
-                m.source.to_string(),
+                "{:<34} {:<7} {:<12} {:<10} {:<24}",
+                truncate_str(&m.name, 32),
+                m.format.to_string(),
                 m.quantization.as_deref().unwrap_or("-"),
                 size_str,
-                truncate_str(m.filename.as_deref().unwrap_or(&m.name), 28)
+                truncate_str(&caps, 22)
             );
         }
         println!();
     }
 
-    // Inspect Ollama instance
-    let bridge = OllamaBridge::default();
-    match bridge.list_models().await {
-        Ok(tags) => {
-            println!("🦙 Ollama Local Models (http://localhost:11434):");
-            if tags.is_empty() {
-                println!("   (No models found in Ollama)");
-            } else {
-                println!("{:<32} {:<10} {:<10}", "MODEL NAME", "PARAM SIZE", "QUANT");
-                println!("{:-<32} {:-<10} {:-<10}", "", "", "");
-                for t in &tags {
-                    let param = t.details.as_ref().and_then(|d| d.parameter_size.as_deref()).unwrap_or("-");
-                    let quant = t.details.as_ref().and_then(|d| d.quantization_level.as_deref()).unwrap_or("-");
-                    println!("{:<32} {:<10} {:<10}", truncate_str(&t.name, 30), param, quant);
-                }
-            }
-        }
-        Err(_) => {
-            println!("🦙 Ollama: Daemon not reachable on localhost:11434");
+    // Local servers status (LM Studio / Ollama / MLX-LM)
+    let servers = detect_local_servers().await;
+    println!("Local Inference Servers:");
+    for srv in &servers {
+        let state = if srv.reachable { "ONLINE" } else { "offline" };
+        println!(
+            "   - {} ({}) [{}] — {} model(s)",
+            srv.name,
+            srv.base_url,
+            state,
+            srv.loaded_models.len()
+        );
+        for loaded in srv.loaded_models.iter().take(6) {
+            println!("       * {loaded}");
         }
     }
 

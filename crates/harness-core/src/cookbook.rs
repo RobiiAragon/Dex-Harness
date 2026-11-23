@@ -89,24 +89,24 @@ impl HardwareProfile {
     pub fn generate_report(&self) -> String {
         let mut report = String::new();
         report.push_str("=================================================================\n");
-        report.push_str("               🖥️  Dex-Harness Hardware Cookbook                  \n");
+        report.push_str("                  Dex-Harness Hardware Cookbook                  \n");
         report.push_str("=================================================================\n\n");
 
-        report.push_str("### 📊 Host System Specifications:\n");
-        report.push_str(&format!("- **OS & Architecture:** {} ({})\n", self.os_name, self.arch));
-        report.push_str(&format!("- **CPU Logical Cores:** {}\n", self.cpu_cores));
+        report.push_str("### Host System Specifications\n");
+        report.push_str(&format!("- OS & Architecture: {} ({})\n", self.os_name, self.arch));
+        report.push_str(&format!("- CPU Logical Cores: {}\n", self.cpu_cores));
         report.push_str(&format!(
-            "- **Memory:** {:.1} GB Total ({:.1} GB Available)\n",
+            "- Memory: {:.1} GB Total ({:.1} GB Available)\n",
             self.total_memory_gb, self.available_memory_gb
         ));
         if self.is_apple_silicon {
-            report.push_str("- **Hardware Note:** 🍎 Apple Silicon detected (Unified Memory Architecture enables GPU acceleration for large local LLMs)\n");
+            report.push_str("- Hardware Note: Apple Silicon detected (Unified Memory Architecture enables Metal/MLX GPU acceleration for large local LLMs)\n");
         }
 
-        report.push_str("\n### 🎯 Recommended Local Models (Ollama / vLLM / llama.cpp):\n\n");
+        report.push_str("\n### Recommended Local Models (Ollama / LM Studio / MLX / llama.cpp)\n\n");
         for (idx, rec) in self.recommend_models().iter().enumerate() {
             report.push_str(&format!(
-                "{}. **{}** - {}\n   - Context Window: {}\n   - Memory Budget: {}\n   - Note: {}\n\n",
+                "{}. {} — {}\n   - Context Window: {}\n   - Memory Budget: {}\n   - Note: {}\n\n",
                 idx + 1,
                 rec.tier,
                 rec.model_name,

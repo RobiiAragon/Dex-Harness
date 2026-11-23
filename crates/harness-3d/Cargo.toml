@@ -1,0 +1,22 @@
+[package]
+name = "harness-3d"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "3D & Game Studio for Dex-Harness: pure-Rust glTF/OBJ inspection, image-to-3D sidecars, headless Blender, and Unity project bridge"
+
+[dependencies]
+harness-core = { workspace = true }
+harness-extensions = { workspace = true }
+gltf = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

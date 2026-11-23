@@ -35,6 +35,8 @@ pub struct ModelMetadata {
     pub filename: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quantization: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
     pub size_bytes: u64,
     pub created_at: u64,
 }
@@ -138,7 +140,8 @@ impl ModelRegistry {
             if delete_file {
                 if let Some(ref path_str) = removed.file_path {
                     let path = PathBuf::from(path_str);
-                    if tokio::fs::try_exists(&path).await.unwrap_or(false) {
+                    // Only delete regular files owned inside our models_dir; never delete external referenced directories
+                    if path.is_file() && path.starts_with(&self.models_dir) {
                         info!(path = ?path, "Deleting model file from disk");
                         let _ = tokio::fs::remove_file(&path).await;
                     }
@@ -185,6 +188,7 @@ mod tests {
             repo_id: None,
             filename: Some("dummy-model.gguf".to_string()),
             quantization: Some("Q4_K_M".to_string()),
+            format: Some("gguf".to_string()),
             size_bytes: 18,
             created_at: 1700000000,
         };

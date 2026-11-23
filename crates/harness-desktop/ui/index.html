@@ -4,1709 +4,1022 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Dex</title>
-  <style>
-    :root {
-      --bg: #0d1117;
-      --card-bg: #161b22;
-      --card-border: #30363d;
-      --text: #c9d1d9;
-      --text-muted: #8b949e;
-      --primary: #58a6ff;
-      --success: #3fb950;
-      --warning: #d29922;
-      --danger: #f85149;
-      --purple: #bc8cff;
-      --cyan: #39c5cf;
-    }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
-      background: var(--bg);
-      color: var(--text);
-      display: flex;
-      flex-direction: column;
-      height: 100vh;
-      overflow: hidden;
-      user-select: none;
-    }
-    /* macOS Overlay Titlebar */
-    .titlebar {
-      height: 48px;
-      background: rgba(22, 27, 34, 0.85);
-      backdrop-filter: blur(12px);
-      -webkit-backdrop-filter: blur(12px);
-      border-bottom: 1px solid var(--card-border);
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 0 16px;
-      -webkit-app-region: drag;
-    }
-    .title-left {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      margin-left: 72px; /* space for macOS traffic lights */
-    }
-    .logo-badge {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      font-weight: 700;
-      font-size: 15px;
-      color: #fff;
-      letter-spacing: -0.3px;
-    }
-    .logo-badge span.robot {
-      font-size: 18px;
-      filter: drop-shadow(0 0 6px rgba(57, 197, 207, 0.6));
-    }
-    .title-right {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      -webkit-app-region: no-drag;
-    }
-    .mode-pill {
-      display: flex;
-      background: #090d13;
-      border: 1px solid var(--card-border);
-      border-radius: 20px;
-      padding: 2px;
-      gap: 2px;
-    }
-    .mode-btn {
-      background: transparent;
-      border: none;
-      color: var(--text-muted);
-      font-size: 11px;
-      font-weight: 600;
-      padding: 4px 10px;
-      border-radius: 16px;
-      cursor: pointer;
-      transition: all 0.2s ease;
-    }
-    .mode-btn.active {
-      background: var(--primary);
-      color: #fff;
-      box-shadow: 0 0 8px rgba(88, 166, 255, 0.4);
-    }
-    .mode-btn.active.safe {
-      background: var(--warning);
-      color: #000;
-      box-shadow: 0 0 8px rgba(210, 153, 34, 0.4);
-    }
-    .mode-btn.active.plan {
-      background: var(--purple);
-      color: #fff;
-      box-shadow: 0 0 8px rgba(188, 140, 255, 0.4);
-    }
-    /* Main Layout */
-    .app-body {
-      display: flex;
-      flex: 1;
-      height: calc(100vh - 48px);
-      overflow: hidden;
-    }
-    .stream-column {
-      flex: 1.2;
-      display: flex;
-      flex-direction: column;
-      border-right: 1px solid var(--card-border);
-      background: #0b0f15;
-    }
-    .side-column {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      background: var(--bg);
-    }
-    /* Goal Input Bar */
-    .goal-panel {
-      padding: 14px 16px;
-      background: var(--card-bg);
-      border-bottom: 1px solid var(--card-border);
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-    }
-    .config-row {
-      display: flex;
-      gap: 8px;
-      font-size: 12px;
-    }
-    .config-select, .config-input {
-      background: #090d13;
-      border: 1px solid var(--card-border);
-      border-radius: 6px;
-      color: var(--text);
-      padding: 4px 8px;
-      font-size: 12px;
-      outline: none;
-    }
-    .input-row {
-      display: flex;
-      gap: 8px;
-    }
-    .goal-input {
-      flex: 1;
-      background: #090d13;
-      border: 1px solid var(--card-border);
-      border-radius: 8px;
-      color: #fff;
-      padding: 10px 14px;
-      font-size: 13px;
-      font-family: inherit;
-      outline: none;
-      resize: none;
-      height: 48px;
-      transition: border-color 0.2s;
-    }
-    .goal-input:focus { border-color: var(--primary); }
-    .btn {
-      border: none;
-      border-radius: 8px;
-      font-weight: 600;
-      font-size: 12px;
-      padding: 0 16px;
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      transition: all 0.2s ease;
-    }
-    .btn-run {
-      background: var(--primary);
-      color: #fff;
-    }
-    .btn-run:hover { background: #71b4ff; }
-    .btn-stop {
-      background: rgba(248, 81, 73, 0.2);
-      border: 1px solid var(--danger);
-      color: var(--danger);
-      display: none;
-    }
-    .btn-stop:hover { background: var(--danger); color: #fff; }
-    /* Log & Stream View */
-    .stream-header {
-      padding: 8px 16px;
-      font-size: 12px;
-      font-weight: 600;
-      color: var(--text-muted);
-      border-bottom: 1px solid var(--card-border);
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      background: #0d121a;
-    }
-    .stream-log {
-      flex: 1;
-      padding: 16px;
-      overflow-y: auto;
-      font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, monospace;
-      font-size: 13px;
-      line-height: 1.6;
-      white-space: pre-wrap;
-      word-break: break-word;
-      user-select: text;
-    }
-    /* Tabs on the Right Side */
-    .tabs-bar {
-      display: flex;
-      background: var(--card-bg);
-      border-bottom: 1px solid var(--card-border);
-      padding: 0 8px;
-    }
-    .tab-btn {
-      background: transparent;
-      border: none;
-      color: var(--text-muted);
-      font-size: 12px;
-      font-weight: 600;
-      padding: 12px 14px;
-      cursor: pointer;
-      border-bottom: 2px solid transparent;
-      transition: all 0.2s ease;
-    }
-    .tab-btn.active {
-      color: var(--primary);
-      border-bottom: 2px solid var(--primary);
-    }
-    .tab-content {
-      flex: 1;
-      overflow-y: auto;
-      padding: 16px;
-      display: none;
-    }
-    .tab-content.active { display: block; }
-    /* Task Card */
-    .task-card {
-      background: var(--card-bg);
-      border: 1px solid var(--card-border);
-      border-radius: 8px;
-      padding: 12px;
-      margin-bottom: 10px;
-    }
-    .task-head {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      font-size: 13px;
-      font-weight: 600;
-      margin-bottom: 4px;
-    }
-    .task-badge {
-      font-size: 10px;
-      font-weight: 700;
-      text-transform: uppercase;
-      padding: 2px 6px;
-      border-radius: 10px;
-    }
-    .badge-pending { background: rgba(139, 148, 158, 0.2); color: var(--text-muted); }
-    .badge-in_progress { background: rgba(57, 197, 207, 0.2); color: var(--cyan); }
-    .badge-completed { background: rgba(63, 185, 80, 0.2); color: var(--success); }
-    .badge-blocked { background: rgba(248, 81, 73, 0.2); color: var(--danger); }
-    .badge-fits { background: rgba(63, 185, 80, 0.2); color: var(--success); }
-    .badge-tight { background: rgba(210, 153, 34, 0.2); color: var(--warning); }
-    .badge-toolarge { background: rgba(248, 81, 73, 0.2); color: var(--danger); }
-    .btn-sm {
-      padding: 3px 8px;
-      font-size: 11px;
-      font-weight: 600;
-      border-radius: 4px;
-      border: none;
-      cursor: pointer;
-      transition: background 0.2s;
-    }
-    .btn-use { background: var(--primary); color: #fff; }
-    .btn-use:hover { background: #71b4ff; }
-    .btn-del { background: rgba(248, 81, 73, 0.2); color: var(--danger); }
-    .btn-del:hover { background: var(--danger); color: #fff; }
-    .btn-ghost { background: #090d13; border: 1px solid var(--card-border); color: var(--text); }
-    .btn-ghost:hover { border-color: var(--primary); color: #fff; }
-    .filter-bar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
-    .filter-pill {
-      background: #090d13;
-      border: 1px solid var(--card-border);
-      color: var(--text-muted);
-      font-size: 11px;
-      font-weight: 600;
-      padding: 4px 10px;
-      border-radius: 14px;
-      cursor: pointer;
-      transition: all 0.15s ease;
-    }
-    .filter-pill.active {
-      background: var(--primary);
-      border-color: var(--primary);
-      color: #fff;
-    }
-    .badge-running { background: rgba(63, 185, 80, 0.2); color: var(--success); }
-    .badge-sleeping { background: rgba(188, 140, 255, 0.2); color: var(--purple); }
-    .badge-stopped { background: rgba(139, 148, 158, 0.2); color: var(--text-muted); }
-    .badge-error { background: rgba(248, 81, 73, 0.2); color: var(--danger); }
-    .form-field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
-    .form-field label { font-size: 11px; color: var(--text-muted); font-weight: 600; }
-    .btn-mic {
-      background: #090d13;
-      border: 1px solid var(--card-border);
-      color: var(--text);
-      padding: 0 12px;
-      min-width: 44px;
-      justify-content: center;
-    }
-    .btn-mic:hover { border-color: var(--cyan); color: var(--cyan); }
-    .btn-mic.recording {
-      background: rgba(248, 81, 73, 0.25);
-      border-color: var(--danger);
-      color: var(--danger);
-      animation: micPulse 1.1s infinite;
-    }
-    @keyframes micPulse {
-      0%, 100% { box-shadow: 0 0 0 0 rgba(248, 81, 73, 0.45); }
-      50% { box-shadow: 0 0 0 6px rgba(248, 81, 73, 0); }
-    }
-    .audio-card {
-      background: var(--card-bg);
-      border: 1px solid var(--card-border);
-      border-radius: 8px;
-      padding: 10px 12px;
-      margin-bottom: 10px;
-    }
-    .audio-card audio {
-      width: 100%;
-      height: 32px;
-      margin-top: 6px;
-    }
-    /* Screenshot Gallery */
-    .gallery-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-      gap: 12px;
-    }
-    .gallery-card {
-      background: var(--card-bg);
-      border: 1px solid var(--card-border);
-      border-radius: 6px;
-      overflow: hidden;
-      cursor: pointer;
-      transition: transform 0.2s;
-    }
-    .gallery-card:hover { transform: scale(1.03); }
-    .gallery-card img {
-      width: 100%;
-      height: 100px;
-      object-fit: cover;
-      display: block;
-    }
-    .gallery-card-info {
-      padding: 6px 8px;
-      font-size: 11px;
-      color: var(--text-muted);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-    /* Approval Modal */
-    .modal-overlay {
-      position: fixed;
-      top: 0; left: 0; right: 0; bottom: 0;
-      background: rgba(0, 0, 0, 0.75);
-      backdrop-filter: blur(6px);
-      -webkit-backdrop-filter: blur(6px);
-      display: none;
-      align-items: center;
-      justify-content: center;
-      z-index: 100;
-    }
-    .modal-card {
-      background: #161b22;
-      border: 2px solid var(--warning);
-      border-radius: 12px;
-      width: 520px;
-      max-width: 90%;
-      padding: 20px;
-      box-shadow: 0 10px 40px rgba(0,0,0,0.8);
-      animation: popIn 0.2s ease;
-    }
-    @keyframes popIn {
-      from { transform: scale(0.95); opacity: 0; }
-      to { transform: scale(1); opacity: 1; }
-    }
-    .modal-title {
-      font-size: 16px;
-      font-weight: 700;
-      color: var(--warning);
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      margin-bottom: 12px;
-    }
-    .modal-pre {
-      background: #090d13;
-      border: 1px solid var(--card-border);
-      border-radius: 6px;
-      padding: 10px;
-      font-family: ui-monospace, monospace;
-      font-size: 12px;
-      color: var(--text);
-      max-height: 200px;
-      overflow-y: auto;
-      margin-bottom: 16px;
-      white-space: pre-wrap;
-    }
-    .modal-actions {
-      display: flex;
-      justify-content: flex-end;
-      gap: 10px;
-    }
-    .btn-allow {
-      background: var(--success);
-      color: #000;
-      padding: 8px 18px;
-    }
-    .btn-deny {
-      background: var(--danger);
-      color: #fff;
-      padding: 8px 18px;
-    }
-    /* Hardware Report Card */
-    .report-box {
-      background: #090d13;
-      border: 1px solid var(--card-border);
-      border-radius: 8px;
-      padding: 16px;
-      font-family: ui-monospace, monospace;
-      font-size: 12px;
-      line-height: 1.6;
-      white-space: pre-wrap;
-      user-select: text;
-    }
-  </style>
+  <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
-  <!-- macOS Overlay Titlebar -->
-  <header class="titlebar">
-    <div class="title-left">
-      <div class="logo-badge">
-        <span class="robot">🤖</span>
-        <span>Dex</span>
-      </div>
-      <span style="font-size: 12px; color: var(--text-muted);">v0.1.0 · macOS Native Agent Harness</span>
-    </div>
-
-    <div class="title-right">
-      <div class="mode-pill">
-        <button id="btn-autopilot" class="mode-btn active" onclick="setMode('autopilot')">🚀 Autopilot</button>
-        <button id="btn-safe" class="mode-btn" onclick="setMode('safe')">🛡️ Safe</button>
-        <button id="btn-plan" class="mode-btn" onclick="setMode('plan')">📝 Plan</button>
-      </div>
-    </div>
-  </header>
-
-  <!-- Main Body -->
-  <main class="app-body">
-    <!-- Left Column: Agent Stream & Controls -->
-    <section class="stream-column">
-      <div class="goal-panel">
-        <div class="config-row">
-          <select id="sel-provider" class="config-select" onchange="onProviderChange()">
-            <option value="ollama">Ollama (Local LLM)</option>
-            <option value="openai">OpenAI / Compatible API</option>
-          </select>
-          <input id="input-model" class="config-input" type="text" value="qwen2.5:7b" placeholder="Model name (e.g. qwen2.5:7b, gpt-4o)" style="flex: 1;" />
-          <input id="input-apibase" class="config-input" type="text" placeholder="API Base URL (optional)" style="flex: 1;" />
-        </div>
-        <div class="input-row">
-          <textarea id="input-goal" class="goal-input" placeholder="Enter objective for Dex (e.g., 'Inspect repo structure, build tests, and fix clippy warnings')..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();runGoal();}"></textarea>
-          <button id="btn-mic" class="btn btn-mic" title="Push-to-Talk: click to record voice objective" onclick="toggleVoiceRecording()">🎤</button>
-          <button id="btn-run" class="btn btn-run" onclick="runGoal()">▶ Run</button>
-          <button id="btn-stop" class="btn btn-stop" onclick="stopGoal()">⏹ Stop</button>
-        </div>
-        <div id="voice-status-bar" style="display: none; font-size: 11px; color: var(--danger); align-items: center; gap: 8px;">
-          <span>🔴 Recording voice...</span>
-          <span id="voice-db-badge" style="color: var(--text-muted);">-60.0 dB</span>
-        </div>
+  <div class="app-shell">
+    <!-- 1. Integrated macOS Overlay Titlebar (40px, 78px traffic-light clearance) -->
+    <header class="titlebar" data-tauri-drag-region>
+      <div class="titlebar-left" data-tauri-drag-region>
+        <button id="btn-toggle-sidebar" class="icon-btn titlebar-btn" title="Toggle Sidebar (Cmd+\)" onclick="DexApp.toggleSidebar()">
+          <i data-icon="panelLeft" data-icon-size="15"></i>
+        </button>
+        <span id="titlebar-view-title" class="titlebar-view-title">Agent</span>
+        <span id="agent-status-pill" class="agent-status-pill">
+          <span class="status-dot"></span>
+          <span id="agent-status-text">Idle</span>
+        </span>
       </div>
 
-      <div class="stream-header">
-        <span>⚡ REAL-TIME THOUGHT STREAM & EXECUTION TRACE</span>
-        <button style="background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 11px;" onclick="clearStream()">🧹 Clear</button>
+      <div class="titlebar-right">
+        <div class="segmented-control" role="group" aria-label="Execution Mode">
+          <button id="mode-btn-autopilot" class="seg-btn active" onclick="DexApp.setMode('autopilot')">Autopilot</button>
+          <button id="mode-btn-safe" class="seg-btn" onclick="DexApp.setMode('safe')">Safe</button>
+          <button id="mode-btn-plan" class="seg-btn" onclick="DexApp.setMode('plan')">Plan</button>
+        </div>
+        <button id="btn-toggle-inspector" class="icon-btn titlebar-btn" title="Toggle Inspector (Cmd+I)" onclick="DexApp.toggleInspector()">
+          <i data-icon="panelRight" data-icon-size="15"></i>
+        </button>
       </div>
+    </header>
 
-      <div id="stream-log" class="stream-log">✨ Dex is ready. Type an objective above or press Option+Space to show/hide this window.</div>
-    </section>
-
-    <!-- Right Column: Inspector Tabs -->
-    <section class="side-column">
-      <nav class="tabs-bar">
-        <button class="tab-btn active" onclick="openTab('tab-tasks')">📋 TaskBoard</button>
-        <button class="tab-btn" onclick="openTab('tab-subagents')">🤖 Subagents</button>
-        <button class="tab-btn" onclick="openTab('tab-vision')">👁️ Vision</button>
-        <button class="tab-btn" onclick="openTab('tab-audio-docs')">🎙️ Audio &amp; Docs</button>
-        <button class="tab-btn" onclick="openTab('tab-models')">🧠 Models</button>
-        <button class="tab-btn" onclick="openTab('tab-extensions')">🧩 Extensions</button>
-        <button class="tab-btn" onclick="openTab('tab-cookbook')">🖥️ Cookbook</button>
-      </nav>
-
-      <!-- Tab: Tasks -->
-      <div id="tab-tasks" class="tab-content active">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-          <h4 style="font-size: 13px; color: var(--primary);">Active Project Graph (.dex/tasks.json)</h4>
-          <button style="background: none; border: 1px solid var(--card-border); color: var(--text-muted); padding: 2px 8px; border-radius: 4px; font-size: 11px; cursor: pointer;" onclick="refreshTasks()">🔄 Refresh</button>
+    <!-- 2. 3-Zone Workspace: Left Sidebar | Main Stage | Right Collapsible Inspector -->
+    <div class="workspace-shell">
+      <!-- Left Collapsible Sidebar -->
+      <aside id="sidebar" class="sidebar">
+        <div class="sidebar-brand">
+          <span class="brand-mark"><i data-icon="dexLogo" data-icon-size="15"></i></span>
+          <span class="brand-name">Dex</span>
+          <span class="brand-version">v0.1.0</span>
         </div>
-        <div id="tasks-list">
-          <p style="color: var(--text-muted); font-size: 12px;">No active tasks found in .dex/tasks.json.</p>
-        </div>
-      </div>
 
-      <!-- Tab: Subagents -->
-      <div id="tab-subagents" class="tab-content">
-        <h4 style="font-size: 13px; color: var(--primary); margin-bottom: 12px;">Concurrent Subagent Orbits</h4>
-        <div id="subagents-list">
-          <p style="color: var(--text-muted); font-size: 12px;">No concurrent subagents active. When `spawn_subagent` executes, child processes will appear here.</p>
-        </div>
-      </div>
+        <nav class="sidebar-nav" aria-label="Primary Navigation">
+          <div class="nav-section-label">Workspace</div>
+          <button class="nav-item active" data-view="view-agent" title="Agent" onclick="DexApp.navigate('view-agent')">
+            <i data-icon="terminal" data-icon-size="15"></i>
+            <span class="nav-label">Agent</span>
+          </button>
 
-      <!-- Tab: Vision & Screenshots -->
-      <div id="tab-vision" class="tab-content">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-          <h4 style="font-size: 13px; color: var(--primary);">Desktop & Browser Perception Previews</h4>
-          <button style="background: none; border: 1px solid var(--card-border); color: var(--text-muted); padding: 2px 8px; border-radius: 4px; font-size: 11px; cursor: pointer;" onclick="refreshScreenshots()">🔄 Refresh</button>
-        </div>
-        <div id="gallery-container" class="gallery-grid">
-          <p style="color: var(--text-muted); font-size: 12px;">No screenshots captured yet.</p>
-        </div>
-      </div>
+          <div class="nav-section-label">Creative Studios</div>
+          <button class="nav-item" data-view="view-media" title="Media Studio" onclick="DexApp.navigate('view-media')">
+            <i data-icon="image" data-icon-size="15"></i>
+            <span class="nav-label">Media Studio</span>
+          </button>
+          <button class="nav-item" data-view="view-audio" title="Audio & Docs" onclick="DexApp.navigate('view-audio')">
+            <i data-icon="mic" data-icon-size="15"></i>
+            <span class="nav-label">Audio &amp; Docs</span>
+          </button>
+          <button class="nav-item" data-view="view-3d" title="3D & Game Studio" onclick="DexApp.navigate('view-3d')">
+            <i data-icon="cube" data-icon-size="15"></i>
+            <span class="nav-label">3D &amp; Game Studio</span>
+          </button>
 
-      <!-- Tab: Cookbook -->
-      <div id="tab-cookbook" class="tab-content">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-          <h4 style="font-size: 13px; color: var(--primary);">Hardware Detection & Model Sizing</h4>
-          <button style="background: none; border: 1px solid var(--card-border); color: var(--text-muted); padding: 2px 8px; border-radius: 4px; font-size: 11px; cursor: pointer;" onclick="refreshCookbook()">🔄 Detect</button>
-        </div>
-        <div id="cookbook-report" class="report-box">Loading hardware specifications and model tier recommendations...</div>
-      </div>
+          <div class="nav-section-label">System</div>
+          <button class="nav-item" data-view="view-models" title="Models Hub" onclick="DexApp.navigate('view-models')">
+            <i data-icon="cpu" data-icon-size="15"></i>
+            <span class="nav-label">Models Hub</span>
+          </button>
+          <button class="nav-item" data-view="view-extensions" title="Extensions" onclick="DexApp.navigate('view-extensions')">
+            <i data-icon="puzzle" data-icon-size="15"></i>
+            <span class="nav-label">Extensions</span>
+          </button>
+          <button class="nav-item" data-view="view-cookbook" title="Hardware Cookbook" onclick="DexApp.navigate('view-cookbook')">
+            <i data-icon="gauge" data-icon-size="15"></i>
+            <span class="nav-label">Hardware Cookbook</span>
+          </button>
+        </nav>
 
-      <!-- Tab: Models Hub -->
-      <div id="tab-models" class="tab-content">
-        <!-- Live Download Progress Card -->
-        <div id="download-progress-box" style="display: none; background: #0f141c; border: 1px solid var(--primary); border-radius: 8px; padding: 12px; margin-bottom: 16px;">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-            <span style="font-size: 13px; font-weight: 600; color: var(--primary);" id="dl-title">Downloading Model...</span>
-            <span style="font-size: 12px; color: var(--text-muted);" id="dl-speed">0.0 MB/s</span>
+        <div class="sidebar-footer">
+          <div class="sidebar-footer-details">
+            <div class="sidebar-metric-row">
+              <span>Memory</span>
+              <span id="sidebar-ram-metric" class="sidebar-metric-val">Detecting...</span>
+            </div>
+            <div class="sidebar-metric-row">
+              <span>Context</span>
+              <span id="sidebar-ctx-metric" class="sidebar-metric-val">0 tok</span>
+            </div>
           </div>
-          <div style="width: 100%; height: 8px; background: #161b22; border-radius: 4px; overflow: hidden; margin-bottom: 8px;">
-            <div id="dl-bar" style="width: 0%; height: 100%; background: var(--primary); transition: width 0.2s;"></div>
+          <button class="sidebar-model-pill" title="Configure Provider & Model" onclick="DexApp.openModelConfig()">
+            <i data-icon="cpu" data-icon-size="13"></i>
+            <span id="sidebar-model-label">ollama / qwen2.5:7b</span>
+          </button>
+        </div>
+      </aside>
+
+      <!-- Main Stage (Full Width per active view) -->
+      <main class="main-stage">
+        <!-- ================================================================
+             VIEW 1: AGENT (Modern Chat + Collapsible Tool Cards + Composer)
+             ================================================================ -->
+        <section id="view-agent" class="view-panel active">
+          <div class="agent-view">
+            <div id="agent-feed-scroll" class="agent-feed-scroll">
+              <div id="agent-feed" class="agent-feed-inner">
+                <div id="agent-empty" class="agent-empty">
+                  <div class="agent-empty-emblem">
+                    <i data-icon="dexLogo" data-icon-size="24"></i>
+                  </div>
+                  <h2>What should Dex build or inspect?</h2>
+                  <p>Local-first autonomous harness with surgical code tools, browser/desktop control, audio, visual media, 3D geometry, and MCP extensions.</p>
+                  <div class="quick-chips">
+                    <button class="quick-chip" onclick="DexApp.useQuickPrompt('Inspect the repository structure, run cargo test, and summarize any warnings.')">
+                      <i data-icon="terminal" data-icon-size="13"></i>
+                      <span>Inspect repo &amp; run tests</span>
+                    </button>
+                    <button class="quick-chip" onclick="DexApp.useQuickPrompt('Generate a stylized 3D game asset workflow: create a concept image, inspect it, and prepare it for 3D conversion.')">
+                      <i data-icon="cube" data-icon-size="13"></i>
+                      <span>Generate 3D asset</span>
+                    </button>
+                    <button class="quick-chip" onclick="DexApp.useQuickPrompt('Find PDF or image documents in the workspace and analyze them using OCR / doc_parse.')">
+                      <i data-icon="scan" data-icon-size="13"></i>
+                      <span>Analyze PDF with OCR</span>
+                    </button>
+                    <button class="quick-chip" onclick="DexApp.navigate('view-cookbook')">
+                      <i data-icon="gauge" data-icon-size="13"></i>
+                      <span>Inspect host hardware</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Floating Bottom Composer -->
+            <div class="composer-dock">
+              <div class="composer-box">
+                <!-- Model & Provider Popover -->
+                <div id="model-popover" class="model-popover">
+                  <div class="card-header" style="margin-bottom: 2px;">
+                    <span class="card-title"><i data-icon="sliders" data-icon-size="14"></i> Inference Configuration</span>
+                    <button class="icon-btn" onclick="DexApp.closeModelPopover()"><i data-icon="x" data-icon-size="14"></i></button>
+                  </div>
+                  <div class="field">
+                    <label class="field-label" for="sel-provider">Provider</label>
+                    <select id="sel-provider" class="select" onchange="DexApp.onProviderChange()">
+                      <option value="ollama">Ollama (Local :11434)</option>
+                      <option value="lmstudio">LM Studio / Bionic (:1234)</option>
+                      <option value="openai">OpenAI / Compatible API</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label class="field-label" for="input-model">Model Identifier</label>
+                    <input id="input-model" class="input mono" type="text" value="qwen2.5:7b" placeholder="qwen2.5:7b, gpt-4o" oninput="DexApp.syncModelLabels()" />
+                  </div>
+                  <div class="field">
+                    <label class="field-label" for="input-apibase">API Base URL (optional)</label>
+                    <input id="input-apibase" class="input mono" type="text" placeholder="http://127.0.0.1:11434" />
+                  </div>
+                  <div class="row" style="justify-content: space-between; padding-top: 4px;">
+                    <button class="btn btn-sm btn-ghost" onclick="DexApp.closeModelPopover(); DexApp.navigate('view-models');">Open Models Hub</button>
+                    <button class="btn btn-sm btn-primary" onclick="DexApp.closeModelPopover()">Done</button>
+                  </div>
+                </div>
+
+                <textarea
+                  id="input-goal"
+                  class="composer-textarea"
+                  rows="1"
+                  placeholder="Describe an objective for Dex... (Cmd+Enter to run)"
+                ></textarea>
+
+                <div class="composer-toolbar">
+                  <div class="composer-left">
+                    <button id="btn-model-pill" class="model-trigger-pill" onclick="DexApp.toggleModelPopover()">
+                      <i data-icon="cpu" data-icon-size="13"></i>
+                      <span id="composer-model-label">ollama / qwen2.5:7b</span>
+                      <i data-icon="chevronDown" data-icon-size="12"></i>
+                    </button>
+                    <button id="btn-mic" class="mic-btn" title="Push-to-Talk Voice Objective" onclick="DexApp.toggleVoiceRecording()">
+                      <i data-icon="mic" data-icon-size="14"></i>
+                    </button>
+                    <span id="voice-status-bar" class="voice-meter">
+                      <span class="status-dot" style="background: var(--err-fg);"></span>
+                      <span id="voice-db-badge">-60.0 dB</span>
+                    </span>
+                  </div>
+
+                  <div class="composer-right">
+                    <button id="btn-clear-chat" class="btn btn-sm btn-ghost" title="Clear conversation" onclick="DexApp.clearAgentFeed()">
+                      <i data-icon="trash" data-icon-size="13"></i>
+                      <span>Clear</span>
+                    </button>
+                    <span class="kbd-hint">Cmd+Enter</span>
+                    <button id="btn-run" class="send-btn" onclick="DexApp.runGoal()">
+                      <i data-icon="send" data-icon-size="13"></i>
+                      <span>Run</span>
+                    </button>
+                    <button id="btn-stop" class="stop-btn" onclick="DexApp.stopGoal()">
+                      <i data-icon="square" data-icon-size="11"></i>
+                      <span>Stop</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
-          <div style="display: flex; justify-content: space-between; align-items: center;">
-            <span style="font-size: 11px; color: var(--text-muted);" id="dl-stats">0 MB / 0 MB (0%)</span>
-            <button class="btn btn-deny" style="padding: 2px 10px; font-size: 11px;" onclick="cancelActiveDownload()">Cancel</button>
+        </section>
+
+        <!-- ================================================================
+             VIEW 2: MEDIA STUDIO (Image Gen, Workflows, Fast Ops, Gallery)
+             ================================================================ -->
+        <section id="view-media" class="view-panel">
+          <div class="view-scroll">
+            <div class="view-container">
+              <div class="view-header">
+                <div>
+                  <h1 class="view-title">Media Studio</h1>
+                  <p class="view-subtitle">Local MLX / ComfyUI / HTTP image generation, pure-Rust processing, and FFprobe video inspection.</p>
+                </div>
+                <div class="view-header-actions">
+                  <button class="btn btn-sm" onclick="DexApp.refreshComfyWorkflows(); DexApp.refreshVisualMedia();">
+                    <i data-icon="refresh" data-icon-size="13"></i>
+                    <span>Refresh</span>
+                  </button>
+                </div>
+              </div>
+
+              <!-- Live Generation Progress -->
+              <div id="media-progress-box" class="progress-card">
+                <div class="item-card-row">
+                  <span id="media-progress-label" class="card-title">Generating visual media...</span>
+                  <span id="media-progress-steps" class="mono card-meta">0 / 20</span>
+                </div>
+                <div class="progress-track">
+                  <div id="media-progress-bar" class="progress-fill accent"></div>
+                </div>
+              </div>
+
+              <div class="grid-2">
+                <!-- Generator Form -->
+                <div class="card">
+                  <div class="card-header">
+                    <span class="card-title"><i data-icon="sparkles" data-icon-size="14"></i> Image Generator</span>
+                  </div>
+                  <div class="list-stack" style="gap: 10px;">
+                    <div class="field">
+                      <label class="field-label" for="media-prompt-input">Prompt</label>
+                      <textarea id="media-prompt-input" class="textarea" placeholder="Describe the scene, lighting, and composition..."></textarea>
+                    </div>
+                    <div class="field">
+                      <label class="field-label" for="media-neg-input">Negative Prompt (optional)</label>
+                      <input id="media-neg-input" class="input" type="text" placeholder="blurry, watermark, low quality" />
+                    </div>
+                    <div class="grid-3">
+                      <div class="field">
+                        <label class="field-label" for="media-res-select">Resolution</label>
+                        <select id="media-res-select" class="select">
+                          <option value="1024x1024">1024 x 1024</option>
+                          <option value="768x768">768 x 768</option>
+                          <option value="512x512">512 x 512</option>
+                          <option value="1280x720">1280 x 720</option>
+                          <option value="720x1280">720 x 1280</option>
+                        </select>
+                      </div>
+                      <div class="field">
+                        <label class="field-label" for="media-steps-input">Steps</label>
+                        <input id="media-steps-input" class="input mono" type="number" value="20" min="1" max="150" />
+                      </div>
+                      <div class="field">
+                        <label class="field-label" for="media-backend-select">Backend</label>
+                        <select id="media-backend-select" class="select">
+                          <option value="auto">Auto</option>
+                          <option value="mlx">MLX</option>
+                          <option value="comfyui">ComfyUI</option>
+                          <option value="http">HTTP / OpenAI</option>
+                        </select>
+                      </div>
+                    </div>
+                    <div class="row">
+                      <div class="field" style="flex: 1;">
+                        <label class="field-label" for="media-workflow-select">ComfyUI Workflow</label>
+                        <select id="media-workflow-select" class="select mono">
+                          <option value="txt2img_default.json">txt2img_default.json</option>
+                        </select>
+                      </div>
+                      <button id="btn-generate-image" class="btn btn-primary" style="margin-top: 18px;" onclick="DexApp.generateImageFromUi()">
+                        <i data-icon="sparkles" data-icon-size="14"></i>
+                        <span>Generate</span>
+                      </button>
+                    </div>
+                    <div id="media-gen-status" class="card-meta mono"></div>
+                  </div>
+                </div>
+
+                <!-- Local Asset Utilities -->
+                <div class="card">
+                  <div class="card-header">
+                    <span class="card-title"><i data-icon="wrench" data-icon-size="14"></i> Local Asset Utilities</span>
+                    <span class="badge">Pure-Rust / FFprobe</span>
+                  </div>
+                  <div class="list-stack" style="gap: 10px;">
+                    <div class="field">
+                      <label class="field-label" for="media-asset-path">Image or Video Path</label>
+                      <input id="media-asset-path" class="input mono" type="text" placeholder="/path/to/image.png or /path/to/clip.mp4" />
+                    </div>
+                    <div class="row-wrap">
+                      <button class="btn btn-sm" onclick="DexApp.upscaleAssetPathFromUi()">
+                        <i data-icon="maximize" data-icon-size="13"></i>
+                        <span>Upscale 2x</span>
+                      </button>
+                      <button class="btn btn-sm" onclick="DexApp.convertAssetWebpFromUi()">
+                        <i data-icon="image" data-icon-size="13"></i>
+                        <span>Convert WebP</span>
+                      </button>
+                      <button class="btn btn-sm" onclick="DexApp.inspectVideoFromUi()">
+                        <i data-icon="film" data-icon-size="13"></i>
+                        <span>Inspect Video</span>
+                      </button>
+                    </div>
+                    <pre id="media-utility-output" class="code-block" style="display: none; max-height: 220px;"></pre>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Visual Gallery -->
+              <div class="card-subtle">
+                <div class="card-header">
+                  <span class="card-title"><i data-icon="image" data-icon-size="14"></i> Visual Gallery</span>
+                  <span class="card-meta mono">.dex/media/images &amp; video</span>
+                </div>
+                <div id="visual-media-gallery" class="media-gallery">
+                  <div class="empty-note">No generated images or videos found.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ================================================================
+             VIEW 3: AUDIO & DOCS (TTS, Audio Player, Vision OCR, Doc Parser)
+             ================================================================ -->
+        <section id="view-audio" class="view-panel">
+          <div class="view-scroll">
+            <div class="view-container">
+              <div class="view-header">
+                <div>
+                  <h1 class="view-title">Audio &amp; Documents</h1>
+                  <p class="view-subtitle">Text-to-speech synthesis, native recordings playback, Apple Vision OCR, and PDF/Office Markdown extraction.</p>
+                </div>
+                <div class="view-header-actions">
+                  <button class="btn btn-sm" onclick="DexApp.refreshAudioMedia()">
+                    <i data-icon="refresh" data-icon-size="13"></i>
+                    <span>Refresh Audio</span>
+                  </button>
+                </div>
+              </div>
+
+              <div class="grid-2">
+                <!-- TTS Card -->
+                <div class="card">
+                  <div class="card-header">
+                    <span class="card-title"><i data-icon="volume" data-icon-size="14"></i> Text-to-Speech</span>
+                    <span class="badge">Sidecar / macOS Say</span>
+                  </div>
+                  <div class="list-stack" style="gap: 10px;">
+                    <div class="field">
+                      <label class="field-label" for="tts-text-input">Spoken Text</label>
+                      <input id="tts-text-input" class="input" type="text" placeholder="Type text to synthesize into audio..." onkeydown="if(event.key==='Enter')DexApp.speakTextFromUi();" />
+                    </div>
+                    <div class="row">
+                      <input id="tts-voice-input" class="input" type="text" placeholder="Voice (optional: Monica, Samantha, alloy)" style="flex: 1;" />
+                      <button class="btn btn-primary" onclick="DexApp.speakTextFromUi()">
+                        <i data-icon="play" data-icon-size="13"></i>
+                        <span>Synthesize</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- OCR & Document Parser Card -->
+                <div class="card">
+                  <div class="card-header">
+                    <span class="card-title"><i data-icon="scan" data-icon-size="14"></i> OCR &amp; Document Reader</span>
+                    <span class="badge">Apple Vision / Docling</span>
+                  </div>
+                  <div class="list-stack" style="gap: 10px;">
+                    <div class="field">
+                      <label class="field-label" for="doc-path-input">Document or Image Path</label>
+                      <input id="doc-path-input" class="input mono" type="text" placeholder="/path/to/screenshot.png or /path/to/report.pdf" />
+                    </div>
+                    <div class="row-wrap">
+                      <button class="btn btn-sm btn-primary" onclick="DexApp.runOcrFromUi()">
+                        <i data-icon="scan" data-icon-size="13"></i>
+                        <span>Run OCR</span>
+                      </button>
+                      <button class="btn btn-sm" onclick="DexApp.parseDocFromUi()">
+                        <i data-icon="fileText" data-icon-size="13"></i>
+                        <span>Parse Document</span>
+                      </button>
+                      <button id="btn-send-doc-agent" class="btn btn-sm" style="display: none;" onclick="DexApp.sendDocToAgent()">
+                        <i data-icon="arrowUpRight" data-icon-size="13"></i>
+                        <span>Send to Agent</span>
+                      </button>
+                    </div>
+                    <div id="doc-result-meta" class="card-meta mono"></div>
+                    <pre id="doc-result-box" class="code-block" style="display: none; max-height: 220px;"></pre>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Audio Gallery -->
+              <div class="card-subtle">
+                <div class="card-header">
+                  <span class="card-title"><i data-icon="mic" data-icon-size="14"></i> Audio Library</span>
+                  <span class="card-meta mono">.dex/media/audio/</span>
+                </div>
+                <div id="audio-gallery-list" class="audio-list">
+                  <div class="empty-note">No audio files yet.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ================================================================
+             VIEW 4: 3D & GAME STUDIO (Full-Width WebGL2 Viewer + Blender/Unity)
+             ================================================================ -->
+        <section id="view-3d" class="view-panel">
+          <div class="view-scroll">
+            <div class="view-container">
+              <div class="view-header">
+                <div>
+                  <h1 class="view-title">3D &amp; Game Studio</h1>
+                  <p class="view-subtitle">Offline WebGL2 glTF 2.0 viewer, pure-Rust geometry analysis, image-to-3D sidecars, headless Blender, and Unity bridge.</p>
+                </div>
+                <div class="view-header-actions">
+                  <span id="blender-status-badge" class="badge">Blender: checking</span>
+                  <button class="btn btn-sm" onclick="DexApp.createSample3dCubeFromUi()">
+                    <i data-icon="cube" data-icon-size="13"></i>
+                    <span>Generate Sample Cube</span>
+                  </button>
+                  <button class="btn btn-sm" onclick="DexApp.refresh3dModels(); DexApp.refresh3dSourceImages();">
+                    <i data-icon="refresh" data-icon-size="13"></i>
+                    <span>Refresh</span>
+                  </button>
+                </div>
+              </div>
+
+              <!-- Full-Width Offline WebGL2 Stage -->
+              <div class="studio3d-stage">
+                <canvas id="glb-canvas"></canvas>
+                <div id="viewer-3d-hud" class="viewer-hud">
+                  <div style="font-weight: 600;">Offline WebGL2 GLB Viewer</div>
+                  <div style="color: var(--text-secondary);">Drag to orbit · Scroll to zoom · Select a .glb asset or generate a sample cube</div>
+                </div>
+                <div class="viewer-controls-overlay">
+                  <div class="viewer-controls-group">
+                    <button id="btn-3d-wireframe" class="btn btn-sm btn-ghost" onclick="DexApp.toggle3dWireframe()">
+                      <i data-icon="wireframe" data-icon-size="13"></i>
+                      <span>Wireframe: Off</span>
+                    </button>
+                    <button id="btn-3d-grid" class="btn btn-sm btn-ghost" onclick="DexApp.toggle3dGrid()">
+                      <i data-icon="grid" data-icon-size="13"></i>
+                      <span>Grid: On</span>
+                    </button>
+                    <button class="btn btn-sm btn-ghost" onclick="DexApp.reset3dCamera()">
+                      <i data-icon="rotateCcw" data-icon-size="13"></i>
+                      <span>Reset Camera</span>
+                    </button>
+                  </div>
+                  <div class="viewer-controls-group">
+                    <button class="btn btn-sm btn-ghost" onclick="DexApp.sendSelected3dToAgent()">
+                      <i data-icon="arrowUpRight" data-icon-size="13"></i>
+                      <span>Send to Agent</span>
+                    </button>
+                    <button class="btn btn-sm btn-ghost" onclick="DexApp.revealSelected3dInFinder()">
+                      <i data-icon="folder" data-icon-size="13"></i>
+                      <span>Finder</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Game-Ready Warnings Strip -->
+              <div id="viewer-3d-warnings" class="card-subtle" style="display: none; border-color: var(--warn-border); background: var(--warn-bg); color: var(--warn-fg); font-size: 12px;"></div>
+
+              <!-- Live 3D Generation Progress -->
+              <div id="gen3d-progress-box" class="progress-card">
+                <div class="item-card-row">
+                  <span id="gen3d-progress-label" class="card-title">Reconstructing 3D mesh...</span>
+                  <span id="gen3d-progress-steps" class="mono card-meta">0 / 3</span>
+                </div>
+                <div class="progress-track">
+                  <div id="gen3d-progress-bar" class="progress-fill accent"></div>
+                </div>
+              </div>
+
+              <div class="grid-2">
+                <!-- Image-to-3D Generator -->
+                <div class="card">
+                  <div class="card-header">
+                    <span class="card-title"><i data-icon="cube" data-icon-size="14"></i> Image to 3D (.glb)</span>
+                  </div>
+                  <div class="list-stack" style="gap: 10px;">
+                    <div class="grid-2">
+                      <div class="field">
+                        <label class="field-label" for="gen3d-image-select">From Media Studio</label>
+                        <select id="gen3d-image-select" class="select" onchange="DexApp.onSelect3dSourceImage()">
+                          <option value="">Select generated image...</option>
+                        </select>
+                      </div>
+                      <div class="field">
+                        <label class="field-label" for="gen3d-image-path">Local Image Path</label>
+                        <input id="gen3d-image-path" class="input mono" type="text" placeholder="/path/to/concept.png" />
+                      </div>
+                    </div>
+                    <div class="field">
+                      <label class="field-label" for="gen3d-prompt">Optional Prompt</label>
+                      <input id="gen3d-prompt" class="input" type="text" placeholder="Stylized sci-fi crate, game-ready PBR" />
+                    </div>
+                    <div class="row-wrap">
+                      <select id="gen3d-backend" class="select" style="flex: 1; min-width: 140px;">
+                        <option value="auto">Auto (TRELLIS 2 / Sidecar)</option>
+                        <option value="trellis">TRELLIS 2 (8195)</option>
+                        <option value="hunyuan3d">Hunyuan3D (8196)</option>
+                        <option value="triposr">TripoSR (8197)</option>
+                        <option value="http">HTTP (DEX_3D_ENDPOINT)</option>
+                      </select>
+                      <select id="gen3d-texres" class="select" style="width: 112px;">
+                        <option value="1024">Tex 1024</option>
+                        <option value="512">Tex 512</option>
+                        <option value="2048">Tex 2048</option>
+                      </select>
+                      <label class="checkbox-label">
+                        <input type="checkbox" id="gen3d-rmbg" checked /> Remove BG
+                      </label>
+                      <button id="btn-gen3d" class="btn btn-primary" onclick="DexApp.generate3dFromUi()">
+                        <i data-icon="sparkles" data-icon-size="13"></i>
+                        <span>Generate .glb</span>
+                      </button>
+                    </div>
+                    <div id="gen3d-status" class="card-meta mono"></div>
+                  </div>
+                </div>
+
+                <!-- Blender & Unity Pipeline -->
+                <div class="card">
+                  <div class="card-header">
+                    <span class="card-title"><i data-icon="gamepad" data-icon-size="14"></i> Blender &amp; Unity Pipeline</span>
+                    <span id="selected-3d-label" class="card-meta mono" style="max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">No model selected</span>
+                  </div>
+                  <div class="list-stack" style="gap: 10px;">
+                    <div class="row-wrap">
+                      <select id="blender-target-fmt" class="select" style="width: 120px;">
+                        <option value="fbx">FBX (Unity)</option>
+                        <option value="glb">GLB (LOD)</option>
+                        <option value="obj">OBJ</option>
+                      </select>
+                      <input id="blender-decimate-ratio" class="input mono" type="number" step="0.05" min="0.05" max="1.0" value="0.5" style="width: 78px;" title="Decimate ratio (0.05-1.0)" />
+                      <button class="btn btn-sm" onclick="DexApp.convertSelected3dWithBlender()">
+                        <i data-icon="layers" data-icon-size="13"></i>
+                        <span>Decimate / Convert</span>
+                      </button>
+                      <button class="btn btn-sm" onclick="DexApp.renderSelected3dPreview()">
+                        <i data-icon="camera" data-icon-size="13"></i>
+                        <span>Render Preview</span>
+                      </button>
+                    </div>
+                    <div class="grid-2">
+                      <input id="unity-project-path" class="input mono" type="text" placeholder="/path/to/UnityProject" />
+                      <input id="unity-subdir-input" class="input mono" type="text" value="Assets/DexGenerated" placeholder="Assets/DexGenerated" />
+                    </div>
+                    <div class="row-wrap">
+                      <label class="checkbox-label">
+                        <input type="checkbox" id="unity-overwrite" /> Overwrite
+                      </label>
+                      <button class="btn btn-sm" onclick="DexApp.inspectUnityProjectFromUi()">
+                        <i data-icon="search" data-icon-size="13"></i>
+                        <span>Inspect Unity</span>
+                      </button>
+                      <button class="btn btn-sm btn-primary" onclick="DexApp.exportSelected3dToUnity()">
+                        <i data-icon="upload" data-icon-size="13"></i>
+                        <span>Export to Unity</span>
+                      </button>
+                    </div>
+                    <pre id="studio3d-action-output" class="code-block" style="display: none; max-height: 140px;"></pre>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 3D Models Library -->
+              <div class="card-subtle">
+                <div class="card-header">
+                  <span class="card-title"><i data-icon="cube" data-icon-size="14"></i> 3D Models Library</span>
+                  <span class="card-meta mono">.dex/media/3d/</span>
+                </div>
+                <div id="models-3d-gallery" class="model3d-grid">
+                  <div class="empty-note">No 3D models yet. Click "Generate Sample Cube" above to inspect one in WebGL2.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ================================================================
+             VIEW 5: MODELS HUB (Bionic / LM Studio Style: Library + Explore)
+             ================================================================ -->
+        <section id="view-models" class="view-panel">
+          <div class="models-hub-shell">
+            <!-- Top Header with Segmented Switcher -->
+            <div class="models-hub-topbar">
+              <div class="row" style="gap: 14px;">
+                <h1 class="view-title">Models Hub</h1>
+                <div class="segmented-control" role="tablist" aria-label="Models Hub Mode">
+                  <button id="models-tab-library" class="seg-btn active" onclick="DexApp.switchModelsTab('library')">Library</button>
+                  <button id="models-tab-explore" class="seg-btn" onclick="DexApp.switchModelsTab('explore')">Explore</button>
+                </div>
+              </div>
+
+              <div class="row-wrap" id="models-topbar-actions">
+                <button class="btn btn-sm" onclick="DexApp.toggleModelsDrawer('ollama')">
+                  <i data-icon="download" data-icon-size="13"></i>
+                  <span>Pull Ollama</span>
+                </button>
+                <button class="btn btn-sm" onclick="DexApp.toggleModelsDrawer('import')">
+                  <i data-icon="upload" data-icon-size="13"></i>
+                  <span>Import</span>
+                </button>
+                <button class="btn btn-sm" onclick="DexApp.refreshModelsLibrary()">
+                  <i data-icon="refresh" data-icon-size="13"></i>
+                  <span>Rescan</span>
+                </button>
+              </div>
+            </div>
+
+            <!-- Active Download Progress Banner (shared across Explore & Library) -->
+            <div id="download-progress-box" class="progress-card" style="margin: 12px 24px 0 24px;">
+              <div class="item-card-row">
+                <span id="dl-title" class="card-title">Downloading model...</span>
+                <span id="dl-speed" class="mono card-meta">0.0 MB/s</span>
+              </div>
+              <div class="progress-track">
+                <div id="dl-bar" class="progress-fill accent"></div>
+              </div>
+              <div class="item-card-row">
+                <span id="dl-stats" class="mono card-meta">0 MB / 0 MB (0%)</span>
+                <button class="btn btn-sm btn-danger" onclick="DexApp.cancelActiveDownload()">Cancel</button>
+              </div>
+            </div>
+
+            <!-- ============================================================
+                 SUB-VIEW A: LIBRARY (Multi-Folder MLX / GGUF / Ollama / PT)
+                 ============================================================ -->
+            <div id="models-sub-library" class="models-subview active">
+              <div class="view-scroll" style="padding-top: 16px;">
+                <div class="view-container" style="gap: 14px;">
+                  <!-- Discrete Inline Drawers (Add Folder / Pull Ollama / Import Local) -->
+                  <div id="drawer-add-folder" class="inline-drawer">
+                    <div class="item-card-row">
+                      <span class="card-title"><i data-icon="folderPlus" data-icon-size="14"></i> Add Model Directory</span>
+                      <button class="icon-btn" onclick="DexApp.closeModelsDrawers()"><i data-icon="x" data-icon-size="14"></i></button>
+                    </div>
+                    <div class="row">
+                      <input id="input-model-dir" class="input mono" type="text" placeholder="~/.lmstudio/models or /Volumes/SSD/Models" style="flex: 1;" onkeydown="if(event.key==='Enter')DexApp.addModelDirFromUi();" />
+                      <button class="btn btn-primary" onclick="DexApp.addModelDirFromUi()">Add Folder</button>
+                    </div>
+                    <div class="card-meta">Models are indexed recursively by reference (GGUF, MLX, Safetensors) without copying files.</div>
+                  </div>
+
+                  <div id="drawer-pull-ollama" class="inline-drawer">
+                    <div class="item-card-row">
+                      <span class="card-title"><i data-icon="download" data-icon-size="14"></i> Pull from Ollama Library</span>
+                      <button class="icon-btn" onclick="DexApp.closeModelsDrawers()"><i data-icon="x" data-icon-size="14"></i></button>
+                    </div>
+                    <div class="row">
+                      <input id="ollama-pull-input" class="input mono" type="text" placeholder="qwen2.5-coder:7b, llama3.2:3b, deepseek-r1:14b" style="flex: 1;" onkeydown="if(event.key==='Enter')DexApp.pullOllamaModel();" />
+                      <button class="btn btn-primary" onclick="DexApp.pullOllamaModel()">Pull</button>
+                    </div>
+                  </div>
+
+                  <div id="drawer-import-model" class="inline-drawer">
+                    <div class="item-card-row">
+                      <span class="card-title"><i data-icon="upload" data-icon-size="14"></i> Import Local .gguf File or MLX Folder</span>
+                      <button class="icon-btn" onclick="DexApp.closeModelsDrawers()"><i data-icon="x" data-icon-size="14"></i></button>
+                    </div>
+                    <div class="grid-2">
+                      <input id="import-path" class="input mono" type="text" placeholder="/path/to/model.gguf or /path/to/mlx-model-folder" />
+                      <input id="import-name" class="input" type="text" placeholder="Alias name (optional)" />
+                    </div>
+                    <div class="item-card-row">
+                      <label class="checkbox-label">
+                        <input type="checkbox" id="import-to-ollama" /> Register GGUF in Ollama
+                      </label>
+                      <button class="btn btn-primary" onclick="DexApp.importLocalGguf()">Import</button>
+                    </div>
+                  </div>
+
+                  <!-- Local Servers Strip (LM Studio :1234 / Ollama :11434 / MLX-LM :8088) -->
+                  <div id="local-servers-strip" class="servers-strip"></div>
+
+                  <!-- Active Model Folders Strip -->
+                  <div class="model-dirs-strip">
+                    <div class="dir-chips-wrap" id="model-dirs-chips">
+                      <span class="card-meta">Loading folders...</span>
+                    </div>
+                    <button class="btn btn-sm" onclick="DexApp.toggleModelsDrawer('folder')">
+                      <i data-icon="folderPlus" data-icon-size="13"></i>
+                      <span>Add Folder</span>
+                    </button>
+                  </div>
+
+                  <!-- Instant Filter & Sort Toolbar -->
+                  <div class="row-wrap" style="gap: 8px;">
+                    <input id="lib-search-input" class="input" type="text" placeholder="Filter models by name, quantization, architecture..." style="flex: 1; min-width: 220px;" oninput="DexApp.renderLibraryModels()" />
+                    <div class="segmented-control" id="lib-format-filter">
+                      <button class="seg-btn active" data-fmt="all" onclick="DexApp.setLibraryFormat('all', this)">All</button>
+                      <button class="seg-btn" data-fmt="mlx" onclick="DexApp.setLibraryFormat('mlx', this)">MLX</button>
+                      <button class="seg-btn" data-fmt="gguf" onclick="DexApp.setLibraryFormat('gguf', this)">GGUF</button>
+                      <button class="seg-btn" data-fmt="ollama" onclick="DexApp.setLibraryFormat('ollama', this)">Ollama</button>
+                      <button class="seg-btn" data-fmt="pt" onclick="DexApp.setLibraryFormat('pt', this)">PT</button>
+                    </div>
+                    <select id="lib-sort-select" class="select" style="width: 122px;" onchange="DexApp.renderLibraryModels()">
+                      <option value="recent">Recent</option>
+                      <option value="size">Largest</option>
+                      <option value="name">Name A-Z</option>
+                    </select>
+                  </div>
+
+                  <div id="library-status-note" class="card-meta mono" style="display: none;"></div>
+
+                  <!-- Bionic-Style Compact Model Library List -->
+                  <div id="library-models-list" class="library-list">
+                    <div class="empty-note">Scanning model directories...</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- ============================================================
+                 SUB-VIEW B: EXPLORE (2-Column Master-Detail Hugging Face Hub)
+                 ============================================================ -->
+            <div id="models-sub-explore" class="models-subview">
+              <div class="explore-split">
+                <!-- Left Master Column (~360px) -->
+                <div class="explore-master">
+                  <div class="explore-master-head">
+                    <div class="row">
+                      <input id="hf-search-input" class="input" type="text" placeholder="Search Hugging Face models..." style="flex: 1;" onkeydown="if(event.key==='Enter')DexApp.searchHfModels();" />
+                      <button class="btn btn-primary btn-sm" style="height: 32px; padding: 0 11px;" onclick="DexApp.searchHfModels()">
+                        <i data-icon="search" data-icon-size="13"></i>
+                      </button>
+                    </div>
+                    <div class="grid-2" style="gap: 6px;">
+                      <select id="hf-format-select" class="select" onchange="DexApp.searchHfModels()">
+                        <option value="all">All Formats</option>
+                        <option value="gguf">GGUF</option>
+                        <option value="mlx">MLX</option>
+                      </select>
+                      <select id="hf-sort-select" class="select" onchange="DexApp.searchHfModels()">
+                        <option value="downloads">Trending / Downloads</option>
+                        <option value="likes">Most Liked</option>
+                        <option value="recent">Recently Updated</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div id="hf-search-results" class="explore-list">
+                    <div class="empty-note">Search or pick a format to explore Hugging Face models.</div>
+                  </div>
+                </div>
+
+                <!-- Right Detail Column -->
+                <div class="explore-detail">
+                  <div id="hf-detail-panel" class="explore-detail-inner">
+                    <div class="explore-empty">
+                      <i data-icon="cpu" data-icon-size="28"></i>
+                      <div style="font-size: 13px; color: var(--text-secondary);">Select a repository on the left</div>
+                      <div style="font-size: 12px;">Inspect quantizations, memory fit, capabilities, and the full model README.</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ================================================================
+             VIEW 6: EXTENSIONS HUB (MCP Servers & Local Sidecars)
+             ================================================================ -->
+        <section id="view-extensions" class="view-panel">
+          <div class="view-scroll">
+            <div class="view-container">
+              <div class="view-header">
+                <div>
+                  <h1 class="view-title">Extensions &amp; Sidecars</h1>
+                  <p class="view-subtitle">Deferred MCP tool discovery (search_tools) with automatic idle RAM reclamation.</p>
+                </div>
+                <div class="view-header-actions">
+                  <button class="btn btn-sm" onclick="DexApp.refreshExtensions()">
+                    <i data-icon="refresh" data-icon-size="13"></i>
+                    <span>Refresh</span>
+                  </button>
+                  <button class="btn btn-sm btn-primary" onclick="DexApp.openCustomMcpModal()">
+                    <i data-icon="plus" data-icon-size="13"></i>
+                    <span>Add Custom MCP</span>
+                  </button>
+                </div>
+              </div>
+
+              <div class="filter-bar" id="ext-filter-bar">
+                <button class="filter-pill active" onclick="DexApp.setExtCategory('all', this)">All</button>
+                <button class="filter-pill" onclick="DexApp.setExtCategory('audio', this)">Audio</button>
+                <button class="filter-pill" onclick="DexApp.setExtCategory('image_video', this)">Image &amp; Video</button>
+                <button class="filter-pill" onclick="DexApp.setExtCategory('three_d', this)">3D</button>
+                <button class="filter-pill" onclick="DexApp.setExtCategory('ocr_docs', this)">OCR &amp; Docs</button>
+                <button class="filter-pill" onclick="DexApp.setExtCategory('game_dev', this)">GameDev</button>
+                <button class="filter-pill" onclick="DexApp.setExtCategory('custom', this)">Custom</button>
+              </div>
+
+              <div class="card-subtle">
+                <div class="card-header">
+                  <span class="card-title"><i data-icon="puzzle" data-icon-size="14"></i> Installed Extensions</span>
+                </div>
+                <div id="ext-installed-list" class="list-stack">
+                  <div class="empty-note">Loading installed extensions...</div>
+                </div>
+              </div>
+
+              <div class="card-subtle">
+                <div class="card-header">
+                  <span class="card-title"><i data-icon="layers" data-icon-size="14"></i> Curated Catalog</span>
+                </div>
+                <div id="ext-catalog-list" class="list-stack">
+                  <div class="empty-note">Loading catalog...</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ================================================================
+             VIEW 7: HARDWARE COOKBOOK
+             ================================================================ -->
+        <section id="view-cookbook" class="view-panel">
+          <div class="view-scroll">
+            <div class="view-container">
+              <div class="view-header">
+                <div>
+                  <h1 class="view-title">Hardware Cookbook</h1>
+                  <p class="view-subtitle">Real-time host profiling and recommended local quantization tiers.</p>
+                </div>
+                <div class="view-header-actions">
+                  <button class="btn btn-sm" onclick="DexApp.refreshCookbook()">
+                    <i data-icon="refresh" data-icon-size="13"></i>
+                    <span>Re-Detect</span>
+                  </button>
+                </div>
+              </div>
+
+              <div id="cookbook-stats" class="stat-grid"></div>
+
+              <div class="card">
+                <div class="card-header">
+                  <span class="card-title"><i data-icon="gauge" data-icon-size="14"></i> Diagnostic Report</span>
+                </div>
+                <pre id="cookbook-report" class="code-block">Detecting hardware profile...</pre>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <!-- 3. Right Collapsible Inspector Drawer (TaskBoard | Subagents | Vision) -->
+      <aside id="inspector-drawer" class="inspector-drawer closed">
+        <div class="inspector-header">
+          <div class="segmented-control inspector-seg" role="tablist">
+            <button class="seg-btn active" data-inspector="tasks" onclick="DexApp.switchInspector('tasks')">TaskBoard</button>
+            <button class="seg-btn" data-inspector="subagents" onclick="DexApp.switchInspector('subagents')">Subagents</button>
+            <button class="seg-btn" data-inspector="vision" onclick="DexApp.switchInspector('vision')">Vision</button>
           </div>
         </div>
 
-        <!-- Section 1: Installed Models -->
-        <div style="margin-bottom: 20px;">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-            <h4 style="font-size: 13px; color: var(--primary);">📦 Installed Models (Local & Ollama)</h4>
-            <button style="background: none; border: 1px solid var(--card-border); color: var(--text-muted); padding: 2px 8px; border-radius: 4px; font-size: 11px; cursor: pointer;" onclick="refreshInstalledModels()">🔄 Refresh</button>
+        <div class="inspector-body">
+          <!-- Pane: TaskBoard -->
+          <div id="inspector-tasks" class="inspector-pane active">
+            <div class="inspector-pane-head">
+              <span>.dex/tasks.json</span>
+              <button class="icon-btn" title="Refresh Tasks" onclick="DexApp.refreshTasks()">
+                <i data-icon="refresh" data-icon-size="13"></i>
+              </button>
+            </div>
+            <div id="tasks-list" class="list-stack">
+              <div class="empty-note">No active tasks.</div>
+            </div>
           </div>
-          <div id="installed-models-list">
-            <p style="color: var(--text-muted); font-size: 12px;">Loading installed models...</p>
-          </div>
-        </div>
 
-        <!-- Section 2: Hugging Face GGUF Hub Search -->
-        <div style="margin-bottom: 20px;">
-          <h4 style="font-size: 13px; color: var(--primary); margin-bottom: 8px;">🤗 Hugging Face Hub (GGUF Search)</h4>
-          <div style="display: flex; gap: 8px; margin-bottom: 10px;">
-            <input id="hf-search-input" class="config-input" type="text" placeholder="Search models (e.g. qwen2.5, llama-3.1, deepseek-r1)..." style="flex: 1;" onkeydown="if(event.key==='Enter')searchHfModels();" />
-            <button class="btn btn-run" style="padding: 0 12px;" onclick="searchHfModels()">🔍 Search</button>
+          <!-- Pane: Subagents -->
+          <div id="inspector-subagents" class="inspector-pane">
+            <div class="inspector-pane-head">
+              <span>Concurrent Subagents</span>
+            </div>
+            <div id="subagents-list" class="list-stack">
+              <div class="empty-note">No subagents spawned in this session.</div>
+            </div>
           </div>
-          <div id="hf-search-results"></div>
-          <div id="hf-repo-files" style="margin-top: 10px;"></div>
-        </div>
 
-        <!-- Section 3: Import Local GGUF -->
-        <div style="margin-bottom: 20px; background: #0f141c; border: 1px solid var(--card-border); border-radius: 8px; padding: 12px;">
-          <h4 style="font-size: 13px; color: var(--cyan); margin-bottom: 8px;">📥 Import Local .gguf Model File</h4>
-          <div style="display: flex; flex-direction: column; gap: 8px;">
-            <input id="import-path" class="config-input" type="text" placeholder="/path/to/my-model.gguf" />
-            <div style="display: flex; gap: 8px; align-items: center;">
-              <input id="import-name" class="config-input" type="text" placeholder="Alias name (optional)" style="flex: 1;" />
-              <label style="font-size: 12px; color: var(--text-muted); display: flex; align-items: center; gap: 4px; cursor: pointer;">
-                <input type="checkbox" id="import-to-ollama" /> Register in Ollama
-              </label>
-              <button class="btn btn-run" style="padding: 6px 14px;" onclick="importLocalGguf()">Import</button>
+          <!-- Pane: Vision / Screenshots -->
+          <div id="inspector-vision" class="inspector-pane">
+            <div class="inspector-pane-head">
+              <span>Captured Previews</span>
+              <button class="icon-btn" title="Refresh Screenshots" onclick="DexApp.refreshScreenshots()">
+                <i data-icon="refresh" data-icon-size="13"></i>
+              </button>
+            </div>
+            <div id="gallery-container" class="screenshot-grid">
+              <div class="empty-note" style="grid-column: 1 / -1;">No screenshots captured yet.</div>
             </div>
           </div>
         </div>
+      </aside>
+    </div>
+  </div>
 
-        <!-- Section 4: Direct Ollama Pull -->
-        <div style="background: #0f141c; border: 1px solid var(--card-border); border-radius: 8px; padding: 12px;">
-          <h4 style="font-size: 13px; color: var(--warning); margin-bottom: 8px;">🦙 Pull Model from Ollama Library</h4>
-          <div style="display: flex; gap: 8px;">
-            <input id="ollama-pull-input" class="config-input" type="text" placeholder="e.g. qwen2.5-coder:7b, llama3.2:3b" style="flex: 1;" onkeydown="if(event.key==='Enter')pullOllamaModel();" />
-            <button class="btn btn-run" style="padding: 6px 14px;" onclick="pullOllamaModel()">Pull</button>
-          </div>
+  <!-- Modal: Add Custom MCP Extension -->
+  <div id="custom-mcp-modal" class="modal-overlay" onclick="if(event.target===this)DexApp.closeCustomMcpModal()">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <span class="modal-title"><i data-icon="puzzle" data-icon-size="16"></i> Add Custom MCP Extension</span>
+        <button class="icon-btn" onclick="DexApp.closeCustomMcpModal()"><i data-icon="x" data-icon-size="15"></i></button>
+      </div>
+      <div class="grid-2">
+        <div class="field">
+          <label class="field-label" for="mcp-id">Extension ID *</label>
+          <input id="mcp-id" class="input mono" type="text" placeholder="my-blender-mcp" />
+        </div>
+        <div class="field">
+          <label class="field-label" for="mcp-name">Display Name *</label>
+          <input id="mcp-name" class="input" type="text" placeholder="My Custom MCP" />
         </div>
       </div>
-
-      <!-- Tab: Extensions Hub (MCP Servers & Local Sidecars) -->
-      <div id="tab-extensions" class="tab-content">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-          <div>
-            <h4 style="font-size: 13px; color: var(--primary);">🧩 Extensions &amp; Local Sidecars</h4>
-            <p style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">Deferred MCP tools (`search_tools`) &amp; automatic RAM unload when idle</p>
-          </div>
-          <div style="display: flex; gap: 6px;">
-            <button class="btn-sm btn-ghost" onclick="refreshExtensions()">🔄 Refresh</button>
-            <button class="btn-sm btn-use" onclick="openCustomMcpModal()">+ Add Custom MCP</button>
-          </div>
-        </div>
-
-        <!-- Category Filters -->
-        <div class="filter-bar" id="ext-filter-bar">
-          <button class="filter-pill active" onclick="setExtCategory('all', this)">Todos</button>
-          <button class="filter-pill" onclick="setExtCategory('audio', this)">Audio</button>
-          <button class="filter-pill" onclick="setExtCategory('image_video', this)">Imagen/Video</button>
-          <button class="filter-pill" onclick="setExtCategory('three_d', this)">3D</button>
-          <button class="filter-pill" onclick="setExtCategory('ocr_docs', this)">OCR/Docs</button>
-          <button class="filter-pill" onclick="setExtCategory('game_dev', this)">GameDev</button>
-          <button class="filter-pill" onclick="setExtCategory('custom', this)">Custom</button>
-        </div>
-
-        <!-- Installed Extensions -->
-        <div style="margin-bottom: 18px;">
-          <h4 style="font-size: 12px; color: var(--cyan); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.4px;">Installed Extensions</h4>
-          <div id="ext-installed-list">
-            <p style="color: var(--text-muted); font-size: 12px;">Loading installed extensions...</p>
-          </div>
-        </div>
-
-        <!-- Built-in Catalog -->
-        <div>
-          <h4 style="font-size: 12px; color: var(--purple); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.4px;">Curated Catalog (1-Click Install)</h4>
-          <div id="ext-catalog-list">
-            <p style="color: var(--text-muted); font-size: 12px;">Loading extension catalog...</p>
-          </div>
-        </div>
-      </div>
-
-      <!-- Tab: Audio & Docs (TTS, Audio Player Gallery, Apple Vision OCR & Document Parser) -->
-      <div id="tab-audio-docs" class="tab-content">
-        <!-- Quick TTS Synthesis -->
-        <div style="background: #0f141c; border: 1px solid var(--card-border); border-radius: 8px; padding: 12px; margin-bottom: 16px;">
-          <h4 style="font-size: 13px; color: var(--cyan); margin-bottom: 8px;">🗣️ Text-to-Speech (Sidecar / Native macOS)</h4>
-          <div style="display: flex; flex-direction: column; gap: 8px;">
-            <input id="tts-text-input" class="config-input" type="text" placeholder="Type text for Dex to synthesize into speech..." onkeydown="if(event.key==='Enter')speakTextFromUi();" />
-            <div style="display: flex; gap: 8px;">
-              <input id="tts-voice-input" class="config-input" type="text" placeholder="Voice (optional: Monica, Samantha, alloy)" style="flex: 1;" />
-              <button class="btn btn-run" style="padding: 6px 14px;" onclick="speakTextFromUi()">🔊 Speak</button>
-            </div>
-          </div>
-        </div>
-
-        <!-- Audio Media Gallery & Player -->
-        <div style="margin-bottom: 18px;">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-            <h4 style="font-size: 13px; color: var(--primary);">🎵 Generated Audio &amp; Recordings (.dex/media/audio/)</h4>
-            <button class="btn-sm btn-ghost" onclick="refreshAudioMedia()">🔄 Refresh</button>
-          </div>
-          <div id="audio-gallery-list">
-            <p style="color: var(--text-muted); font-size: 12px;">No audio files yet. Use Push-to-Talk (🎤), TTS above, or `audio_generate_music` / `audio_generate_sfx`.</p>
-          </div>
-        </div>
-
-        <!-- OCR & Deep Document Reader -->
-        <div style="background: #0f141c; border: 1px solid var(--card-border); border-radius: 8px; padding: 12px;">
-          <h4 style="font-size: 13px; color: var(--purple); margin-bottom: 8px;">📄 OCR &amp; Deep Document Reader (Apple Vision / Docling / PDF)</h4>
-          <div style="display: flex; gap: 8px; margin-bottom: 8px;">
-            <input id="doc-path-input" class="config-input" type="text" placeholder="/path/to/screenshot.png or /path/to/report.pdf" style="flex: 1;" />
-          </div>
-          <div style="display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap;">
-            <button class="btn-sm btn-use" style="padding: 6px 12px;" onclick="runOcrFromUi()">👁️ Run OCR (Image)</button>
-            <button class="btn-sm btn-use" style="padding: 6px 12px; background: var(--purple);" onclick="parseDocFromUi()">📄 Parse Document (PDF/MD/DOCX)</button>
-            <button id="btn-send-doc-agent" class="btn-sm btn-ghost" style="padding: 6px 12px; display: none;" onclick="sendDocToAgent()">⚡ Enviar al Agente</button>
-          </div>
-          <div id="doc-result-meta" style="font-size: 11px; color: var(--text-muted); margin-bottom: 6px;"></div>
-          <div id="doc-result-box" class="report-box" style="max-height: 240px; overflow-y: auto; display: none;"></div>
-        </div>
-      </div>
-    </section>
-  </main>
-
-  <!-- Add Custom MCP Extension Modal -->
-  <div id="custom-mcp-modal" class="modal-overlay">
-    <div class="modal-card" style="border-color: var(--primary);">
-      <div class="modal-title" style="color: var(--primary);">
-        <span>🧩</span>
-        <span>Add Custom MCP Extension</span>
-      </div>
-      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
-        <div class="form-field">
-          <label>Extension ID *</label>
-          <input id="mcp-id" class="config-input" type="text" placeholder="e.g. my-blender-mcp" />
-        </div>
-        <div class="form-field">
-          <label>Display Name *</label>
-          <input id="mcp-name" class="config-input" type="text" placeholder="e.g. My Custom MCP" />
-        </div>
-      </div>
-      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
-        <div class="form-field">
-          <label>Transport</label>
-          <select id="mcp-transport" class="config-select" onchange="toggleMcpTransportFields()">
+      <div class="grid-2">
+        <div class="field">
+          <label class="field-label" for="mcp-transport">Transport</label>
+          <select id="mcp-transport" class="select" onchange="DexApp.toggleMcpTransportFields()">
             <option value="stdio">MCP Stdio (Local Command)</option>
-            <option value="sse">MCP SSE (Remote / Local URL)</option>
+            <option value="sse">MCP SSE (Endpoint URL)</option>
           </select>
         </div>
-        <div class="form-field">
-          <label>Category</label>
-          <select id="mcp-category" class="config-select">
+        <div class="field">
+          <label class="field-label" for="mcp-category">Category</label>
+          <select id="mcp-category" class="select">
             <option value="custom">Custom</option>
             <option value="audio">Audio</option>
-            <option value="image_video">Imagen/Video</option>
+            <option value="image_video">Image &amp; Video</option>
             <option value="three_d">3D</option>
-            <option value="ocr_docs">OCR/Docs</option>
+            <option value="ocr_docs">OCR &amp; Docs</option>
             <option value="game_dev">GameDev</option>
           </select>
         </div>
       </div>
-      <div id="mcp-stdio-fields">
-        <div style="display: grid; grid-template-columns: 1fr 2fr; gap: 10px;">
-          <div class="form-field">
-            <label>Command *</label>
-            <input id="mcp-command" class="config-input" type="text" placeholder="uvx / npx / python3" />
-          </div>
-          <div class="form-field">
-            <label>Arguments</label>
-            <input id="mcp-args" class="config-input" type="text" placeholder="e.g. -y @modelcontextprotocol/server-filesystem /tmp" />
-          </div>
+      <div id="mcp-stdio-fields" class="grid-2">
+        <div class="field">
+          <label class="field-label" for="mcp-command">Command *</label>
+          <input id="mcp-command" class="input mono" type="text" placeholder="uvx / npx / python3" />
+        </div>
+        <div class="field">
+          <label class="field-label" for="mcp-args">Arguments</label>
+          <input id="mcp-args" class="input mono" type="text" placeholder="-y @modelcontextprotocol/server-filesystem /tmp" />
         </div>
       </div>
-      <div id="mcp-sse-fields" style="display: none;">
-        <div class="form-field">
-          <label>SSE Endpoint URL *</label>
-          <input id="mcp-url" class="config-input" type="text" placeholder="http://127.0.0.1:8080/sse" />
+      <div id="mcp-sse-fields" class="field" style="display: none;">
+        <label class="field-label" for="mcp-url">SSE Endpoint URL *</label>
+        <input id="mcp-url" class="input mono" type="text" placeholder="http://127.0.0.1:8080/sse" />
+      </div>
+      <div class="field">
+        <label class="field-label" for="mcp-desc">Description</label>
+        <input id="mcp-desc" class="input" type="text" placeholder="Tools provided by this MCP server" />
+      </div>
+      <div class="grid-2">
+        <div class="field">
+          <label class="field-label" for="mcp-ram">Estimated RAM (MB)</label>
+          <input id="mcp-ram" class="input mono" type="number" value="512" min="64" />
+        </div>
+        <div class="field">
+          <label class="field-label" for="mcp-timeout">Idle Auto-Unload (secs)</label>
+          <input id="mcp-timeout" class="input mono" type="number" value="600" min="0" />
         </div>
       </div>
-      <div class="form-field">
-        <label>Description</label>
-        <input id="mcp-desc" class="config-input" type="text" placeholder="What tools does this MCP server provide?" />
-      </div>
-      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
-        <div class="form-field">
-          <label>Estimated RAM (MB)</label>
-          <input id="mcp-ram" class="config-input" type="number" value="512" min="64" />
-        </div>
-        <div class="form-field">
-          <label>Idle Auto-Unload (secs)</label>
-          <input id="mcp-timeout" class="config-input" type="number" value="600" min="0" />
-        </div>
-      </div>
-      <div class="modal-actions" style="margin-top: 12px;">
-        <button class="btn btn-ghost" style="padding: 8px 16px;" onclick="closeCustomMcpModal()">Cancel</button>
-        <button class="btn btn-run" style="padding: 8px 18px;" onclick="submitCustomMcp()">Save Extension</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Interactive Safe Mode Approval Modal -->
-  <div id="approval-modal" class="modal-overlay">
-    <div class="modal-card">
-      <div class="modal-title">
-        <span>🛡️</span>
-        <span>Permission Request (Safe Mode)</span>
-      </div>
-      <p style="font-size: 13px; color: var(--text); margin-bottom: 8px;">
-        Dex is attempting to execute a sensitive action that modifies your system, files, or desktop:
-      </p>
-      <div style="font-size: 13px; font-weight: 600; color: var(--cyan); margin-bottom: 6px;">
-        Tool: <span id="modal-tool-name">execute_shell</span>
-      </div>
-      <div id="modal-arguments" class="modal-pre">{}</div>
       <div class="modal-actions">
-        <button class="btn btn-deny" onclick="resolveApproval(false)">❌ Deny Action</button>
-        <button class="btn btn-allow" onclick="resolveApproval(true)">✅ Allow Action</button>
+        <button class="btn btn-ghost" onclick="DexApp.closeCustomMcpModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="DexApp.submitCustomMcp()">Save Extension</button>
       </div>
     </div>
   </div>
 
-  <script>
-    // Tauri v2 IPC Bridge
-    const invoke = window.__TAURI__ ? window.__TAURI__.core.invoke : async () => {};
-    const listen = window.__TAURI__ ? window.__TAURI__.event.listen : () => {};
-
-    const streamEl = document.getElementById('stream-log');
-    const runBtn = document.getElementById('btn-run');
-    const stopBtn = document.getElementById('btn-stop');
-    const goalInput = document.getElementById('input-goal');
-
-    function appendStream(text) {
-      streamEl.textContent += text;
-      streamEl.scrollTop = streamEl.scrollHeight;
-    }
-
-    function clearStream() {
-      streamEl.textContent = '✨ Log cleared. Ready for next objective.\n';
-    }
-
-    function setRunningState(running) {
-      if (running) {
-        runBtn.style.display = 'none';
-        stopBtn.style.display = 'flex';
-      } else {
-        runBtn.style.display = 'flex';
-        stopBtn.style.display = 'none';
-      }
-    }
-
-    async function runGoal() {
-      const goal = goalInput.value.trim();
-      if (!goal) return;
-
-      const provider = document.getElementById('sel-provider').value;
-      const model = document.getElementById('input-model').value.trim();
-      const apiBase = document.getElementById('input-apibase').value.trim() || null;
-
-      appendStream(`\n\n🎯 >>> NEW OBJECTIVE DISPATCHED:\n${goal}\n----------------------------------------\n`);
-      setRunningState(true);
-
-      try {
-        await invoke('run_goal', {
-          goal: goal,
-          provider: provider,
-          model: model,
-          apiBase: apiBase,
-        });
-      } catch (err) {
-        appendStream(`\n❌ Error starting goal: ${err}\n`);
-        setRunningState(false);
-      }
-    }
-
-    async function stopGoal() {
-      try {
-        await invoke('stop_goal');
-        appendStream('\n⚠️  Cancel request sent to agent orchestrator.\n');
-      } catch (err) {
-        appendStream(`\n❌ Error stopping goal: ${err}\n`);
-      }
-    }
-
-    async function setMode(mode) {
-      document.querySelectorAll('.mode-btn').forEach(btn => btn.className = 'mode-btn');
-      const activeBtn = document.getElementById(`btn-${mode.toLowerCase()}`);
-      if (activeBtn) {
-        activeBtn.className = `mode-btn active ${mode.toLowerCase()}`;
-      }
-      try {
-        await invoke('set_mode', { mode });
-        appendStream(`\n🛡️  [Mode Switched] Execution mode set to: ${mode.toUpperCase()}\n`);
-      } catch (err) {
-        console.error('Failed to set mode:', err);
-      }
-    }
-
-    function onProviderChange() {
-      const provider = document.getElementById('sel-provider').value;
-      const modelInput = document.getElementById('input-model');
-      if (provider === 'ollama') {
-        modelInput.value = 'qwen2.5:7b';
-      } else {
-        modelInput.value = 'gpt-4o';
-      }
-    }
-
-    function openTab(tabId) {
-      document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
-      document.querySelectorAll('.tab-content').forEach(tab => tab.classList.remove('active'));
-      event.target.classList.add('active');
-      const target = document.getElementById(tabId);
-      if (target) target.classList.add('active');
-
-      if (tabId === 'tab-tasks') refreshTasks();
-      if (tabId === 'tab-vision') refreshScreenshots();
-      if (tabId === 'tab-cookbook') refreshCookbook();
-      if (tabId === 'tab-models') refreshInstalledModels();
-      if (tabId === 'tab-extensions') refreshExtensions();
-      if (tabId === 'tab-audio-docs') refreshAudioMedia();
-    }
-
-    // Modal Approval Handling
-    function showApprovalModal(toolName, args) {
-      document.getElementById('modal-tool-name').textContent = toolName;
-      document.getElementById('modal-arguments').textContent = typeof args === 'string' ? args : JSON.stringify(args, null, 2);
-      document.getElementById('approval-modal').style.display = 'flex';
-    }
-
-    async function resolveApproval(approved) {
-      document.getElementById('approval-modal').style.display = 'none';
-      try {
-        await invoke('resolve_approval', { approved });
-        const icon = approved ? '✅ APPROVED' : '❌ DENIED';
-        appendStream(`\n🛡️  [Human Decision] ${icon} by user\n`);
-      } catch (err) {
-        console.error('Failed to resolve approval:', err);
-      }
-    }
-
-    // Fetch Tasks
-    async function refreshTasks() {
-      try {
-        const tasks = await invoke('get_tasks');
-        const container = document.getElementById('tasks-list');
-        if (!tasks || tasks.length === 0) {
-          container.innerHTML = '<p style="color: var(--text-muted); font-size: 12px;">No tasks found in .dex/tasks.json.</p>';
-          return;
-        }
-        let html = '';
-        for (const t of tasks) {
-          let statusStr = typeof t.status === 'string' ? t.status : Object.keys(t.status)[0];
-          let badgeClass = `badge-${statusStr}`;
-          html += `
-            <div class="task-card">
-              <div class="task-head">
-                <span>${t.id}: ${t.title}</span>
-                <span class="task-badge ${badgeClass}">${statusStr}</span>
-              </div>
-              <p style="font-size: 12px; color: var(--text-muted);">${t.description}</p>
-            </div>
-          `;
-        }
-        container.innerHTML = html;
-      } catch (err) {
-        console.error('Failed to load tasks:', err);
-      }
-    }
-
-    // Fetch Screenshots
-    async function refreshScreenshots() {
-      try {
-        const screenshots = await invoke('get_screenshots');
-        const container = document.getElementById('gallery-container');
-        if (!screenshots || screenshots.length === 0) {
-          container.innerHTML = '<p style="color: var(--text-muted); font-size: 12px;">No screenshots captured yet.</p>';
-          return;
-        }
-        let html = '';
-        for (const s of screenshots) {
-          html += `
-            <div class="gallery-card" onclick="window.open('${s.data_url}')">
-              <img src="${s.data_url}" alt="${s.filename}" />
-              <div class="gallery-card-info">${s.filename} (${Math.round(s.size_bytes / 1024)} KB)</div>
-            </div>
-          `;
-        }
-        container.innerHTML = html;
-      } catch (err) {
-        console.error('Failed to load screenshots:', err);
-      }
-    }
-
-    // Fetch Cookbook
-    async function refreshCookbook() {
-      try {
-        const res = await invoke('get_cookbook');
-        const container = document.getElementById('cookbook-report');
-        if (res && res.report) {
-          container.textContent = res.report;
-        }
-      } catch (err) {
-        console.error('Failed to detect hardware:', err);
-      }
-    }
-
-    // Model Hub Logic
-    async function refreshInstalledModels() {
-      try {
-        const models = await invoke('list_installed_models');
-        const container = document.getElementById('installed-models-list');
-        if (!models || models.length === 0) {
-          container.innerHTML = '<p style="color: var(--text-muted); font-size: 12px;">No models installed yet. Search Hugging Face or pull from Ollama below.</p>';
-          return;
-        }
-
-        let html = '';
-        for (const m of models) {
-          const sizeMb = m.size_bytes > 0 ? (m.size_bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB' : '-';
-          const quant = m.quantization || '-';
-          html += `
-            <div class="task-card" style="display: flex; justify-content: space-between; align-items: center;">
-              <div>
-                <div style="font-size: 13px; font-weight: 600; color: #fff;">
-                  ${m.name}
-                  <span class="task-badge" style="background: rgba(88, 166, 255, 0.2); color: var(--primary); margin-left: 6px;">${m.source}</span>
-                  ${quant !== '-' ? `<span class="task-badge" style="background: rgba(57, 197, 207, 0.2); color: var(--cyan); margin-left: 4px;">${quant}</span>` : ''}
-                </div>
-                <div style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">
-                  Size: ${sizeMb} · ID: ${m.id}
-                </div>
-              </div>
-              <div style="display: flex; gap: 6px;">
-                <button class="btn-sm btn-use" onclick="useModel('${m.name}', '${m.source}')">⚡ Usar este modelo</button>
-                <button class="btn-sm btn-del" onclick="deleteModel('${m.id}')">🗑️</button>
-              </div>
-            </div>
-          `;
-        }
-        container.innerHTML = html;
-      } catch (err) {
-        console.error('Failed to list installed models:', err);
-      }
-    }
-
-    function useModel(name, source) {
-      const modelInput = document.getElementById('input-model');
-      const providerSelect = document.getElementById('sel-provider');
-      modelInput.value = name;
-      if (source === 'ollama') {
-        providerSelect.value = 'ollama';
-      }
-      appendStream(`\n🧠 [Model Selected] Active model set to: ${name} (${source})\n`);
-      document.getElementById('input-goal').focus();
-    }
-
-    async function deleteModel(modelId) {
-      if (!confirm(`Are you sure you want to delete model '${modelId}'?`)) return;
-      try {
-        await invoke('delete_model', { modelId });
-        appendStream(`\n🗑️ [Model Removed] Deleted ${modelId}\n`);
-        refreshInstalledModels();
-      } catch (err) {
-        alert('Failed to delete model: ' + err);
-      }
-    }
-
-    async function searchHfModels() {
-      const query = document.getElementById('hf-search-input').value.trim();
-      if (!query) return;
-
-      const container = document.getElementById('hf-search-results');
-      container.innerHTML = '<p style="color: var(--text-muted); font-size: 12px;">Searching Hugging Face Hub...</p>';
-      document.getElementById('hf-repo-files').innerHTML = '';
-
-      try {
-        const repos = await invoke('search_hf_models', { query, limit: 8 });
-        if (!repos || repos.length === 0) {
-          container.innerHTML = '<p style="color: var(--text-muted); font-size: 12px;">No GGUF models found for query.</p>';
-          return;
-        }
-
-        let html = '<div style="display: flex; flex-direction: column; gap: 6px;">';
-        for (const r of repos) {
-          html += `
-            <div class="task-card" style="display: flex; justify-content: space-between; align-items: center; cursor: pointer;" onclick="inspectHfRepo('${r.id}')">
-              <div>
-                <div style="font-size: 13px; font-weight: 600; color: var(--primary);">${r.id}</div>
-                <div style="font-size: 11px; color: var(--text-muted);">
-                  ⬇️ ${r.downloads || 0} downloads · ❤️ ${r.likes || 0} likes
-                </div>
-              </div>
-              <button class="btn-sm btn-use" onclick="event.stopPropagation(); inspectHfRepo('${r.id}')">Inspect GGUFs</button>
-            </div>
-          `;
-        }
-        html += '</div>';
-        container.innerHTML = html;
-      } catch (err) {
-        container.innerHTML = `<p style="color: var(--danger); font-size: 12px;">Search failed: ${err}</p>`;
-      }
-    }
-
-    async function inspectHfRepo(repoId) {
-      const container = document.getElementById('hf-repo-files');
-      container.innerHTML = `<p style="color: var(--text-muted); font-size: 12px;">Inspecting GGUF quantizations for <strong>${repoId}</strong>...</p>`;
-
-      try {
-        const files = await invoke('list_hf_files', { repoId });
-        if (!files || files.length === 0) {
-          container.innerHTML = '<p style="color: var(--text-muted); font-size: 12px;">No GGUF files found in this repository.</p>';
-          return;
-        }
-
-        let html = `
-          <div style="background: #090d13; border: 1px solid var(--card-border); border-radius: 8px; padding: 12px;">
-            <div style="font-size: 13px; font-weight: 600; color: #fff; margin-bottom: 8px;">
-              Files for ${repoId}:
-            </div>
-            <div style="display: flex; flex-direction: column; gap: 6px;">
-        `;
-
-        for (const f of files) {
-          const sizeGb = (f.size_bytes / (1024 * 1024 * 1024)).toFixed(1);
-          let badgeClass = 'badge-fits';
-          let fitLabel = '🟢 Fits RAM';
-          if (f.memory_fit === 'tight') {
-            badgeClass = 'badge-tight';
-            fitLabel = '🟡 Tight';
-          } else if (f.memory_fit === 'too_large') {
-            badgeClass = 'badge-toolarge';
-            fitLabel = '🔴 Too Large';
-          }
-
-          html += `
-            <div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 8px; border-radius: 6px; background: #161b22;">
-              <div>
-                <span style="font-size: 12px; font-weight: 600; color: #fff;">${f.filename}</span>
-                <span class="task-badge ${badgeClass}" style="margin-left: 6px;">${fitLabel}</span>
-                <span style="font-size: 11px; color: var(--text-muted); margin-left: 6px;">${sizeGb} GB (${f.quantization})</span>
-              </div>
-              <button class="btn-sm btn-use" onclick="startDownload('${repoId}', '${f.filename}', '${f.download_url}')">📥 Download</button>
-            </div>
-          `;
-        }
-        html += '</div></div>';
-        container.innerHTML = html;
-      } catch (err) {
-        container.innerHTML = `<p style="color: var(--danger); font-size: 12px;">Inspection failed: ${err}</p>`;
-      }
-    }
-
-    async function startDownload(repoId, filename, downloadUrl) {
-      try {
-        await invoke('download_model', { repoId, filename, downloadUrl });
-        appendStream(`\n📥 [Download Started] Initiated download of ${filename} from ${repoId}\n`);
-        document.getElementById('download-progress-box').style.display = 'block';
-        document.getElementById('dl-title').textContent = `Downloading ${filename}`;
-      } catch (err) {
-        alert('Failed to start download: ' + err);
-      }
-    }
-
-    async function cancelActiveDownload() {
-      try {
-        await invoke('cancel_download');
-        appendStream('\n⚠️  [Download Cancelled] Cancel requested for active download.\n');
-      } catch (err) {
-        console.error('Failed to cancel download:', err);
-      }
-    }
-
-    async function importLocalGguf() {
-      const path = document.getElementById('import-path').value.trim();
-      const name = document.getElementById('import-name').value.trim() || null;
-      const toOllama = document.getElementById('import-to-ollama').checked;
-
-      if (!path) {
-        alert('Please specify the path to the .gguf file');
-        return;
-      }
-
-      try {
-        const meta = await invoke('import_local_gguf', { path, name, toOllama });
-        appendStream(`\n📥 [Model Imported] ${meta.name} (${meta.id}) registered successfully!\n`);
-        document.getElementById('import-path').value = '';
-        document.getElementById('import-name').value = '';
-        refreshInstalledModels();
-      } catch (err) {
-        alert('Import failed: ' + err);
-      }
-    }
-
-    async function pullOllamaModel() {
-      const modelName = document.getElementById('ollama-pull-input').value.trim();
-      if (!modelName) return;
-
-      try {
-        await invoke('pull_ollama_model', { modelName });
-        appendStream(`\n🦙 [Ollama Pull Started] Initiated pull of ${modelName}\n`);
-        document.getElementById('download-progress-box').style.display = 'block';
-        document.getElementById('dl-title').textContent = `Ollama: Pulling ${modelName}`;
-        document.getElementById('ollama-pull-input').value = '';
-      } catch (err) {
-        alert('Failed to pull from Ollama: ' + err);
-      }
-    }
-
-    // Extensions Hub Logic
-    let activeExtCategory = 'all';
-    let cachedExtCatalog = [];
-    let cachedInstalledExts = [];
-
-    function escapeHtml(str) {
-      return String(str ?? '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
-    }
-
-    function formatCategoryLabel(cat) {
-      const map = {
-        audio: 'Audio',
-        image_video: 'Imagen/Video',
-        three_d: '3D',
-        ocr_docs: 'OCR/Docs',
-        game_dev: 'GameDev',
-        custom: 'Custom',
-      };
-      return map[cat] || cat;
-    }
-
-    function formatExtStatusBadge(status) {
-      if (status === 'running') return '<span class="task-badge badge-running">🟢 Running</span>';
-      if (status === 'sleeping') return '<span class="task-badge badge-sleeping">💤 Sleeping</span>';
-      if (status === 'error') return '<span class="task-badge badge-error">🔴 Error</span>';
-      return '<span class="task-badge badge-stopped">⚪ Stopped</span>';
-    }
-
-    function setExtCategory(cat, btnEl) {
-      activeExtCategory = cat;
-      document.querySelectorAll('#ext-filter-bar .filter-pill').forEach(b => b.classList.remove('active'));
-      if (btnEl) btnEl.classList.add('active');
-      renderExtensions();
-    }
-
-    async function refreshExtensions() {
-      try {
-        const [catalog, installed] = await Promise.all([
-          invoke('list_extension_catalog'),
-          invoke('list_installed_extensions'),
-        ]);
-        cachedExtCatalog = catalog || [];
-        cachedInstalledExts = installed || [];
-        renderExtensions();
-      } catch (err) {
-        console.error('Failed to refresh extensions:', err);
-      }
-    }
-
-    function renderExtensions() {
-      const installedContainer = document.getElementById('ext-installed-list');
-      const catalogContainer = document.getElementById('ext-catalog-list');
-      if (!installedContainer || !catalogContainer) return;
-
-      const filteredInstalled = cachedInstalledExts.filter(item =>
-        activeExtCategory === 'all' || item.manifest.category === activeExtCategory
-      );
-
-      if (filteredInstalled.length === 0) {
-        installedContainer.innerHTML = '<p style="color: var(--text-muted); font-size: 12px;">No installed extensions in this category yet. Install one from the curated catalog or add a custom MCP server.</p>';
-      } else {
-        let html = '';
-        for (const item of filteredInstalled) {
-          const m = item.manifest;
-          const isRunning = item.status === 'running';
-          const pidNote = item.pid ? ` · PID ${item.pid}` : '';
-          const timeoutOpts = [60, 300, 600, 1800, 0]
-            .map(sec => `<option value="${sec}" ${m.idle_timeout_secs === sec ? 'selected' : ''}>${sec === 0 ? 'No unload' : sec + 's idle'}</option>`)
-            .join('');
-
-          html += `
-            <div class="task-card">
-              <div class="task-head">
-                <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
-                  <span style="color: #fff;">${escapeHtml(m.name)}</span>
-                  <span class="task-badge" style="background: rgba(88, 166, 255, 0.18); color: var(--primary);">${formatCategoryLabel(m.category)}</span>
-                  ${formatExtStatusBadge(item.status)}
-                </div>
-                <span style="font-size: 11px; color: var(--text-muted);">~${m.estimated_ram_mb} MB RAM${pidNote}</span>
-              </div>
-              <p style="font-size: 12px; color: var(--text-muted); margin: 4px 0 8px 0;">${escapeHtml(m.description)}</p>
-              ${item.last_error ? `<p style="font-size: 11px; color: var(--danger); margin-bottom: 8px;">Error: ${escapeHtml(item.last_error)}</p>` : ''}
-              <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;">
-                <div style="display: flex; align-items: center; gap: 6px;">
-                  <label style="font-size: 11px; color: var(--text-muted); display: flex; align-items: center; gap: 4px; cursor: pointer;">
-                    <input type="checkbox" ${m.enabled ? 'checked' : ''} onchange="toggleExt('${escapeHtml(m.id)}', this.checked)" />
-                    Enabled
-                  </label>
-                  <select class="config-select" style="font-size: 11px; padding: 2px 6px;" onchange="updateExtTimeout('${escapeHtml(m.id)}', Number(this.value))">
-                    ${timeoutOpts}
-                  </select>
-                </div>
-                <div style="display: flex; gap: 6px;">
-                  ${isRunning
-                    ? `<button class="btn-sm btn-del" onclick="stopExt('${escapeHtml(m.id)}')">⏹ Stop</button>`
-                    : `<button class="btn-sm btn-use" onclick="startExt('${escapeHtml(m.id)}')">▶ Start</button>`}
-                  <button class="btn-sm btn-ghost" onclick="removeExt('${escapeHtml(m.id)}')">🗑️</button>
-                </div>
-              </div>
-            </div>
-          `;
-        }
-        installedContainer.innerHTML = html;
-      }
-
-      const installedIds = new Set(cachedInstalledExts.map(i => i.manifest.id));
-      const filteredCatalog = cachedExtCatalog.filter(m =>
-        activeExtCategory === 'all' || m.category === activeExtCategory
-      );
-
-      if (filteredCatalog.length === 0) {
-        catalogContainer.innerHTML = '<p style="color: var(--text-muted); font-size: 12px;">No built-in recipes in this category. Use "+ Add Custom MCP" to connect your own server.</p>';
-      } else {
-        let html = '';
-        for (const m of filteredCatalog) {
-          const isInstalled = installedIds.has(m.id);
-          html += `
-            <div class="task-card">
-              <div class="task-head">
-                <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
-                  <span style="color: #fff;">${escapeHtml(m.name)}</span>
-                  <span class="task-badge" style="background: rgba(188, 140, 255, 0.18); color: var(--purple);">${formatCategoryLabel(m.category)}</span>
-                  <span style="font-size: 11px; color: var(--text-muted);">~${m.estimated_ram_mb} MB RAM</span>
-                </div>
-                ${isInstalled
-                  ? '<span class="task-badge badge-completed">Installed ✓</span>'
-                  : `<button class="btn-sm btn-use" onclick="installCatalogExt('${escapeHtml(m.id)}')">+ Install</button>`}
-              </div>
-              <p style="font-size: 12px; color: var(--text-muted); margin-top: 4px;">${escapeHtml(m.description)}</p>
-              <p style="font-size: 11px; color: var(--cyan); margin-top: 4px;">💡 ${escapeHtml(m.install_hint)}</p>
-            </div>
-          `;
-        }
-        catalogContainer.innerHTML = html;
-      }
-    }
-
-    async function installCatalogExt(catalogId) {
-      try {
-        await invoke('install_catalog_extension', { catalogId });
-        appendStream(`\n🧩 [Extension Installed] Added '${catalogId}' from catalog.\n`);
-        refreshExtensions();
-      } catch (err) {
-        alert('Failed to install extension: ' + err);
-      }
-    }
-
-    async function toggleExt(id, enabled) {
-      try {
-        await invoke('toggle_extension', { id, enabled });
-        refreshExtensions();
-      } catch (err) {
-        alert('Failed to toggle extension: ' + err);
-      }
-    }
-
-    async function startExt(id) {
-      try {
-        await invoke('start_extension', { id });
-        refreshExtensions();
-      } catch (err) {
-        alert('Failed to start extension: ' + err);
-        refreshExtensions();
-      }
-    }
-
-    async function stopExt(id) {
-      try {
-        await invoke('stop_extension', { id });
-        refreshExtensions();
-      } catch (err) {
-        alert('Failed to stop extension: ' + err);
-      }
-    }
-
-    async function removeExt(id) {
-      if (!confirm(`Remove extension '${id}'?`)) return;
-      try {
-        await invoke('remove_extension', { id });
-        appendStream(`\n🗑️ [Extension Removed] Removed '${id}'.\n`);
-        refreshExtensions();
-      } catch (err) {
-        alert('Failed to remove extension: ' + err);
-      }
-    }
-
-    async function updateExtTimeout(id, idleTimeoutSecs) {
-      try {
-        await invoke('update_extension_timeout', { id, idleTimeoutSecs });
-        appendStream(`\n⏱️ [Extension Config] Set idle auto-unload for '${id}' to ${idleTimeoutSecs}s.\n`);
-      } catch (err) {
-        alert('Failed to update timeout: ' + err);
-      }
-    }
-
-    function openCustomMcpModal() {
-      document.getElementById('custom-mcp-modal').style.display = 'flex';
-    }
-
-    function closeCustomMcpModal() {
-      document.getElementById('custom-mcp-modal').style.display = 'none';
-    }
-
-    function toggleMcpTransportFields() {
-      const transport = document.getElementById('mcp-transport').value;
-      document.getElementById('mcp-stdio-fields').style.display = transport === 'stdio' ? 'block' : 'none';
-      document.getElementById('mcp-sse-fields').style.display = transport === 'sse' ? 'block' : 'none';
-    }
-
-    async function submitCustomMcp() {
-      const id = document.getElementById('mcp-id').value.trim();
-      const name = document.getElementById('mcp-name').value.trim();
-      const transport = document.getElementById('mcp-transport').value;
-      const category = document.getElementById('mcp-category').value;
-      const command = document.getElementById('mcp-command').value.trim() || null;
-      const args = document.getElementById('mcp-args').value.trim() || null;
-      const url = document.getElementById('mcp-url').value.trim() || null;
-      const description = document.getElementById('mcp-desc').value.trim() || null;
-      const estimatedRamMb = Number(document.getElementById('mcp-ram').value) || 512;
-      const idleTimeoutSecs = Number(document.getElementById('mcp-timeout').value);
-
-      if (!id || !name) {
-        alert('Extension ID and Display Name are required.');
-        return;
-      }
-
-      try {
-        await invoke('add_custom_mcp_extension', {
-          id,
-          name,
-          category,
-          description,
-          transport,
-          command,
-          args,
-          url,
-          estimatedRamMb,
-          idleTimeoutSecs: Number.isNaN(idleTimeoutSecs) ? 600 : idleTimeoutSecs,
-        });
-        closeCustomMcpModal();
-        document.getElementById('mcp-id').value = '';
-        document.getElementById('mcp-name').value = '';
-        document.getElementById('mcp-command').value = '';
-        document.getElementById('mcp-args').value = '';
-        document.getElementById('mcp-url').value = '';
-        document.getElementById('mcp-desc').value = '';
-        appendStream(`\n🧩 [Custom MCP Added] Registered '${name}' (${id}).\n`);
-        refreshExtensions();
-      } catch (err) {
-        alert('Failed to add custom MCP extension: ' + err);
-      }
-    }
-
-    // Audio, Voice Push-to-Talk, OCR & Document Reader Logic
-    let isRecordingVoice = false;
-    let lastParsedDoc = null;
-
-    async function toggleVoiceRecording() {
-      const micBtn = document.getElementById('btn-mic');
-      const statusBar = document.getElementById('voice-status-bar');
-
-      if (!isRecordingVoice) {
-        try {
-          await invoke('start_voice_recording');
-          isRecordingVoice = true;
-          micBtn.classList.add('recording');
-          micBtn.textContent = '⏹';
-          statusBar.style.display = 'flex';
-          appendStream('\n🎙️ [Voice] Listening via microphone (click ⏹ to transcribe)...\n');
-        } catch (err) {
-          alert('Failed to start microphone capture: ' + err);
-        }
-      } else {
-        isRecordingVoice = false;
-        micBtn.classList.remove('recording');
-        micBtn.textContent = '⏳';
-        statusBar.style.display = 'none';
-        try {
-          const res = await invoke('stop_and_transcribe');
-          micBtn.textContent = '🎤';
-          refreshAudioMedia();
-          if (res.transcript) {
-            const current = goalInput.value.trim();
-            goalInput.value = current ? `${current} ${res.transcript}` : res.transcript;
-            goalInput.focus();
-            appendStream(`\n📝 [Transcript (${res.backend || 'stt'})] ${res.transcript}\n`);
-          } else {
-            appendStream(`\n🎙️ [Voice Saved] ${res.audio_path} (${res.duration_secs}s). STT note: ${res.stt_warning || 'no backend'}\n`);
-          }
-        } catch (err) {
-          micBtn.textContent = '🎤';
-          alert('Failed to stop/transcribe recording: ' + err);
-        }
-      }
-    }
-
-    async function speakTextFromUi() {
-      const text = document.getElementById('tts-text-input').value.trim();
-      const voice = document.getElementById('tts-voice-input').value.trim() || null;
-      if (!text) return;
-
-      try {
-        const res = await invoke('speak_text', { text, voice });
-        appendStream(`\n🗣️ [TTS (${res.backend})] Synthesized -> ${res.path}\n`);
-        document.getElementById('tts-text-input').value = '';
-        refreshAudioMedia();
-      } catch (err) {
-        alert('TTS failed: ' + err);
-      }
-    }
-
-    async function refreshAudioMedia() {
-      const container = document.getElementById('audio-gallery-list');
-      if (!container) return;
-      try {
-        const items = await invoke('list_audio_media');
-        if (!items || items.length === 0) {
-          container.innerHTML = '<p style="color: var(--text-muted); font-size: 12px;">No audio files yet. Use Push-to-Talk (🎤), TTS above, or `audio_generate_music` / `audio_generate_sfx`.</p>';
-          return;
-        }
-        let html = '';
-        for (const item of items) {
-          const kb = Math.max(1, Math.round(item.size_bytes / 1024));
-          html += `
-            <div class="audio-card">
-              <div style="display: flex; justify-content: space-between; align-items: center;">
-                <div style="display: flex; align-items: center; gap: 6px;">
-                  <span class="task-badge" style="background: rgba(57, 197, 207, 0.2); color: var(--cyan);">${escapeHtml(item.kind)}</span>
-                  <span style="font-size: 12px; font-weight: 600; color: #fff;">${escapeHtml(item.filename)}</span>
-                </div>
-                <span style="font-size: 11px; color: var(--text-muted);">${kb} KB</span>
-              </div>
-              <audio controls preload="metadata" src="${item.data_url}"></audio>
-            </div>
-          `;
-        }
-        container.innerHTML = html;
-      } catch (err) {
-        console.error('Failed to list audio media:', err);
-      }
-    }
-
-    async function runOcrFromUi() {
-      const path = document.getElementById('doc-path-input').value.trim();
-      if (!path) {
-        alert('Please enter an image path (.png, .jpg, .webp)');
-        return;
-      }
-      const metaEl = document.getElementById('doc-result-meta');
-      const boxEl = document.getElementById('doc-result-box');
-      const sendBtn = document.getElementById('btn-send-doc-agent');
-      metaEl.textContent = 'Running Apple Vision OCR...';
-      boxEl.style.display = 'none';
-      sendBtn.style.display = 'none';
-
-      try {
-        const res = await invoke('run_ocr_image', { path });
-        metaEl.textContent = `Engine: ${res.engine} · Blocks: ${res.blocks.length} · Source: ${path}`;
-        boxEl.textContent = res.text || '(No text detected)';
-        boxEl.style.display = 'block';
-        sendBtn.style.display = 'inline-block';
-        lastParsedDoc = { path, engine: res.engine, text: res.text || '' };
-      } catch (err) {
-        metaEl.textContent = `OCR failed: ${err}`;
-      }
-    }
-
-    async function parseDocFromUi() {
-      const path = document.getElementById('doc-path-input').value.trim();
-      if (!path) {
-        alert('Please enter a document path (.pdf, .docx, .md, .png)');
-        return;
-      }
-      const metaEl = document.getElementById('doc-result-meta');
-      const boxEl = document.getElementById('doc-result-box');
-      const sendBtn = document.getElementById('btn-send-doc-agent');
-      metaEl.textContent = 'Extracting document to Markdown...';
-      boxEl.style.display = 'none';
-      sendBtn.style.display = 'none';
-
-      try {
-        const res = await invoke('parse_document', { path });
-        const pages = res.page_count ? ` · Pages: ${res.page_count}` : '';
-        const saved = res.saved_full_path ? ` · Full saved: ${res.saved_full_path}` : '';
-        metaEl.textContent = `Engine: ${res.engine}${pages}${saved}`;
-        boxEl.textContent = res.markdown;
-        boxEl.style.display = 'block';
-        sendBtn.style.display = 'inline-block';
-        lastParsedDoc = {
-          path: res.saved_full_path || res.source_path,
-          engine: res.engine,
-          text: res.markdown,
-        };
-      } catch (err) {
-        metaEl.textContent = `Document parse failed: ${err}`;
-      }
-    }
-
-    function sendDocToAgent() {
-      if (!lastParsedDoc) return;
-      const snippet = lastParsedDoc.text.slice(0, 600);
-      goalInput.value = `Analiza el documento extraído (${lastParsedDoc.path}, motor: ${lastParsedDoc.engine}):\n\n${snippet}${lastParsedDoc.text.length > 600 ? '\n...[usa read_file o doc_parse para ver el resto]' : ''}`;
-      goalInput.focus();
-      appendStream(`\n📄 [Doc -> Agent] Loaded '${lastParsedDoc.path}' into objective input.\n`);
-    }
-
-    // Register Tauri Event Listeners
-    if (window.__TAURI__) {
-      listen('dex-event', (event) => {
-        const ev = event.payload;
-        if (ev.type === 'ThoughtToken') {
-          appendStream(ev.data.token);
-        } else if (ev.type === 'ToolStarted') {
-          appendStream(`\n🛠️  [Tool Call] ${ev.data.tool_name}\n   Arguments: ${JSON.stringify(ev.data.arguments)}\n`);
-        } else if (ev.type === 'ToolFinished') {
-          const status = ev.data.is_error ? '❌ FAILED' : '✅ SUCCESS';
-          appendStream(`   Status: ${status}\n   Result: ${ev.data.output.slice(0, 300)}${ev.data.output.length > 300 ? '...' : ''}\n`);
-          refreshTasks();
-          if (ev.data.tool_name.includes('screenshot')) {
-            refreshScreenshots();
-          }
-        } else if (ev.type === 'SubagentSpawned') {
-          appendStream(`\n🤖 [Subagent Spawned] Role: ${ev.data.role}\n   Task: ${ev.data.task}\n`);
-          const subagentDiv = document.createElement('div');
-          subagentDiv.className = 'task-card';
-          subagentDiv.innerHTML = `
-            <div class="task-head">
-              <span>🤖 Role: ${ev.data.role}</span>
-              <span class="task-badge badge-in_progress">RUNNING</span>
-            </div>
-            <p style="font-size: 12px; color: var(--text-muted);">${ev.data.task}</p>
-          `;
-          document.getElementById('subagents-list').prepend(subagentDiv);
-        } else if (ev.type === 'SubagentCompleted') {
-          appendStream(`\n🏁 [Subagent Completed] Role: ${ev.data.role}\n`);
-        } else if (ev.type === 'ModelDownloadProgress') {
-          const d = ev.data;
-          const box = document.getElementById('download-progress-box');
-          box.style.display = 'block';
-          document.getElementById('dl-title').textContent = `Downloading ${d.file_name}`;
-          document.getElementById('dl-speed').textContent = `${d.speed_mbps.toFixed(1)} MB/s`;
-          const pct = d.total_bytes > 0 ? (d.downloaded_bytes / d.total_bytes * 100) : 0;
-          document.getElementById('dl-bar').style.width = `${pct}%`;
-          const downloadedMb = (d.downloaded_bytes / (1024 * 1024)).toFixed(1);
-          const totalMb = (d.total_bytes / (1024 * 1024)).toFixed(1);
-          document.getElementById('dl-stats').textContent = `${downloadedMb} MB / ${totalMb} MB (${pct.toFixed(1)}%)`;
-        } else if (ev.type === 'ModelDownloadCompleted') {
-          const d = ev.data;
-          appendStream(`\n✅ [Download Finished] Successfully downloaded ${d.file_name}!\n`);
-          document.getElementById('dl-stats').textContent = `Complete! Saved to disk.`;
-          document.getElementById('dl-bar').style.width = '100%';
-          refreshInstalledModels();
-          setTimeout(() => {
-            document.getElementById('download-progress-box').style.display = 'none';
-          }, 3000);
-        } else if (ev.type === 'ModelDownloadFailed') {
-          const d = ev.data;
-          appendStream(`\n❌ [Download Error] ${d.file_name}: ${d.error}\n`);
-          document.getElementById('dl-stats').textContent = `Failed: ${d.error}`;
-          setTimeout(() => {
-            document.getElementById('download-progress-box').style.display = 'none';
-          }, 4000);
-        } else if (ev.type === 'ExtensionStatusChanged') {
-          const d = ev.data;
-          const pidText = d.pid ? ` (PID ${d.pid})` : '';
-          appendStream(`\n🧩 [Extension Status] ${d.extension_id} -> ${d.status.toUpperCase()}${pidText} (~${d.estimated_ram_mb} MB)\n`);
-          refreshExtensions();
-        } else if (ev.type === 'ToolsActivated') {
-          const d = ev.data;
-          appendStream(`\n🔎 [Tools Activated] (${d.source}): ${d.tool_names.join(', ')}\n`);
-        } else if (ev.type === 'MediaGenerated') {
-          const d = ev.data;
-          const dur = d.duration_secs ? ` (${d.duration_secs.toFixed(1)}s)` : '';
-          appendStream(`\n🎵 [Media ${d.kind}]${dur} ${d.path} — ${d.prompt}\n`);
-          if (['tts', 'music', 'sfx', 'recording'].includes(d.kind)) {
-            refreshAudioMedia();
-          }
-        } else if (ev.type === 'VoiceCaptureState') {
-          const d = ev.data;
-          const badge = document.getElementById('voice-db-badge');
-          if (badge) {
-            badge.textContent = `${d.level_db.toFixed(1)} dB`;
-          }
-        }
-      });
-
-      listen('dex-approval-request', (event) => {
-        const data = event.payload;
-        showApprovalModal(data.tool, data.arguments);
-      });
-
-      listen('dex-goal-finished', (event) => {
-        const data = event.payload;
-        setRunningState(false);
-        if (data.status === 'success') {
-          appendStream(`\n\n🎉 [GOAL COMPLETED SUCCESSFULLY]\n${data.answer}\n`);
-        } else {
-          appendStream(`\n\n⚠️  [GOAL ENDED] ${data.error || 'Finished'}\n`);
-        }
-      });
-
-      listen('dex-mode-changed', (event) => {
-        const mode = event.payload.mode;
-        document.querySelectorAll('.mode-btn').forEach(btn => btn.className = 'mode-btn');
-        const activeBtn = document.getElementById(`btn-${mode.toLowerCase()}`);
-        if (activeBtn) {
-          activeBtn.className = `mode-btn active ${mode.toLowerCase()}`;
-        }
-      });
-
-      listen('dex-open-tab', (event) => {
-        const tab = event.payload.tab;
-        if (tab === 'cookbook') {
-          const btn = document.querySelector("button[onclick=\"openTab('tab-cookbook')\"]");
-          if (btn) btn.click();
-        }
-      });
-    }
-
-    // Initial hardware detection
-    refreshCookbook();
-    refreshTasks();
-  </script>
+  <!-- Modal: Safe Mode Interactive Approval -->
+  <div id="approval-modal" class="modal-overlay">
+    <div class="modal-dialog warn-border">
+      <div class="modal-header">
+        <span class="modal-title" style="color: var(--warn-fg);">
+          <i data-icon="shield" data-icon-size="16"></i> Permission Request (Safe Mode)
+        </span>
+      </div>
+      <p style="font-size: 12.5px; color: var(--text-secondary);">
+        Dex is requesting permission to execute a modifying or sensitive tool on this system:
+      </p>
+      <div class="row">
+        <span class="card-meta">Tool:</span>
+        <span id="modal-tool-name" class="badge badge-warn mono">execute_shell</span>
+      </div>
+      <pre id="modal-arguments" class="code-block" style="max-height: 220px;">{}</pre>
+      <div class="modal-actions">
+        <button class="btn btn-danger" onclick="DexApp.resolveApproval(false)">Deny</button>
+        <button class="btn btn-primary" onclick="DexApp.resolveApproval(true)">Allow Action</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="./icons.js"></script>
+  <script src="./viewer3d.js"></script>
+  <script src="./app.js"></script>
 </body>
 </html>

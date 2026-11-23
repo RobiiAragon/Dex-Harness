@@ -20,6 +20,8 @@ harness-models = { workspace = true }
 harness-extensions = { workspace = true }
 harness-audio = { workspace = true }
 harness-docs = { workspace = true }
+harness-media = { workspace = true }
+harness-3d = { workspace = true }
 
 image = { workspace = true }
 tauri = { workspace = true }

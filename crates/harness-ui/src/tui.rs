@@ -138,6 +138,11 @@ pub async fn run_tui(event_bus: EventBus, mode: &str) -> Result<(), io::Error> {
                         state.logs.push(format!("🎙️ [MIC] Recording ({level_db:.1} dB)"));
                     }
                 }
+                DexEvent::MediaGenerationProgress { kind, step, total_steps, message, .. } => {
+                    state.logs.push(format!(
+                        "🎨 [MEDIA:{kind}] step {step}/{total_steps}: {message}"
+                    ));
+                }
             }
         }
 

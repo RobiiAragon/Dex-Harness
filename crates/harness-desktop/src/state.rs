@@ -55,6 +55,16 @@ pub fn is_sensitive_tool(tool_name: &str) -> bool {
             | "desktop_keyboard"
             | "browser_click"
             | "browser_type"
+            | "image_generate"
+            | "image_upscale"
+            | "image_process"
+            | "video_generate"
+            | "video_extract_frames"
+            | "video_edit"
+            | "mesh_generate_3d"
+            | "blender_convert_mesh"
+            | "blender_render_preview"
+            | "unity_export_asset"
     )
 }
 
@@ -146,9 +156,22 @@ mod tests {
         assert!(is_sensitive_tool("browser_click"));
         assert!(is_sensitive_tool("browser_type"));
         assert!(is_sensitive_tool("git_worktree"));
+        assert!(is_sensitive_tool("image_generate"));
+        assert!(is_sensitive_tool("image_upscale"));
+        assert!(is_sensitive_tool("image_process"));
+        assert!(is_sensitive_tool("video_generate"));
+        assert!(is_sensitive_tool("video_extract_frames"));
+        assert!(is_sensitive_tool("video_edit"));
+        assert!(is_sensitive_tool("mesh_generate_3d"));
+        assert!(is_sensitive_tool("blender_convert_mesh"));
+        assert!(is_sensitive_tool("blender_render_preview"));
+        assert!(is_sensitive_tool("unity_export_asset"));
 
         // Read-only tools must not be classified as sensitive
         assert!(!is_sensitive_tool("read_file"));
+        assert!(!is_sensitive_tool("video_inspect"));
+        assert!(!is_sensitive_tool("mesh_inspect"));
+        assert!(!is_sensitive_tool("unity_inspect_project"));
         assert!(!is_sensitive_tool("grep_search"));
         assert!(!is_sensitive_tool("find_files"));
         assert!(!is_sensitive_tool("browser_navigate"));
