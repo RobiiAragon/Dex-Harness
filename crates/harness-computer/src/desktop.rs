@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use enigo::{Button, Coordinate, Direction, Enigo, Keyboard, Mouse, Settings};

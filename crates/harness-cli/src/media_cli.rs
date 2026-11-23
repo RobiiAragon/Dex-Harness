@@ -35,6 +35,7 @@ pub async fn imagine(
         backend: parsed_backend,
         workflow,
         model: None,
+        output_path: None,
     };
 
     let res = generate_image(req, Some(supervisor), Some(&event_bus))

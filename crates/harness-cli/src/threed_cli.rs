@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use anyhow::{Context, Result};
 use harness_3d::{
@@ -57,8 +57,8 @@ pub async fn inspect_model(path: &str) -> Result<()> {
 
 pub async fn create_sample(out: Option<&str>) -> Result<()> {
     let dest = match out {
-        Some(p) => PathBuf::from(p),
-        None => PathBuf::from(DEFAULT_3D_DIR).join("sample_cube.glb"),
+        Some(p) => harness_core::resolve_safe_path(p),
+        None => harness_core::resolve_dex_subpath(DEFAULT_3D_DIR).join("sample_cube.glb"),
     };
     let saved = write_sample_cube_glb(&dest)
         .await

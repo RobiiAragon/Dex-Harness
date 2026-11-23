@@ -154,7 +154,7 @@ pub fn builtin_catalog() -> Vec<ExtensionManifest> {
             },
             estimated_ram_mb: 10240,
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
-            install_hint: "Clona microsoft/TRELLIS en un entorno Python dedicado e instala el endpoint local en el puerto 8195.".to_string(),
+            install_hint: "En Apple Silicon usa `vinayapathak/trellis-mac-mps` (`python3 cli.py serve`) o `dgrauet/Hunyuan3D-2.1-mlx` en el puerto 8195.".to_string(),
             enabled: false,
             tags: vec![
                 "trellis".to_string(),
@@ -162,6 +162,75 @@ pub fn builtin_catalog() -> Vec<ExtensionManifest> {
                 "glb".to_string(),
                 "pbr".to_string(),
                 "image-to-3d".to_string(),
+            ],
+        },
+        ExtensionManifest {
+            id: "fish-audio-s2-pro".to_string(),
+            name: "Fish Audio S2-Pro Sidecar".to_string(),
+            category: ExtensionCategory::Audio,
+            description: "Motor TTS expresivo y clonación zero-shot multilingüe de Fish Speech S2-Pro sobre endpoint HTTP local.".to_string(),
+            kind: ExtensionKind::LocalSidecar {
+                command: "python3".to_string(),
+                args: vec!["-m".to_string(), "tools.api_server".to_string(), "--listen".to_string(), "127.0.0.1:8080".to_string()],
+                port: 8080,
+                healthcheck_url: "http://127.0.0.1:8080/v1/health".to_string(),
+                env: HashMap::new(),
+            },
+            estimated_ram_mb: 6144,
+            idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
+            install_hint: "Clona `fishaudio/fish-speech` y arranca `python -m tools.api_server --listen 127.0.0.1:8080` (compatible con Voice Studio).".to_string(),
+            enabled: false,
+            tags: vec![
+                "audio".to_string(),
+                "tts".to_string(),
+                "voice-cloning".to_string(),
+                "fish-speech".to_string(),
+            ],
+        },
+        ExtensionManifest {
+            id: "step-audio-editx".to_string(),
+            name: "Step-Audio EditX Sidecar".to_string(),
+            category: ExtensionCategory::Audio,
+            description: "Modelo multimodal de síntesis, edición expresiva y clonación de voz Step-Audio EditX.".to_string(),
+            kind: ExtensionKind::LocalSidecar {
+                command: "python3".to_string(),
+                args: vec!["-m".to_string(), "step_audio.server".to_string(), "--port".to_string(), "8192".to_string()],
+                port: 8192,
+                healthcheck_url: "http://127.0.0.1:8192/health".to_string(),
+                env: HashMap::new(),
+            },
+            estimated_ram_mb: 8192,
+            idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
+            install_hint: "Configura `stepfun-ai/Step-Audio` en el puerto 8192 o define `DEX_TTS_URL` hacia tu servidor Step-Audio.".to_string(),
+            enabled: false,
+            tags: vec![
+                "audio".to_string(),
+                "tts".to_string(),
+                "step-audio".to_string(),
+                "voice-cloning".to_string(),
+            ],
+        },
+        ExtensionManifest {
+            id: "omnivoice-tts".to_string(),
+            name: "OmniVoice (k2-fsa) Sidecar".to_string(),
+            category: ExtensionCategory::Audio,
+            description: "TTS y clonación zero-shot de 600+ idiomas basado en difusión + Qwen (motor por defecto de VoiceStudio).".to_string(),
+            kind: ExtensionKind::LocalSidecar {
+                command: "python3".to_string(),
+                args: vec!["-m".to_string(), "omnivoice.server".to_string(), "--port".to_string(), "8193".to_string()],
+                port: 8193,
+                healthcheck_url: "http://127.0.0.1:8193/health".to_string(),
+                env: HashMap::new(),
+            },
+            estimated_ram_mb: 4096,
+            idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
+            install_hint: "Instala `k2-fsa/OmniVoice` o ejecuta su servidor OpenAI-compatible en `http://127.0.0.1:8193`.".to_string(),
+            enabled: false,
+            tags: vec![
+                "audio".to_string(),
+                "tts".to_string(),
+                "omnivoice".to_string(),
+                "voice-cloning".to_string(),
             ],
         },
     ]
@@ -182,7 +251,7 @@ mod tests {
     #[test]
     fn test_builtin_catalog_completeness_and_uniqueness() {
         let catalog = builtin_catalog();
-        assert_eq!(catalog.len(), 7);
+        assert_eq!(catalog.len(), 10);
 
         let expected_ids = [
             "soundbox-mcp",
@@ -192,6 +261,9 @@ mod tests {
             "blender-mcp",
             "unity-mcp",
             "trellis-3d",
+            "fish-audio-s2-pro",
+            "step-audio-editx",
+            "omnivoice-tts",
         ];
 
         let mut seen = HashSet::new();

@@ -13,8 +13,9 @@ pub use config::ModelDirsConfig;
 pub use downloader::ModelDownloader;
 pub use error::ModelError;
 pub use huggingface::{
-    evaluate_memory_fit, normalize_hf_avatar_url, parse_quantization, resolve_hf_image_url,
-    strip_yaml_frontmatter, HfClient, HfGgufFile, HfModelDetails, HfModelSummary, MemoryFit,
+    evaluate_memory_fit, is_auxiliary_model_file, normalize_hf_avatar_url, parse_quantization,
+    resolve_hf_image_url, strip_yaml_frontmatter, HfClient, HfGgufFile, HfModelDetails,
+    HfModelSummary, MemoryFit,
 };
 pub use importer::{import_local_gguf, import_local_model};
 pub use local_servers::{
@@ -30,5 +31,5 @@ pub use runtime::{
 };
 pub use scanner::{
     clean_display_name, compute_group_key, infer_capabilities, inspect_model_directory,
-    scan_model_dirs, DiscoveredModel, ModelFormat,
+    scan_model_dirs, verify_model_path_integrity, DiscoveredModel, IntegrityStatus, ModelFormat,
 };

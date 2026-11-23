@@ -7,8 +7,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::generator::{generate_music, generate_sfx};
-use crate::stt::AutoSttEngine;
-use crate::tts::synthesize_speech;
+use crate::stt::{AutoSttEngine, SttOptions};
+use crate::tts::{synthesize_speech_with_options, TtsOptions};
 
 /// Arguments for `audio_transcribe`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -18,6 +18,9 @@ pub struct AudioTranscribeArgs {
     /// When true, includes segment start/end timestamps when supported by the backend.
     #[serde(default)]
     pub timestamps: bool,
+    /// Optional explicit language code (e.g. "es", "en", or "auto").
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 /// Transcribes an audio file to text using the best available local or HTTP Whisper STT backend.
@@ -53,7 +56,12 @@ impl Tool for AudioTranscribeTool {
                 reason: e.to_string(),
             })?;
 
-        let result = AutoSttEngine::transcribe(Path::new(&args.path), args.timestamps)
+        let opts = SttOptions {
+            language: args.language.clone(),
+            include_timestamps: args.timestamps,
+            ..Default::default()
+        };
+        let result = AutoSttEngine::transcribe_with_options(Path::new(&args.path), &opts)
             .await
             .map_err(|e| ToolError::ExecutionFailed {
                 name: self.name().to_string(),
@@ -83,9 +91,12 @@ impl Tool for AudioTranscribeTool {
 pub struct AudioTtsArgs {
     /// Text to synthesize into spoken audio.
     pub text: String,
-    /// Optional voice name (e.g. "Monica", "Samantha", "alloy").
+    /// Optional voice name or saved cloned voice profile ID (e.g. "Monica", "Samantha", "alloy").
     #[serde(default)]
     pub voice: Option<String>,
+    /// Optional language code (e.g. "es", "en", "auto").
+    #[serde(default)]
+    pub language: Option<String>,
     /// Optional output path (.wav or .m4a). Defaults to `.dex/media/audio/tts/`.
     #[serde(default)]
     pub output_path: Option<String>,
@@ -128,11 +139,15 @@ impl Tool for AudioTtsTool {
                 reason: e.to_string(),
             })?;
 
-        let out_path = args.output_path.as_deref().map(Path::new);
-        let result = synthesize_speech(
+        let opts = TtsOptions {
+            voice: args.voice.clone(),
+            language: args.language.clone(),
+            output_path: args.output_path.as_ref().map(std::path::PathBuf::from),
+            ..Default::default()
+        };
+        let result = synthesize_speech_with_options(
             &args.text,
-            args.voice.as_deref(),
-            out_path,
+            opts,
             self.supervisor.clone(),
             self.event_bus.as_ref(),
         )

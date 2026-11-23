@@ -445,6 +445,134 @@ impl HfClient {
     }
 }
 
+fn classify_repo_tree_items(
+    repo_id: &str,
+    items: &[HfTreeItem],
+    profile: &HardwareProfile,
+) -> Vec<HfGgufFile> {
+    let mut files = Vec::new();
+    let mut safetensors_total_bytes: u64 = 0;
+    let mut safetensors_count: usize = 0;
+    let mut has_config_json = false;
+    let mut first_safetensor_path: Option<String> = None;
+
+    for item in items {
+        if item.r#type != "file" {
+            continue;
+        }
+        let lower = item.path.to_lowercase();
+        let leaf = lower.rsplit('/').next().unwrap_or(&lower);
+        if leaf == "config.json" {
+            has_config_json = true;
+        }
+        if lower.ends_with(".safetensors") {
+            safetensors_count += 1;
+            safetensors_total_bytes =
+                safetensors_total_bytes.saturating_add(item.size.unwrap_or(0));
+            if first_safetensor_path.is_none() {
+                first_safetensor_path = Some(item.path.clone());
+            }
+        }
+        if lower.ends_with(".gguf") {
+            let is_aux = is_auxiliary_model_file(&item.path);
+            let size_bytes = item.size.unwrap_or(0);
+            // Preserve subfolder prefix if nested (e.g. "Q4_K_M/model.gguf") for clarity
+            let filename = if item.path.contains('/') {
+                item.path.clone()
+            } else {
+                item.path
+                    .split('/')
+                    .next_back()
+                    .unwrap_or(&item.path)
+                    .to_string()
+            };
+            let quantization = parse_quantization(&item.path);
+            let (memory_fit, ram_required_gb) = evaluate_memory_fit(size_bytes, profile);
+            let download_url = format!(
+                "https://huggingface.co/{}/resolve/main/{}",
+                repo_id, item.path
+            );
+
+            files.push(HfGgufFile {
+                filename,
+                size_bytes,
+                quantization,
+                download_url,
+                memory_fit,
+                ram_required_gb,
+                format: "GGUF".to_string(),
+                is_recommended: false,
+                is_auxiliary: is_aux,
+            });
+        }
+    }
+
+    // If no GGUF files exist, check if this is an MLX or Safetensors repository
+    if files.is_empty() && has_config_json && safetensors_count > 0 {
+        let repo_lower = repo_id.to_lowercase();
+        let format = if repo_lower.contains("mlx") {
+            "MLX".to_string()
+        } else {
+            "PT".to_string()
+        };
+        let quant = parse_quantization(repo_id);
+        let quantization = if quant == "UNKNOWN" {
+            "BF16".to_string()
+        } else {
+            quant
+        };
+        let (memory_fit, ram_required_gb) =
+            evaluate_memory_fit(safetensors_total_bytes, profile);
+        let repo_leaf = repo_id.split('/').next_back().unwrap_or(repo_id);
+        let sample_path = first_safetensor_path.unwrap_or_else(|| "config.json".to_string());
+        files.push(HfGgufFile {
+            filename: format!("{repo_leaf} ({safetensors_count} shard(s))"),
+            size_bytes: safetensors_total_bytes,
+            quantization,
+            download_url: format!(
+                "https://huggingface.co/{}/resolve/main/{}",
+                repo_id, sample_path
+            ),
+            memory_fit,
+            ram_required_gb,
+            format,
+            is_recommended: true,
+            is_auxiliary: false,
+        });
+        return files;
+    }
+
+    // Drop pure vision projector / imatrix clutter if primary weights exist, while keeping primary weights first
+    let has_primary = files.iter().any(|f| !f.is_auxiliary);
+    if has_primary {
+        files.retain(|f| {
+            let l = f.filename.to_lowercase();
+            !l.contains("mmproj") && !l.contains("imatrix")
+        });
+    }
+
+    // Sort: primary weights ALWAYS ahead of auxiliary (`mtp-`, `draft`), then Fits + preference score
+    files.sort_by(|a, b| {
+        a.is_auxiliary
+            .cmp(&b.is_auxiliary)
+            .then_with(|| fit_rank(b.memory_fit).cmp(&fit_rank(a.memory_fit)))
+            .then_with(|| preference_score(&b.quantization).cmp(&preference_score(&a.quantization)))
+            .then_with(|| a.size_bytes.cmp(&b.size_bytes))
+    });
+
+    // Never auto-select auxiliary files (`mmproj`, `mtp-`, `draft`, `imatrix`) as Recommended
+    if let Some(best) = files
+        .iter_mut()
+        .find(|f| !f.is_auxiliary && f.memory_fit == MemoryFit::Fits)
+    {
+        best.is_recommended = true;
+    } else if let Some(first_primary) = files.iter_mut().find(|f| !f.is_auxiliary) {
+        first_primary.is_recommended = true;
+    }
+
+    files
+}
+
 fn enrich_summary(m: &mut HfModelSummary, fallback_filter: Option<&str>) {
     let lower_id = m.id.to_lowercase();
     let lower_tags: Vec<String> = m.tags.iter().map(|t| t.to_lowercase()).collect();
@@ -696,7 +824,9 @@ mod tests {
             available_memory_gb: 16.0,
             usage_percent: 50.0,
             cpu_cores: 10,
+            cpu_brand: "Apple M5 Max".to_string(),
             os_name: "macOS".to_string(),
+            os_version: "macOS 27.2.1".to_string(),
             arch: "aarch64".to_string(),
             is_apple_silicon: true,
         };
@@ -712,6 +842,69 @@ mod tests {
         let (fit3, req3) = evaluate_memory_fit(40 * 1024 * 1024 * 1024, &profile);
         assert_eq!(fit3, MemoryFit::TooLarge);
         assert_eq!(req3, 48.0);
+    }
+
+    #[test]
+    fn test_recursive_subfolders_and_auxiliary_filtering() {
+        assert!(is_auxiliary_model_file("mmproj-F16.gguf"));
+        assert!(is_auxiliary_model_file("mtp-Q4_K_M.gguf"));
+        assert!(is_auxiliary_model_file("sub/Qwen3-draft-Q4_0.gguf"));
+        assert!(is_auxiliary_model_file("imatrix.gguf"));
+        assert!(!is_auxiliary_model_file("Q4_K_M/Qwen3.8-Flash-Next-Q4_K_M.gguf"));
+
+        let profile = HardwareProfile {
+            total_memory_gb: 48.0,
+            used_memory_gb: 20.0,
+            available_memory_gb: 28.0,
+            usage_percent: 41.7,
+            cpu_cores: 16,
+            cpu_brand: "Apple M5 Max".to_string(),
+            os_name: "macOS".to_string(),
+            os_version: "macOS 27.2.1".to_string(),
+            arch: "aarch64".to_string(),
+            is_apple_silicon: true,
+        };
+
+        let items = vec![
+            HfTreeItem {
+                r#type: "file".to_string(),
+                path: "mmproj-BF16.gguf".to_string(),
+                size: Some(600 * 1024 * 1024),
+            },
+            HfTreeItem {
+                r#type: "file".to_string(),
+                path: "mtp-Q4_K_M.gguf".to_string(),
+                size: Some(900 * 1024 * 1024),
+            },
+            HfTreeItem {
+                r#type: "file".to_string(),
+                path: "Q4_K_M/Qwen3.8-Flash-Next-Q4_K_M.gguf".to_string(),
+                size: Some(15 * 1024 * 1024 * 1024),
+            },
+            HfTreeItem {
+                r#type: "file".to_string(),
+                path: "Q8_0/Qwen3.8-Flash-Next-Q8_0.gguf".to_string(),
+                size: Some(26 * 1024 * 1024 * 1024),
+            },
+        ];
+
+        let classified = classify_repo_tree_items(
+            "ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF",
+            &items,
+            &profile,
+        );
+        // mmproj is excluded when primary weights exist
+        assert!(!classified.iter().any(|f| f.filename.contains("mmproj")));
+        // Nested subfolder GGUF files were discovered
+        assert!(classified.iter().any(|f| f.filename == "Q4_K_M/Qwen3.8-Flash-Next-Q4_K_M.gguf"));
+        // Recommended MUST be the primary Q4_K_M model, NEVER mtp-Q4_K_M
+        let rec = classified.iter().find(|f| f.is_recommended).expect("recommended variant");
+        assert_eq!(rec.filename, "Q4_K_M/Qwen3.8-Flash-Next-Q4_K_M.gguf");
+        assert!(!rec.is_auxiliary);
+        // mtp- file is flagged auxiliary and never recommended
+        let mtp = classified.iter().find(|f| f.filename == "mtp-Q4_K_M.gguf").expect("mtp kept as aux");
+        assert!(mtp.is_auxiliary);
+        assert!(!mtp.is_recommended);
     }
 
     #[test]

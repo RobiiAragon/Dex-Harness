@@ -61,6 +61,7 @@ struct ManagedRuntime {
     last_used_epoch_secs: Option<u64>,
     last_error: Option<String>,
     idle_timeout_secs: u64,
+    recent_logs: Arc<Mutex<Vec<String>>>,
 }
 
 impl ManagedRuntime {
@@ -329,6 +330,7 @@ impl ExtensionSupervisor {
                     last_used_epoch_secs: Some(now_secs),
                     last_error: None,
                     idle_timeout_secs: manifest.idle_timeout_secs,
+                    recent_logs: Arc::new(Mutex::new(Vec::new())),
                 };
 
                 {
@@ -366,6 +368,7 @@ impl ExtensionSupervisor {
                             last_used_epoch_secs: None,
                             last_error: Some(err_msg),
                             idle_timeout_secs: manifest.idle_timeout_secs,
+                            recent_logs: Arc::new(Mutex::new(Vec::new())),
                         },
                     );
                 }
@@ -587,6 +590,7 @@ impl ExtensionSupervisor {
                     last_used_epoch_secs: Some(now_secs),
                     last_error: None,
                     idle_timeout_secs: manifest.idle_timeout_secs,
+                    recent_logs: Arc::clone(&log_tail),
                 },
             );
         }
@@ -627,6 +631,7 @@ impl ExtensionSupervisor {
                     last_used_epoch_secs: None,
                     last_error: Some(err_msg.to_string()),
                     idle_timeout_secs: manifest.idle_timeout_secs,
+                    recent_logs: Arc::new(Mutex::new(vec![err_msg.to_string()])),
                 },
             );
         }
@@ -674,6 +679,7 @@ impl ExtensionSupervisor {
                         last_used_epoch_secs: None,
                         last_error: None,
                         idle_timeout_secs: manifest.idle_timeout_secs,
+                        recent_logs: Arc::new(Mutex::new(Vec::new())),
                     },
                 );
                 None
@@ -826,6 +832,20 @@ impl ExtensionSupervisor {
         }
 
         result
+    }
+
+    /// Returns the most recent stdout/stderr lines captured from a supervised sidecar process.
+    pub async fn recent_logs(&self, id: &str, max_lines: usize) -> Vec<String> {
+        let log_arc = {
+            let rt = self.runtime.lock().await;
+            rt.get(id).map(|entry| Arc::clone(&entry.recent_logs))
+        };
+        let Some(logs) = log_arc else {
+            return Vec::new();
+        };
+        let guard = logs.lock().await;
+        let take_n = max_lines.min(guard.len());
+        guard[guard.len().saturating_sub(take_n)..].to_vec()
     }
 
     /// Returns the current runtime status of an extension ID.

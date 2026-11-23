@@ -175,6 +175,7 @@
 
             <!-- Floating Bottom Composer -->
             <div class="composer-dock">
+              <div id="composer-toast" class="composer-toast"></div>
               <div id="composer-box" class="composer-box">
                 <!-- Model & Provider Popover (Zero-Typing Grouped Selector) -->
                 <div id="model-popover" class="model-popover">
@@ -260,6 +261,11 @@
                     <button id="btn-mic" class="mic-btn" title="Push-to-Talk Voice Objective" onclick="DexApp.toggleVoiceRecording()">
                       <i data-icon="mic" data-icon-size="14"></i>
                     </button>
+                    <select id="composer-stt-lang" class="lang-pill-select" title="Speech Recognition Language" onchange="DexApp.onVoiceLanguageChange(this.value)">
+                      <option value="auto">Auto</option>
+                      <option value="es">ES</option>
+                      <option value="en">EN</option>
+                    </select>
                     <span id="voice-status-bar" class="voice-meter">
                       <span class="status-dot" style="background: var(--err-fg);"></span>
                       <span id="voice-db-badge">-60.0 dB</span>
@@ -325,12 +331,27 @@
                   </div>
                   <div class="list-stack" style="gap: 10px;">
                     <div class="field">
+                      <label class="field-label" for="media-model-select">Image Model (Apple Silicon MLX / Open Weights)</label>
+                      <select id="media-model-select" class="select" onchange="DexApp.onMediaModelChange()">
+                        <option value="flux-schnell-4bit">FLUX.1-schnell (4-bit · Fast, No Token)</option>
+                        <option value="z-image-turbo">Z-Image Turbo (4-bit · Fast, Open)</option>
+                        <option value="flux2-klein-4b">FLUX.2 Klein 4B (4-bit · Open)</option>
+                        <option value="qwen-image">Qwen-Image (4-bit · Supports Negative Prompt)</option>
+                        <option value="flux-dev-4bit">FLUX.1-dev (4-bit · High Detail)</option>
+                        <option value="custom">Custom Hugging Face Model ID...</option>
+                      </select>
+                    </div>
+                    <div id="media-custom-model-wrap" class="field" style="display: none;">
+                      <label class="field-label" for="media-custom-model-input">Custom Hugging Face Repo ID</label>
+                      <input id="media-custom-model-input" class="input mono" type="text" placeholder="org/model-name-mflux-4bit" />
+                    </div>
+                    <div class="field">
                       <label class="field-label" for="media-prompt-input">Prompt</label>
                       <textarea id="media-prompt-input" class="textarea" placeholder="Describe the scene, lighting, and composition..."></textarea>
                     </div>
                     <div class="field">
-                      <label class="field-label" for="media-neg-input">Negative Prompt (optional)</label>
-                      <input id="media-neg-input" class="input" type="text" placeholder="blurry, watermark, low quality" />
+                      <label class="field-label" for="media-neg-input">Negative Prompt (Qwen-Image / ComfyUI only)</label>
+                      <input id="media-neg-input" class="input" type="text" placeholder="blurry, watermark, low quality (ignored on FLUX)" />
                     </div>
                     <div class="grid-3">
                       <div class="field">
@@ -345,13 +366,13 @@
                       </div>
                       <div class="field">
                         <label class="field-label" for="media-steps-input">Steps</label>
-                        <input id="media-steps-input" class="input mono" type="number" value="20" min="1" max="150" />
+                        <input id="media-steps-input" class="input mono" type="number" value="4" min="1" max="150" />
                       </div>
                       <div class="field">
                         <label class="field-label" for="media-backend-select">Backend</label>
                         <select id="media-backend-select" class="select">
                           <option value="auto">Auto</option>
-                          <option value="mlx">MLX</option>
+                          <option value="mlx">MLX (mflux)</option>
                           <option value="comfyui">ComfyUI</option>
                           <option value="http">HTTP / OpenAI</option>
                         </select>
@@ -380,9 +401,19 @@
                     <span class="badge">Pure-Rust / FFprobe</span>
                   </div>
                   <div class="list-stack" style="gap: 10px;">
+                    <div id="dropzone-media-asset" class="drop-zone" data-drop-target="media-asset" onclick="DexApp.browseMediaAssetFile()">
+                      <i data-icon="upload" data-icon-size="14"></i>
+                      <span>Drop an image or video here, or click to Browse</span>
+                    </div>
                     <div class="field">
                       <label class="field-label" for="media-asset-path">Image or Video Path</label>
-                      <input id="media-asset-path" class="input mono" type="text" placeholder="/path/to/image.png or /path/to/clip.mp4" />
+                      <div class="input-browse-row">
+                        <input id="media-asset-path" class="input mono" type="text" placeholder="/path/to/image.png or /path/to/clip.mp4" />
+                        <button class="btn btn-sm" type="button" onclick="DexApp.browseMediaAssetFile()">
+                          <i data-icon="folderOpen" data-icon-size="12"></i>
+                          <span>Browse</span>
+                        </button>
+                      </div>
                     </div>
                     <div class="row-wrap">
                       <button class="btn btn-sm" onclick="DexApp.upscaleAssetPathFromUi()">
@@ -418,56 +449,181 @@
         </section>
 
         <!-- ================================================================
-             VIEW 3: AUDIO & DOCS (TTS, Audio Player, Vision OCR, Doc Parser)
+             VIEW 3: AUDIO & DOCS (Voice Studio, Cloning, ASR/TTS Models, OCR)
              ================================================================ -->
         <section id="view-audio" class="view-panel">
           <div class="view-scroll">
             <div class="view-container">
               <div class="view-header">
                 <div>
-                  <h1 class="view-title">Audio &amp; Documents</h1>
-                  <p class="view-subtitle">Text-to-speech synthesis, native recordings playback, Apple Vision OCR, and PDF/Office Markdown extraction.</p>
+                  <h1 class="view-title">Voice Studio &amp; Documents</h1>
+                  <p class="view-subtitle">Multilingual Apple Silicon ASR/TTS (mlx-audio, Whisper, Parakeet), zero-shot voice cloning, Apple Vision OCR, and document parsing.</p>
                 </div>
                 <div class="view-header-actions">
-                  <button class="btn btn-sm" onclick="DexApp.refreshAudioMedia()">
+                  <button id="btn-test-mic-stt" class="btn btn-sm" onclick="DexApp.testMicAndSttFromUi()">
+                    <i data-icon="mic" data-icon-size="13"></i>
+                    <span>Test Mic &amp; STT (3s)</span>
+                  </button>
+                  <button class="btn btn-sm btn-primary" onclick="DexApp.toggleAudioModelsDrawer()">
+                    <i data-icon="headphones" data-icon-size="13"></i>
+                    <span>Audio Models</span>
+                  </button>
+                  <button class="btn btn-sm" onclick="DexApp.refreshAudioStudio()">
                     <i data-icon="refresh" data-icon-size="13"></i>
-                    <span>Refresh Audio</span>
+                    <span>Refresh</span>
                   </button>
                 </div>
               </div>
 
+              <!-- Live Test Mic & STT Result Strip -->
+              <div id="stt-test-output" class="card-subtle" style="display: none;">
+                <div class="item-card-row">
+                  <span class="card-title"><i data-icon="activity" data-icon-size="13"></i> Microphone &amp; STT Diagnostics</span>
+                  <button class="icon-btn" onclick="document.getElementById('stt-test-output').style.display='none'"><i data-icon="x" data-icon-size="13"></i></button>
+                </div>
+                <div id="stt-test-body" class="card-meta mono" style="margin-top: 6px; white-space: pre-wrap;"></div>
+              </div>
+
+              <!-- Internal Drawer: Audio Models Catalog (ASR, Native MLX TTS, Sidecars) -->
+              <div id="drawer-audio-models" class="inline-drawer">
+                <div class="item-card-row">
+                  <span class="card-title"><i data-icon="headphones" data-icon-size="14"></i> Audio Models &amp; Engines (ASR / TTS / Sidecars)</span>
+                  <button class="icon-btn" onclick="DexApp.toggleAudioModelsDrawer(false)"><i data-icon="x" data-icon-size="14"></i></button>
+                </div>
+                <div class="card-meta">Install engines directly into <span class="mono">~/.dex/runtimes/mlx-venv</span> with 1 click or switch active ASR/TTS models without leaving Voice Studio.</div>
+                <div id="audio-models-catalog-list" class="audio-catalog-grid"></div>
+              </div>
+
               <div class="grid-2">
-                <!-- TTS Card -->
-                <div class="card">
-                  <div class="card-header">
-                    <span class="card-title"><i data-icon="volume" data-icon-size="14"></i> Text-to-Speech</span>
-                    <span class="badge">Sidecar / macOS Say</span>
-                  </div>
-                  <div class="list-stack" style="gap: 10px;">
-                    <div class="field">
-                      <label class="field-label" for="tts-text-input">Spoken Text</label>
-                      <input id="tts-text-input" class="input" type="text" placeholder="Type text to synthesize into audio..." onkeydown="if(event.key==='Enter')DexApp.speakTextFromUi();" />
+                <!-- Left Panel: Voice Studio (TTS + Voice Cloning) -->
+                <div class="list-stack" style="gap: 12px;">
+                  <div class="card">
+                    <div class="card-header">
+                      <span class="card-title"><i data-icon="volume" data-icon-size="14"></i> Voice Studio</span>
+                      <span id="voice-studio-engine-badge" class="badge badge-accent">Auto</span>
                     </div>
-                    <div class="row">
-                      <input id="tts-voice-input" class="input" type="text" placeholder="Voice (optional: Monica, Samantha, alloy)" style="flex: 1;" />
-                      <button class="btn btn-primary" onclick="DexApp.speakTextFromUi()">
-                        <i data-icon="play" data-icon-size="13"></i>
-                        <span>Synthesize</span>
-                      </button>
+                    <div class="list-stack" style="gap: 10px;">
+                      <div class="grid-2">
+                        <div class="field">
+                          <label class="field-label" for="tts-voice-select">Voice (Cloned &amp; Presets)</label>
+                          <select id="tts-voice-select" class="select" onchange="DexApp.onVoiceStudioSettingChange()">
+                            <option value="">Default Voice (Auto)</option>
+                          </select>
+                        </div>
+                        <div class="field">
+                          <label class="field-label" for="voice-studio-lang">Language (STT &amp; TTS)</label>
+                          <select id="voice-studio-lang" class="select" onchange="DexApp.onVoiceLanguageChange(this.value)">
+                            <option value="auto">Auto Detect</option>
+                            <option value="es">Español (es)</option>
+                            <option value="en">English (en)</option>
+                          </select>
+                        </div>
+                      </div>
+                      <div class="field">
+                        <label class="field-label" for="tts-model-select">TTS Engine / Model</label>
+                        <select id="tts-model-select" class="select" onchange="DexApp.onTtsModelSelectChange()">
+                          <option value="mlx-audio::mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit">Qwen3-TTS 0.6B Base (Cloning · MLX)</option>
+                          <option value="mlx-audio::mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit">Qwen3-TTS 0.6B CustomVoice (MLX)</option>
+                          <option value="mlx-audio::mlx-community/chatterbox-turbo-fp16">Chatterbox TTS (Fast Cloning · MLX)</option>
+                          <option value="mlx-audio::mlx-community/Kokoro-82M-bf16">Kokoro 82M (Ultra-Light · MLX)</option>
+                          <option value="macos-say::apple/macos-say">macOS Native Say (Instant Built-In)</option>
+                          <option value="sidecar::fishaudio/s2-pro">Fish Audio S2-Pro (Sidecar :8080)</option>
+                          <option value="sidecar::stepfun-ai/Step-Audio">Step-Audio EditX (Sidecar :8192)</option>
+                          <option value="sidecar::k2-fsa/OmniVoice">OmniVoice k2-fsa (Sidecar :8193)</option>
+                        </select>
+                      </div>
+                      <div id="tts-sidecar-url-wrap" class="field" style="display: none;">
+                        <label class="field-label" for="tts-sidecar-url-input">Sidecar Speech Endpoint URL</label>
+                        <input id="tts-sidecar-url-input" class="input mono" type="text" placeholder="http://127.0.0.1:8080/v1/audio/speech" onchange="DexApp.onVoiceStudioSettingChange()" />
+                      </div>
+                      <div class="field">
+                        <label class="field-label" for="tts-text-input">Spoken Text</label>
+                        <textarea id="tts-text-input" class="textarea" rows="3" placeholder="Type text in Spanish or English to synthesize audio..."></textarea>
+                      </div>
+                      <div class="item-card-row">
+                        <span id="tts-status-note" class="card-meta mono" style="flex: 1;"></span>
+                        <button id="btn-synthesize-audio" class="btn btn-primary" onclick="DexApp.speakTextFromUi()">
+                          <i data-icon="play" data-icon-size="13"></i>
+                          <span>Synthesize Audio</span>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Voice Cloning Profiles (~/.dex/voices/) -->
+                  <div class="card">
+                    <div class="card-header">
+                      <span class="card-title"><i data-icon="user" data-icon-size="14"></i> Cloned Voice Profiles</span>
+                      <span class="badge mono">~/.dex/voices/</span>
+                    </div>
+                    <div class="list-stack" style="gap: 9px;">
+                      <div class="grid-2">
+                        <div class="field">
+                          <label class="field-label" for="clone-voice-name">Profile Name</label>
+                          <input id="clone-voice-name" class="input" type="text" placeholder="e.g. Robii - Español" />
+                        </div>
+                        <div class="field">
+                          <label class="field-label" for="clone-voice-lang">Voice Language</label>
+                          <select id="clone-voice-lang" class="select">
+                            <option value="es">Español (es)</option>
+                            <option value="en">English (en)</option>
+                            <option value="auto">Auto</option>
+                          </select>
+                        </div>
+                      </div>
+                      <div id="dropzone-voice-ref" class="drop-zone" data-drop-target="voice-ref" onclick="DexApp.browseVoiceRefAudio()">
+                        <i data-icon="mic" data-icon-size="14"></i>
+                        <span>Drop a 3–15s voice sample (.wav/.mp3/.m4a), Browse, or Record</span>
+                      </div>
+                      <div class="field">
+                        <label class="field-label" for="clone-ref-audio-path">Reference Audio Sample</label>
+                        <div class="input-browse-row">
+                          <input id="clone-ref-audio-path" class="input mono" type="text" placeholder="/path/to/voice_sample.wav" />
+                          <button class="btn btn-sm" type="button" onclick="DexApp.browseVoiceRefAudio()">
+                            <i data-icon="folderOpen" data-icon-size="12"></i>
+                            <span>Browse</span>
+                          </button>
+                          <button id="btn-record-clone-sample" class="btn btn-sm" type="button" onclick="DexApp.recordVoiceCloneSample()">
+                            <i data-icon="mic" data-icon-size="12"></i>
+                            <span>Rec 5s</span>
+                          </button>
+                        </div>
+                      </div>
+                      <div class="field">
+                        <label class="field-label" for="clone-ref-text">Reference Transcript (optional, boosts cloning accuracy)</label>
+                        <input id="clone-ref-text" class="input" type="text" placeholder="Exact sentence spoken in the reference sample..." />
+                      </div>
+                      <div class="row" style="justify-content: flex-end;">
+                        <button class="btn btn-sm btn-primary" onclick="DexApp.saveClonedVoiceFromUi()">
+                          <i data-icon="plus" data-icon-size="12"></i>
+                          <span>Save Cloned Voice</span>
+                        </button>
+                      </div>
+                      <div id="cloned-voices-list" class="list-stack" style="gap: 6px;"></div>
                     </div>
                   </div>
                 </div>
 
-                <!-- OCR & Document Parser Card -->
+                <!-- Right Panel: OCR & Document Reader -->
                 <div class="card">
                   <div class="card-header">
                     <span class="card-title"><i data-icon="scan" data-icon-size="14"></i> OCR &amp; Document Reader</span>
                     <span class="badge">Apple Vision / Docling</span>
                   </div>
                   <div class="list-stack" style="gap: 10px;">
+                    <div id="dropzone-doc" class="drop-zone" data-drop-target="doc-ocr" onclick="DexApp.browseDocFile()">
+                      <i data-icon="upload" data-icon-size="14"></i>
+                      <span>Drop an image, PDF, DOCX, or PPTX here, or click to Browse</span>
+                    </div>
                     <div class="field">
                       <label class="field-label" for="doc-path-input">Document or Image Path</label>
-                      <input id="doc-path-input" class="input mono" type="text" placeholder="/path/to/screenshot.png or /path/to/report.pdf" />
+                      <div class="input-browse-row">
+                        <input id="doc-path-input" class="input mono" type="text" placeholder="/path/to/screenshot.png or /path/to/report.pdf" />
+                        <button class="btn btn-sm" type="button" onclick="DexApp.browseDocFile()">
+                          <i data-icon="folderOpen" data-icon-size="12"></i>
+                          <span>Browse</span>
+                        </button>
+                      </div>
                     </div>
                     <div class="row-wrap">
                       <button class="btn btn-sm btn-primary" onclick="DexApp.runOcrFromUi()">
@@ -484,7 +640,7 @@
                       </button>
                     </div>
                     <div id="doc-result-meta" class="card-meta mono"></div>
-                    <pre id="doc-result-box" class="code-block" style="display: none; max-height: 220px;"></pre>
+                    <pre id="doc-result-box" class="code-block" style="display: none; max-height: 360px;"></pre>
                   </div>
                 </div>
               </div>
@@ -528,11 +684,11 @@
               </div>
 
               <!-- Full-Width Offline WebGL2 Stage -->
-              <div class="studio3d-stage">
+              <div id="studio3d-stage" class="studio3d-stage" data-drop-target="3d-viewer">
                 <canvas id="glb-canvas"></canvas>
                 <div id="viewer-3d-hud" class="viewer-hud">
                   <div style="font-weight: 600;">Offline WebGL2 GLB Viewer</div>
-                  <div style="color: var(--text-secondary);">Drag to orbit · Scroll to zoom · Select a .glb asset or generate a sample cube</div>
+                  <div style="color: var(--text-secondary);">Drag to orbit · Scroll to zoom · Drop any .glb file here to inspect instantly</div>
                 </div>
                 <div class="viewer-controls-overlay">
                   <div class="viewer-controls-group">
@@ -583,6 +739,10 @@
                     <span class="card-title"><i data-icon="cube" data-icon-size="14"></i> Image to 3D (.glb)</span>
                   </div>
                   <div class="list-stack" style="gap: 10px;">
+                    <div id="dropzone-3d-image" class="drop-zone" data-drop-target="3d-image" onclick="DexApp.browse3dSourceImage()">
+                      <i data-icon="image" data-icon-size="14"></i>
+                      <span>Drop a concept image (.png/.jpg/.webp) here, or click to Browse</span>
+                    </div>
                     <div class="grid-2">
                       <div class="field">
                         <label class="field-label" for="gen3d-image-select">From Media Studio</label>
@@ -592,7 +752,13 @@
                       </div>
                       <div class="field">
                         <label class="field-label" for="gen3d-image-path">Local Image Path</label>
-                        <input id="gen3d-image-path" class="input mono" type="text" placeholder="/path/to/concept.png" />
+                        <div class="input-browse-row">
+                          <input id="gen3d-image-path" class="input mono" type="text" placeholder="/path/to/concept.png" />
+                          <button class="btn btn-sm" type="button" onclick="DexApp.browse3dSourceImage()">
+                            <i data-icon="folderOpen" data-icon-size="12"></i>
+                            <span>Browse</span>
+                          </button>
+                        </div>
                       </div>
                     </div>
                     <div class="field">
@@ -648,7 +814,13 @@
                       </button>
                     </div>
                     <div class="grid-2">
-                      <input id="unity-project-path" class="input mono" type="text" placeholder="/path/to/UnityProject" />
+                      <div class="input-browse-row">
+                        <input id="unity-project-path" class="input mono" type="text" placeholder="/path/to/UnityProject" />
+                        <button class="btn btn-sm" type="button" title="Browse Unity Project Folder" onclick="DexApp.browseUnityProjectFolder()">
+                          <i data-icon="folderOpen" data-icon-size="12"></i>
+                          <span>Browse</span>
+                        </button>
+                      </div>
                       <input id="unity-subdir-input" class="input mono" type="text" value="Assets/DexGenerated" placeholder="Assets/DexGenerated" />
                     </div>
                     <div class="row-wrap">
@@ -743,6 +915,10 @@
                     </div>
                     <div class="row">
                       <input id="input-model-dir" class="input mono" type="text" placeholder="~/.lmstudio/models or /Volumes/SSD/Models" style="flex: 1;" onkeydown="if(event.key==='Enter')DexApp.addModelDirFromUi();" />
+                      <button class="btn btn-sm" type="button" onclick="DexApp.browseModelDirFolder()">
+                        <i data-icon="folderOpen" data-icon-size="12"></i>
+                        <span>Browse</span>
+                      </button>
                       <button class="btn btn-primary" onclick="DexApp.addModelDirFromUi()">Add Folder</button>
                     </div>
                     <div class="card-meta">Models are indexed recursively by reference (GGUF, MLX, Safetensors) without copying files.</div>
@@ -765,7 +941,13 @@
                       <button class="icon-btn" onclick="DexApp.closeModelsDrawers()"><i data-icon="x" data-icon-size="14"></i></button>
                     </div>
                     <div class="grid-2">
-                      <input id="import-path" class="input mono" type="text" placeholder="/path/to/model.gguf or /path/to/mlx-model-folder" />
+                      <div class="input-browse-row">
+                        <input id="import-path" class="input mono" type="text" placeholder="/path/to/model.gguf or /path/to/mlx-model-folder" />
+                        <button class="btn btn-sm" type="button" onclick="DexApp.browseImportModelFile()">
+                          <i data-icon="folderOpen" data-icon-size="12"></i>
+                          <span>Browse</span>
+                        </button>
+                      </div>
                       <input id="import-name" class="input" type="text" placeholder="Alias name (optional)" />
                     </div>
                     <div class="item-card-row">
@@ -1025,6 +1207,9 @@
       </aside>
     </div>
   </div>
+
+  <!-- Global Actionable Toast & Recovery Card Stack (Replaces window.alert) -->
+  <div id="global-toast-stack" class="global-toast-stack" aria-live="polite"></div>
 
   <!-- Modal: Create New Project / Workspace -->
   <div id="create-project-modal" class="modal-overlay" onclick="if(event.target===this)DexApp.closeCreateProjectModal()">

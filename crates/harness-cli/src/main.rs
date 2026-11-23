@@ -299,14 +299,32 @@ enum AudioCommands {
         /// Include segment start/end timestamps
         #[arg(short, long, default_value_t = false)]
         timestamps: bool,
+        /// Explicit ISO-639-1 language code (e.g. es, en, auto)
+        #[arg(short, long)]
+        language: Option<String>,
+        /// ASR engine override (auto, mlx-whisper, parakeet-mlx, faster-whisper, whisper-cli, apple-speech)
+        #[arg(long)]
+        engine: Option<String>,
+        /// Optional model ID override
+        #[arg(long)]
+        model: Option<String>,
     },
-    /// Synthesize speech audio from text (sidecar or native macOS fallback)
+    /// Synthesize speech audio from text (mlx-audio, sidecar, or native macOS fallback)
     Speak {
         /// Text to speak
         text: String,
-        /// Optional voice name (e.g. Monica, Samantha, alloy)
+        /// Optional voice name or saved cloned voice profile ID (e.g. Monica, Samantha, Vivian)
         #[arg(long)]
         voice: Option<String>,
+        /// Optional language code (e.g. es, en, auto)
+        #[arg(short, long)]
+        language: Option<String>,
+        /// Optional TTS engine (auto, mlx-audio, sidecar, macos-say)
+        #[arg(long)]
+        engine: Option<String>,
+        /// Optional TTS model ID
+        #[arg(long)]
+        model: Option<String>,
         /// Optional output file path (.wav or .m4a)
         #[arg(short, long)]
         out: Option<String>,
@@ -822,12 +840,40 @@ async fn main() -> Result<()> {
                 AudioCommands::Record { seconds } => {
                     audio_cli::record_audio(seconds, event_bus).await?;
                 }
-                AudioCommands::Transcribe { path, timestamps } => {
-                    audio_cli::transcribe_audio(&path, timestamps).await?;
+                AudioCommands::Transcribe {
+                    path,
+                    timestamps,
+                    language,
+                    engine,
+                    model,
+                } => {
+                    audio_cli::transcribe_audio(
+                        &path,
+                        timestamps,
+                        language.as_deref(),
+                        engine.as_deref(),
+                        model.as_deref(),
+                    )
+                    .await?;
                 }
-                AudioCommands::Speak { text, voice, out } => {
-                    audio_cli::speak_text(&text, voice.as_deref(), out.as_deref(), event_bus)
-                        .await?;
+                AudioCommands::Speak {
+                    text,
+                    voice,
+                    language,
+                    engine,
+                    model,
+                    out,
+                } => {
+                    audio_cli::speak_text(
+                        &text,
+                        voice.as_deref(),
+                        language.as_deref(),
+                        engine.as_deref(),
+                        model.as_deref(),
+                        out.as_deref(),
+                        event_bus,
+                    )
+                    .await?;
                 }
             }
             return Ok(());

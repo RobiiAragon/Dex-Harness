@@ -243,14 +243,21 @@ impl LlmProvider for OpenAiProvider {
 
         debug!(url = %url, streaming = is_streaming, "Sending request to OpenAI chat completions");
 
-        let response = self
-            .client
-            .post(&url)
-            .headers(headers)
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| ProviderError::Http(format!("Failed to reach API at {url}: {e}")))?;
+        const FIRST_TOKEN_TIMEOUT_SECS: u64 = 60;
+        const STREAM_IDLE_TIMEOUT_SECS: u64 = 60;
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(FIRST_TOKEN_TIMEOUT_SECS),
+            self.client.post(&url).headers(headers).json(&payload).send(),
+        )
+        .await
+        .map_err(|_| ProviderError::Custom {
+            provider: "openai".to_string(),
+            message: format!(
+                "Inference timed out after {FIRST_TOKEN_TIMEOUT_SECS}s waiting for response headers from {url}. Check that the local model is valid and not hung."
+            ),
+        })?
+        .map_err(|e| ProviderError::Http(format!("Failed to reach API at {url}: {e}")))?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -261,15 +268,40 @@ impl LlmProvider for OpenAiProvider {
             });
         }
 
-        // Handle SSE streaming
+        // Handle SSE streaming with bounded first-token and inter-chunk timeouts
         if is_streaming {
             let mut byte_stream = response.bytes_stream();
             let mut line_buffer = String::new();
             let mut accumulated_content = String::new();
             let mut tool_calls_map: HashMap<usize, (String, String, String)> = HashMap::new(); // index -> (id, name, args)
             let mut finish_reason = None;
+            let mut received_any_token = false;
 
-            while let Some(chunk_result) = byte_stream.next().await {
+            loop {
+                let wait_secs = if received_any_token {
+                    STREAM_IDLE_TIMEOUT_SECS
+                } else {
+                    FIRST_TOKEN_TIMEOUT_SECS
+                };
+                let next_item = tokio::time::timeout(
+                    Duration::from_secs(wait_secs),
+                    byte_stream.next(),
+                )
+                .await
+                .map_err(|_| ProviderError::Custom {
+                    provider: "openai".to_string(),
+                    message: if received_any_token {
+                        format!("Stream stalled for {wait_secs}s while receiving tokens from {url}.")
+                    } else {
+                        format!(
+                            "Timed out after {wait_secs}s waiting for first token from {url}. The model server may be overloaded or stuck."
+                        )
+                    },
+                })?;
+
+                let Some(chunk_result) = next_item else {
+                    break;
+                };
                 let chunk = chunk_result.map_err(|e| ProviderError::Http(e.to_string()))?;
                 line_buffer.push_str(&String::from_utf8_lossy(&chunk));
 
@@ -295,6 +327,7 @@ impl LlmProvider for OpenAiProvider {
 
                                 if let Some(ref content) = choice.delta.content {
                                     if !content.is_empty() {
+                                        received_any_token = true;
                                         if let Some(ref cb) = token_callback {
                                             cb(content);
                                         }
@@ -303,6 +336,7 @@ impl LlmProvider for OpenAiProvider {
                                 }
 
                                 if let Some(tcs) = choice.delta.tool_calls {
+                                    received_any_token = true;
                                     for tc in tcs {
                                         let entry = tool_calls_map.entry(tc.index).or_insert_with(|| {
                                             (

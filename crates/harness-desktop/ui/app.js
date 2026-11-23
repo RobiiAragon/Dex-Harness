@@ -1,6 +1,18 @@
-// Dex.app Application Controller (Phase 10 — Zero-Emoji, Full IPC Parity)
+// Dex.app Application Controller (Phase 14 — Zero-Emoji, Actionable Toasts, Voice Studio, Full IPC Parity)
 (function (global) {
   'use strict';
+
+  // Global uncaught JS error collector for automated DEX_QA_WALKTHROUGH verification
+  global.__DEX_QA_ERRORS__ = global.__DEX_QA_ERRORS__ || [];
+  if (typeof global.addEventListener === 'function') {
+    global.addEventListener('error', (ev) => {
+      global.__DEX_QA_ERRORS__.push(`Error: ${ev.message || 'unknown'} (${ev.filename || ''}:${ev.lineno || 0})`);
+    });
+    global.addEventListener('unhandledrejection', (ev) => {
+      const reason = ev && ev.reason ? (ev.reason.message || String(ev.reason)) : 'unhandled rejection';
+      global.__DEX_QA_ERRORS__.push(`UnhandledRejection: ${reason}`);
+    });
+  }
 
   const invoke = global.__TAURI__
     ? global.__TAURI__.core.invoke
@@ -11,7 +23,7 @@
   const VIEW_TITLES = {
     'view-agent': 'Agent',
     'view-media': 'Media Studio',
-    'view-audio': 'Audio & Documents',
+    'view-audio': 'Voice Studio & Documents',
     'view-3d': '3D & Game Studio',
     'view-models': 'Models Hub',
     'view-extensions': 'Extensions & Sidecars',
@@ -38,6 +50,8 @@
     // Structured Agent Chat Stream State
     currentThoughtEl: null,
     activeToolCards: [],
+    activeTurn: null,
+    composerToastTimer: null,
     streamedChars: 0,
     subagentEntries: [],
     // Models Hub (Phase 11 — Bionic / LM Studio Style)
@@ -68,6 +82,20 @@
     attachments: [],
     liveMemory: null,
     memoryPollTimer: null,
+    // Phase 14: Voice Studio, Audio Models, Cloned Voices & Global Actionable Toasts
+    audioSettings: {
+      language: 'auto',
+      asr_engine: 'auto',
+      asr_model: 'mlx-community/whisper-large-v3-turbo',
+      tts_engine: 'auto',
+      tts_model: 'mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit',
+      tts_sidecar_url: null,
+      active_voice_id: null,
+    },
+    clonedVoices: [],
+    audioCatalog: [],
+    toastCounter: 0,
+    activeInstallToastId: null,
   };
 
   function el(id) {
@@ -113,7 +141,7 @@
       refreshComfyWorkflows();
       refreshVisualMedia();
     } else if (viewId === 'view-audio') {
-      refreshAudioMedia();
+      refreshAudioStudio();
     } else if (viewId === 'view-3d') {
       init3dStudioView();
     } else if (viewId === 'view-models') {
@@ -309,9 +337,10 @@
         const sz = formatSizeGb(m.size_bytes);
         const val = `local::${m.id}`;
         const isLoaded = state.activeLoadedModel && state.activeLoadedModel.path === m.path;
-        const prefix = isLoaded ? '[Loaded] ' : '';
+        const isIncomplete = m.integrity_status === 'Incomplete';
+        const prefix = isLoaded ? '[Loaded] ' : isIncomplete ? '[Incomplete] ' : '';
         parts.push(
-          `<option value="${escapeHtml(val)}" ${isLoaded ? 'selected' : ''}>${escapeHtml(prefix + m.name)} [${fmt}${escapeHtml(q)} · ${escapeHtml(sz)}]</option>`
+          `<option value="${escapeHtml(val)}" ${isLoaded ? 'selected' : ''} ${isIncomplete ? 'disabled' : ''}>${escapeHtml(prefix + m.name)} [${fmt}${escapeHtml(q)} · ${escapeHtml(sz)}]</option>`
         );
       }
       parts.push('</optgroup>');
@@ -579,7 +608,10 @@
     const name = (el('proj-name-input') && el('proj-name-input').value.trim()) || '';
     const parentDir = (el('proj-parent-input') && el('proj-parent-input').value.trim()) || null;
     const initGit = el('proj-init-git') ? !!el('proj-init-git').checked : true;
-    if (!name) return alert('Enter a project name.');
+    if (!name) {
+      showGlobalToast({ title: 'Project Name Required', message: 'Enter a folder name for the new project workspace.', variant: 'warn' });
+      return;
+    }
     try {
       const res = await invoke('create_project', { name, parentDir, initGit });
       el('proj-name-input').value = '';
@@ -591,7 +623,7 @@
       refreshScreenshots();
       appendSystemNote(`Created and activated project workspace: ${state.activeWorkspaceDir}`);
     } catch (err) {
-      alert(`Failed to create project: ${err}`);
+      showGlobalToast({ title: 'Failed to Create Project', message: String(err), variant: 'error' });
     }
   }
 
@@ -666,12 +698,75 @@
       box.innerHTML = '';
       return;
     }
-    box.innerHTML = state.projectSessions.slice(0, 6).map((s) => `
-      <button class="session-row ${s.id === state.activeSessionId ? 'active' : ''}" title="${escapeHtml(s.title)}" onclick="DexApp.openProjectSession('${escapeHtml(s.id)}')">
-        <span class="session-row-title">${escapeHtml(s.title)}</span>
-        <span class="mono" style="font-size: 9.5px;">${s.message_count}</span>
-      </button>
-    `).join('');
+    box.innerHTML = state.projectSessions.slice(0, 10).map((s) => {
+      if (state.renamingSessionId === s.id) {
+        return `
+          <div class="session-row-wrap active" style="padding: 2px 4px; gap: 4px;">
+            <input id="session-rename-input" class="input" type="text" value="${escapeHtml(s.title)}" style="height: 22px; font-size: 11px; padding: 0 6px; flex: 1;"
+              onkeydown="if(event.key==='Enter'){event.preventDefault();DexApp.commitRenameProjectSession('${escapeHtml(s.id)}',this.value);}else if(event.key==='Escape'){DexApp.cancelRenameProjectSession();}"
+              onblur="DexApp.commitRenameProjectSession('${escapeHtml(s.id)}',this.value)" />
+          </div>
+        `;
+      }
+      return `
+        <div class="session-row-wrap ${s.id === state.activeSessionId ? 'active' : ''}">
+          <button class="session-row" title="${escapeHtml(s.title)}" onclick="DexApp.openProjectSession('${escapeHtml(s.id)}')">
+            <span class="session-row-title">${escapeHtml(s.title)}</span>
+            <span class="mono" style="font-size: 9.5px;">${s.message_count}</span>
+          </button>
+          <div class="session-row-actions">
+            <button class="session-icon-btn" title="Rename chat" onclick="event.stopPropagation(); DexApp.renameProjectSession('${escapeHtml(s.id)}')">${icon('edit', 11)}</button>
+            <button class="session-icon-btn danger" title="Delete chat" onclick="event.stopPropagation(); DexApp.deleteProjectSession('${escapeHtml(s.id)}')">${icon('trash', 11)}</button>
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  function renameProjectSession(sessionId) {
+    state.renamingSessionId = sessionId;
+    renderSidebarSessions();
+    const inp = el('session-rename-input');
+    if (inp) {
+      inp.focus();
+      inp.select();
+    }
+  }
+
+  function cancelRenameProjectSession() {
+    state.renamingSessionId = null;
+    renderSidebarSessions();
+  }
+
+  async function commitRenameProjectSession(sessionId, newTitleRaw) {
+    if (state.renamingSessionId !== sessionId) return;
+    state.renamingSessionId = null;
+    const existing = (state.projectSessions || []).find((s) => s.id === sessionId);
+    const currentTitle = existing ? existing.title : '';
+    const next = String(newTitleRaw || '').trim();
+    if (!next || next === currentTitle) {
+      renderSidebarSessions();
+      return;
+    }
+    try {
+      await invoke('rename_project_session', { sessionId, title: next });
+      await refreshProjectSessions();
+    } catch (err) {
+      showComposerToast(`Could not rename session: ${err}`, 'error');
+      renderSidebarSessions();
+    }
+  }
+
+  async function deleteProjectSession(sessionId) {
+    try {
+      await invoke('delete_project_session', { sessionId });
+      if (state.activeSessionId === sessionId) {
+        startNewChat(true);
+      }
+      await refreshProjectSessions();
+    } catch (err) {
+      showComposerToast(`Could not delete session: ${err}`, 'error');
+    }
   }
 
   async function openProjectSession(sessionId) {
@@ -689,7 +784,7 @@
             filename: p.split('/').pop() || p,
           })));
         } else if (msg.role === 'assistant') {
-          appendFinalAnswer(msg.content);
+          appendAssistantMarkdown(msg.content);
         } else if (msg.role === 'system') {
           appendSystemNote(msg.content);
         }
@@ -705,9 +800,11 @@
     if (!state.activeSessionId) {
       state.activeSessionId = `sess-${Date.now()}`;
     }
+    const existing = (state.projectSessions || []).find((s) => s.id === state.activeSessionId);
     const firstUser = state.sessionMessages.find((m) => m.role === 'user');
-    const titleRaw = firstUser ? firstUser.content.trim() : 'Untitled Chat';
-    const title = titleRaw.length > 48 ? `${titleRaw.slice(0, 48)}...` : (titleRaw || 'Untitled Chat');
+    const autoTitleRaw = firstUser ? firstUser.content.trim() : 'Untitled Chat';
+    const autoTitle = autoTitleRaw.length > 48 ? `${autoTitleRaw.slice(0, 48)}...` : (autoTitleRaw || 'Untitled Chat');
+    const title = existing && existing.title ? existing.title : autoTitle;
     const nowSec = Math.floor(Date.now() / 1000);
     try {
       await invoke('save_project_session', {
@@ -724,7 +821,342 @@
   }
 
   // =========================================================================
-  // Structured Agent Feed (Thought Stream + Collapsible Tool Cards)
+  // Composer Inline Toast, Code Copy & One-Click Runtime Helper
+  // =========================================================================
+  function showComposerToast(message, variant, actionHtml) {
+    const toast = el('composer-toast');
+    if (!toast) return;
+    if (state.composerToastTimer) {
+      clearTimeout(state.composerToastTimer);
+      state.composerToastTimer = null;
+    }
+    const cls = variant === 'error' ? ' error' : variant === 'ok' ? ' ok' : '';
+    toast.className = `composer-toast visible${cls}`;
+    toast.innerHTML = `
+      <div class="row" style="gap: 8px; flex: 1; min-width: 0;">
+        ${icon(variant === 'error' ? 'xCircle' : variant === 'ok' ? 'checkCircle' : 'alertTriangle', 14)}
+        <span style="line-height: 1.4;">${escapeHtml(message)}</span>
+      </div>
+      <div class="row" style="gap: 6px; flex-shrink: 0;">
+        ${actionHtml || ''}
+        <button class="icon-btn" title="Dismiss" onclick="DexApp.hideComposerToast()">${icon('x', 13)}</button>
+      </div>
+    `;
+    if (!actionHtml) {
+      state.composerToastTimer = setTimeout(hideComposerToast, 7000);
+    }
+  }
+
+  function hideComposerToast() {
+    const toast = el('composer-toast');
+    if (toast) {
+      toast.className = 'composer-toast';
+      toast.innerHTML = '';
+    }
+    if (state.composerToastTimer) {
+      clearTimeout(state.composerToastTimer);
+      state.composerToastTimer = null;
+    }
+  }
+
+  // =========================================================================
+  // Phase 14: Global Actionable Toasts & Contextual 1-Click Recovery Banners
+  // =========================================================================
+  function showGlobalToast(opts) {
+    const stack = el('global-toast-stack');
+    if (!stack) return null;
+    const cfg = typeof opts === 'string' ? { message: opts } : (opts || {});
+    const id = cfg.id || `dex-toast-${++state.toastCounter}`;
+    const existing = el(id);
+    if (existing) existing.remove();
+
+    const variant = cfg.variant || 'warn';
+    const title = cfg.title || (variant === 'error' ? 'Action Needed' : variant === 'ok' ? 'Done' : 'Notice');
+    const icName = variant === 'error' ? 'xCircle' : variant === 'ok' ? 'checkCircle' : 'alertTriangle';
+
+    const card = document.createElement('div');
+    card.id = id;
+    card.className = `action-toast ${variant}`;
+
+    const actionsArr = Array.isArray(cfg.actions) ? cfg.actions : [];
+    const actionsHtml = actionsArr.length > 0
+      ? `<div class="action-toast-actions">${actionsArr.map((a, idx) => `
+          <button type="button" class="btn btn-sm ${a.primary ? 'btn-primary' : ''}" data-toast-action="${idx}">
+            ${a.icon ? icon(a.icon, 12) : ''}<span>${escapeHtml(a.label)}</span>
+          </button>`).join('')}</div>`
+      : '';
+
+    card.innerHTML = `
+      <div class="action-toast-head">
+        <span class="action-toast-title">${icon(icName, 14)}<span>${escapeHtml(title)}</span></span>
+        <button type="button" class="icon-btn" title="Dismiss" onclick="DexApp.dismissGlobalToast('${escapeHtml(id)}')">${icon('x', 13)}</button>
+      </div>
+      <div class="action-toast-body">${escapeHtml(cfg.message || '')}</div>
+      <div id="${escapeHtml(id)}-progress" class="action-toast-progress"></div>
+      ${actionsHtml}
+    `;
+
+    actionsArr.forEach((a, idx) => {
+      const btn = card.querySelector(`[data-toast-action="${idx}"]`);
+      if (btn && typeof a.onClick === 'function') {
+        btn.addEventListener('click', () => a.onClick(id));
+      }
+    });
+
+    stack.appendChild(card);
+    // Cap concurrent toasts to 4 so UI never overflows
+    while (stack.children.length > 4) {
+      stack.firstElementChild.remove();
+    }
+
+    const autoMs = cfg.autoHideMs !== undefined ? cfg.autoHideMs : (actionsArr.length === 0 ? 6500 : 0);
+    if (autoMs > 0) {
+      setTimeout(() => dismissGlobalToast(id), autoMs);
+    }
+    return id;
+  }
+
+  function dismissGlobalToast(id) {
+    const node = el(id);
+    if (node) node.remove();
+    if (state.activeInstallToastId === id) {
+      state.activeInstallToastId = null;
+    }
+  }
+
+  function appendToastInstallProgress(toastId, line) {
+    const box = el(`${toastId}-progress`);
+    if (!box || !line) return;
+    box.classList.add('visible');
+    const prev = box.textContent ? box.textContent.split('\n') : [];
+    prev.push(line);
+    box.textContent = prev.slice(-8).join('\n');
+    box.scrollTop = box.scrollHeight;
+  }
+
+  async function installRuntimeInline(runtimeId, toastId) {
+    if (state.installingRuntime) {
+      showGlobalToast({
+        title: 'Installation In Progress',
+        message: `Already installing ${state.installingRuntime}. Please wait for it to finish.`,
+        variant: 'warn',
+      });
+      return;
+    }
+    const activeToast = toastId || showGlobalToast({
+      title: `Installing ${runtimeId}...`,
+      message: 'Installing into isolated ~/.dex/runtimes/mlx-venv (system Python untouched).',
+      variant: 'ok',
+      autoHideMs: 0,
+    });
+    state.activeInstallToastId = activeToast;
+    state.installingRuntime = runtimeId;
+    appendToastInstallProgress(activeToast, `Starting 1-click install for ${runtimeId}...`);
+    renderRuntimesPanel();
+
+    try {
+      const status = await invoke('install_runtime', { runtime: runtimeId });
+      state.installingRuntime = null;
+      state.pendingMissingRuntime = null;
+      appendToastInstallProgress(activeToast, `Ready: ${status.binary_path || status.name}`);
+      await refreshModelPickerOptions();
+      if (state.activeView === 'view-audio') await refreshAudioStudio();
+      showGlobalToast({
+        title: `${status.name} Ready`,
+        message: 'Engine installed and ready to use immediately.',
+        variant: 'ok',
+        autoHideMs: 5000,
+      });
+      setTimeout(() => dismissGlobalToast(activeToast), 2500);
+    } catch (err) {
+      state.installingRuntime = null;
+      appendToastInstallProgress(activeToast, `Error: ${err}`);
+      renderRuntimesPanel();
+      showGlobalToast({
+        title: `Install Failed (${runtimeId})`,
+        message: String(err),
+        variant: 'error',
+      });
+    }
+  }
+
+  async function installVoiceEngineBundle(toastId) {
+    const tid = toastId || showGlobalToast({
+      title: 'Installing Voice Studio Engine',
+      message: 'Setting up mlx-audio + mlx-whisper inside ~/.dex/runtimes/mlx-venv...',
+      variant: 'ok',
+      autoHideMs: 0,
+    });
+    await installRuntimeInline('mlx-audio', tid);
+    const hasWhisper = (state.runtimes || []).some((r) => r.id === 'mlx-whisper' && r.available);
+    if (!hasWhisper) {
+      await installRuntimeInline('mlx-whisper', tid);
+    }
+  }
+
+  async function loadRecommendedLocalModel(toastId) {
+    if (toastId) dismissGlobalToast(toastId);
+    if (!state.scannedModels || state.scannedModels.length === 0) {
+      await refreshModelPickerOptions();
+    }
+    const validLocal = (state.scannedModels || []).filter(
+      (m) => (m.format === 'mlx' || m.format === 'gguf') && m.path && m.integrity_status !== 'Incomplete'
+    );
+    if (validLocal.length === 0) {
+      navigate('view-models');
+      switchModelsTab('explore');
+      showGlobalToast({
+        title: 'No Complete Local Models Found',
+        message: 'Download an MLX or GGUF model from Explore or add a folder in Models Hub.',
+        variant: 'warn',
+      });
+      return;
+    }
+    // Prefer a compact-to-medium MLX model (~2GB–12GB) that fits smoothly in Unified Memory
+    const availGb = state.liveMemory ? Number(state.liveMemory.available_memory_gb || 16) : 16;
+    const sorted = validLocal.slice().sort((a, b) => {
+      const aFits = (a.size_bytes / (1024 ** 3)) < availGb * 0.7 ? 0 : 1;
+      const bFits = (b.size_bytes / (1024 ** 3)) < availGb * 0.7 ? 0 : 1;
+      if (aFits !== bFits) return aFits - bFits;
+      const aMlx = a.format === 'mlx' ? 0 : 1;
+      const bMlx = b.format === 'mlx' ? 0 : 1;
+      if (aMlx !== bMlx) return aMlx - bMlx;
+      return (a.size_bytes || 0) - (b.size_bytes || 0);
+    });
+    const best = sorted[0];
+    showGlobalToast({
+      title: `Loading ${best.name}`,
+      message: `Mounting ${best.format.toUpperCase()} (${formatSizeGb(best.size_bytes)}) in Dex Native Runtime...`,
+      variant: 'ok',
+      autoHideMs: 4500,
+    });
+    await loadLocalModelFromSpec(best, true);
+  }
+
+  async function setupTrellisAndOpenExtensions(toastId) {
+    if (toastId) dismissGlobalToast(toastId);
+    try {
+      await invoke('install_catalog_extension', { catalogId: 'trellis-3d' });
+    } catch (_) {}
+    navigate('view-extensions');
+    setExtCategory('three_d', null);
+    await refreshExtensions();
+    showGlobalToast({
+      title: 'TRELLIS 3D Extension Ready',
+      message: 'Review install instructions and start `trellis-3d` from Extensions.',
+      variant: 'ok',
+    });
+  }
+
+  function generateProcedural3dWithBlender(toastId) {
+    if (toastId) dismissGlobalToast(toastId);
+    const userPrompt = (el('gen3d-prompt') && el('gen3d-prompt').value.trim()) || 'a stylized low-poly sci-fi crate with PBR material';
+    sendPromptToAgent(
+      `Create a procedural 3D model (${userPrompt}) using headless Blender Python, export it as a binary .glb into .dex/media/3d/, and validate it with mesh_inspect.`,
+      'Prepared Blender procedural 3D workflow in Agent'
+    );
+  }
+
+  function presentActionableError(err, contextView) {
+    const msg = String(err || 'Unknown error');
+    const lower = msg.toLowerCase();
+    const view = contextView || state.activeView;
+
+    if (lower.includes('modelintegrityerror') || lower.includes('incomplete model') || lower.includes('incomplete weights')) {
+      return showGlobalToast({
+        title: 'Incomplete Model Blocked',
+        message: msg,
+        variant: 'warn',
+        actions: [
+          { label: 'Load Valid Local Model', icon: 'zap', primary: true, onClick: (tid) => loadRecommendedLocalModel(tid) },
+          { label: 'Open Models Hub', icon: 'cpu', onClick: (tid) => { dismissGlobalToast(tid); navigate('view-models'); } },
+        ],
+      });
+    }
+
+    if (lower.includes('runtimemissing (llm)') || lower.includes('no local model is loaded')) {
+      return showGlobalToast({
+        title: 'No Local Model Loaded',
+        message: 'Mount a verified local MLX or GGUF model to start running Dex Agent.',
+        variant: 'warn',
+        actions: [
+          { label: 'Load Recommended Local Model', icon: 'zap', primary: true, onClick: (tid) => loadRecommendedLocalModel(tid) },
+          { label: 'Open Model Picker', icon: 'sliders', onClick: (tid) => { dismissGlobalToast(tid); openModelConfig(); } },
+        ],
+      });
+    }
+
+    if ((lower.includes('backendnotinstalled') && (lower.includes('mflux') || lower.includes('image') || view === 'view-media')) || (view === 'view-media' && lower.includes('mflux'))) {
+      return showGlobalToast({
+        title: 'Image Engine Not Installed',
+        message: msg,
+        variant: 'warn',
+        actions: [
+          { label: 'Install mflux (1-click)', icon: 'download', primary: true, onClick: (tid) => installRuntimeInline('mflux', tid) },
+          {
+            label: 'Select Open FLUX.1-schnell (4-bit)',
+            icon: 'sparkles',
+            onClick: (tid) => {
+              const sel = el('media-model-select');
+              if (sel) { sel.value = 'flux-schnell-4bit'; onMediaModelChange(); }
+              dismissGlobalToast(tid);
+            },
+          },
+        ],
+      });
+    }
+
+    if (lower.includes('mlx-audio') || lower.includes('mlx-whisper') || lower.includes('parakeet') || lower.includes('sttunavailable') || (lower.includes('backendnotinstalled') && (lower.includes('tts') || lower.includes('stt') || view === 'view-audio'))) {
+      return showGlobalToast({
+        title: 'Voice Engine Not Installed',
+        message: msg,
+        variant: 'warn',
+        actions: [
+          { label: 'Install Voice Engine (mlx-audio + Whisper)', icon: 'download', primary: true, onClick: (tid) => installVoiceEngineBundle(tid) },
+          { label: 'Open Audio Models', icon: 'headphones', onClick: (tid) => { dismissGlobalToast(tid); navigate('view-audio'); toggleAudioModelsDrawer(true); } },
+        ],
+      });
+    }
+
+    if ((lower.includes('backendnotinstalled') && (lower.includes('trellis') || lower.includes('3d') || view === 'view-3d')) || (view === 'view-3d' && lower.includes('trellis'))) {
+      return showGlobalToast({
+        title: '3D Sidecar Not Running',
+        message: msg,
+        variant: 'warn',
+        actions: [
+          { label: 'Setup TRELLIS / Extension', icon: 'puzzle', primary: true, onClick: (tid) => setupTrellisAndOpenExtensions(tid) },
+          { label: 'Generate Procedural 3D with Blender', icon: 'cube', onClick: (tid) => generateProcedural3dWithBlender(tid) },
+        ],
+      });
+    }
+
+    return showGlobalToast({
+      title: 'Error',
+      message: msg,
+      variant: 'error',
+    });
+  }
+
+  async function installRuntimeFromAnywhere(runtimeId) {
+    hideComposerToast();
+    await installRuntimeInline(runtimeId, null);
+  }
+
+  function copyCodeBlock(btnEl) {
+    if (!btnEl || !btnEl.parentElement) return;
+    const codeEl = btnEl.parentElement.querySelector('pre code');
+    if (!codeEl) return;
+    const text = codeEl.textContent || '';
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(() => {
+        btnEl.textContent = 'Copied';
+        setTimeout(() => { btnEl.textContent = 'Copy'; }, 1500);
+      }).catch(() => {});
+    }
+  }
+
+  // =========================================================================
+  // Structured Agent Feed (Antigravity/Gemini Accordion + Single Markdown Block)
   // =========================================================================
   function hideEmptyState() {
     const empty = el('agent-empty');
@@ -746,6 +1178,7 @@
     if (empty) empty.style.display = 'flex';
     state.currentThoughtEl = null;
     state.activeToolCards = [];
+    state.activeTurn = null;
     state.streamedChars = 0;
     updateContextMetric(0);
   }
@@ -760,8 +1193,58 @@
     }
   }
 
+  function splitThinkAndAnswer(rawText) {
+    const src = String(rawText || '');
+    const thoughts = [];
+    let visible = src.replace(/<think>([\s\S]*?)<\/think>/gi, (_, inner) => {
+      if (inner && inner.trim()) thoughts.push(inner.trim());
+      return '';
+    });
+    // Handle an in-flight unclosed <think> block during live token streaming
+    const openIdx = visible.toLowerCase().indexOf('<think>');
+    if (openIdx >= 0) {
+      const partial = visible.slice(openIdx + 7).trim();
+      if (partial) thoughts.push(partial);
+      visible = visible.slice(0, openIdx);
+    }
+    return {
+      think: thoughts.join('\n\n'),
+      answer: visible.trim(),
+    };
+  }
+
+  function formatStepActionLabel(toolName) {
+    const map = {
+      execute_shell: 'Ran execute_shell',
+      pty_shell: 'Ran pty_shell',
+      read_file: 'Read file',
+      write_file: 'Wrote file',
+      edit_file: 'Edited file',
+      find_files: 'Searched files',
+      grep_search: 'Searched code',
+      git_worktree: 'Updated git worktree',
+      search_tools: 'Searched tools',
+      load_skill: 'Loaded skill',
+      manage_tasks: 'Updated tasks',
+      spawn_subagent: 'Spawned subagent',
+      mesh_inspect: 'Inspected 3D mesh',
+      mesh_generate_3d: 'Generated 3D mesh',
+      blender_convert_mesh: 'Converted mesh in Blender',
+      blender_render_preview: 'Rendered Blender preview',
+      image_generate: 'Generated image',
+      image_process: 'Processed image',
+      image_upscale: 'Upscaled image',
+      ocr_image: 'Ran OCR',
+      doc_parse: 'Parsed document',
+      audio_speak: 'Synthesized speech',
+      audio_transcribe: 'Transcribed audio',
+    };
+    return map[toolName] || `Ran ${toolName}`;
+  }
+
   function appendUserMessage(text, attachedMetas) {
     hideEmptyState();
+    state.activeTurn = null;
     state.currentThoughtEl = null;
     const feed = el('agent-feed');
     const div = document.createElement('div');
@@ -778,59 +1261,150 @@
     scrollFeedToBottom();
   }
 
-  function appendThoughtToken(token) {
+  function ensureActiveTurn() {
+    if (state.activeTurn) return state.activeTurn;
     hideEmptyState();
     const feed = el('agent-feed');
-    if (!state.currentThoughtEl) {
-      const wrap = document.createElement('div');
-      wrap.className = 'chat-entry chat-assistant-block';
-      const p = document.createElement('div');
-      p.className = 'chat-thought';
-      wrap.appendChild(p);
-      feed.appendChild(wrap);
-      state.currentThoughtEl = p;
+    const wrap = document.createElement('div');
+    wrap.className = 'chat-entry turn-assistant';
+
+    const activity = document.createElement('div');
+    activity.className = 'turn-activity working';
+    activity.innerHTML = `
+      <button type="button" class="turn-activity-head">
+        <span class="turn-activity-head-left">
+          <span class="turn-activity-chevron">${icon('chevronRight', 12)}</span>
+          <span class="turn-activity-dot"></span>
+          <span class="turn-activity-label">Working...</span>
+        </span>
+        <span class="mono turn-activity-meta" style="font-size: 10.5px; color: var(--text-muted);"></span>
+      </button>
+      <div class="turn-activity-body">
+        <div class="turn-think-block" style="display: none;"></div>
+        <div class="turn-steps-list"></div>
+      </div>
+    `;
+    const headBtn = activity.querySelector('.turn-activity-head');
+    headBtn.addEventListener('click', () => activity.classList.toggle('open'));
+
+    const answerEl = document.createElement('div');
+    answerEl.className = 'turn-answer md-readme';
+
+    wrap.appendChild(activity);
+    wrap.appendChild(answerEl);
+    feed.appendChild(wrap);
+
+    state.activeTurn = {
+      wrapEl: wrap,
+      activityEl: activity,
+      activityLabelEl: activity.querySelector('.turn-activity-label'),
+      activityMetaEl: activity.querySelector('.turn-activity-meta'),
+      thinkEl: activity.querySelector('.turn-think-block'),
+      stepsListEl: activity.querySelector('.turn-steps-list'),
+      answerEl,
+      startedAt: performance.now(),
+      rawStream: '',
+      thinkText: '',
+      steps: [],
+      done: false,
+    };
+    return state.activeTurn;
+  }
+
+  function updateActiveTurnSummary(turn) {
+    if (!turn) return;
+    const count = turn.steps.length;
+    const hasThink = !!(turn.thinkText && turn.thinkText.trim());
+    const hasAny = count > 0 || hasThink;
+    turn.activityEl.classList.toggle('has-activity', hasAny);
+    if (!hasAny) return;
+
+    const elapsedSec = ((performance.now() - turn.startedAt) / 1000).toFixed(1);
+    if (!turn.done) {
+      const label = count > 0
+        ? `Working · ${count} ${count === 1 ? 'step' : 'steps'}...`
+        : 'Thinking...';
+      turn.activityLabelEl.textContent = label;
+      turn.activityMetaEl.textContent = `${elapsedSec}s`;
+    } else {
+      const actionText = count > 0
+        ? `Worked for ${elapsedSec}s · ${count} ${count === 1 ? 'action' : 'actions'}`
+        : `Thought for ${elapsedSec}s`;
+      turn.activityLabelEl.textContent = actionText;
+      turn.activityMetaEl.textContent = '';
     }
-    state.currentThoughtEl.textContent += token;
+  }
+
+  function appendThoughtToken(token) {
+    const turn = ensureActiveTurn();
+    turn.rawStream += token;
     state.streamedChars += token.length;
     updateContextMetric(Math.round(state.streamedChars / 4));
+
+    const split = splitThinkAndAnswer(turn.rawStream);
+    if (split.think) {
+      turn.thinkText = split.think;
+      turn.thinkEl.style.display = 'block';
+      turn.thinkEl.textContent = split.think;
+    }
+    if (split.answer) {
+      turn.answerEl.innerHTML = renderSafeMarkdown(split.answer);
+    }
+    updateActiveTurnSummary(turn);
     scrollFeedToBottom();
   }
 
   function appendToolStartedCard(toolName, args) {
-    hideEmptyState();
-    state.currentThoughtEl = null;
-    const feed = el('agent-feed');
-    const card = document.createElement('div');
-    card.className = 'tool-card';
+    const turn = ensureActiveTurn();
+    // If the model emitted pre-tool reasoning text before invoking a tool, fold it into thought notes
+    const preSplit = splitThinkAndAnswer(turn.rawStream);
+    if (preSplit.answer && turn.steps.length === 0) {
+      turn.thinkText = [turn.thinkText, preSplit.answer].filter(Boolean).join('\n\n');
+      if (turn.thinkText) {
+        turn.thinkEl.style.display = 'block';
+        turn.thinkEl.textContent = turn.thinkText;
+      }
+      turn.rawStream = '';
+      turn.answerEl.innerHTML = '';
+    } else {
+      turn.rawStream = '';
+    }
+
+    const row = document.createElement('div');
+    row.className = 'step-row';
     const argsStr = typeof args === 'string' ? args : JSON.stringify(args || {}, null, 2);
-    card.innerHTML = `
-      <div class="tool-card-head">
-        <div class="tool-card-left">
-          <span class="tool-card-chevron">${icon('chevronRight', 13)}</span>
-          ${icon('wrench', 13)}
-          <span class="tool-card-name">${escapeHtml(toolName)}</span>
-        </div>
-        <div class="tool-card-right">
-          <span class="tool-duration">running</span>
-          <span class="badge badge-accent tool-status-badge">Running</span>
-        </div>
+    row.innerHTML = `
+      <div class="step-row-head">
+        <span class="step-row-left">
+          <span class="step-row-chevron">${icon('chevronRight', 11)}</span>
+          ${icon('wrench', 11)}
+          <span class="step-row-title">${escapeHtml(formatStepActionLabel(toolName))}</span>
+        </span>
+        <span class="step-row-meta">
+          <span class="step-dur">running</span>
+          <span class="badge badge-accent step-badge" style="font-size: 9.5px; padding: 0 5px;">Running</span>
+        </span>
       </div>
-      <div class="tool-card-body">
+      <div class="step-row-body">
         <div class="tool-section-label">Arguments</div>
-        <pre class="tool-pre tool-args-pre">${escapeHtml(argsStr)}</pre>
-        <div class="tool-section-label tool-out-label" style="display: none;">Output</div>
-        <pre class="tool-pre tool-out-pre" style="display: none;"></pre>
+        <pre class="tool-pre">${escapeHtml(argsStr)}</pre>
+        <div class="tool-section-label step-out-label" style="display: none;">Output</div>
+        <pre class="tool-pre step-out-pre" style="display: none;"></pre>
       </div>
     `;
-    const head = card.querySelector('.tool-card-head');
-    head.addEventListener('click', () => card.classList.toggle('open'));
-    feed.appendChild(card);
+    const head = row.querySelector('.step-row-head');
+    head.addEventListener('click', () => row.classList.toggle('open'));
+    turn.stepsListEl.appendChild(row);
 
-    state.activeToolCards.push({
+    const rec = {
       toolName,
-      el: card,
+      el: row,
       startedAt: performance.now(),
-    });
+      finished: false,
+    };
+    turn.steps.push(rec);
+    state.activeToolCards.push(rec);
+    updateActiveTurnSummary(turn);
     scrollFeedToBottom();
   }
 
@@ -848,17 +1422,18 @@
     }
 
     const rec = state.activeToolCards.splice(idx, 1)[0];
+    rec.finished = true;
     const elapsed = performance.now() - rec.startedAt;
-    const card = rec.el;
+    const row = rec.el;
 
-    const durEl = card.querySelector('.tool-duration');
-    const badgeEl = card.querySelector('.tool-status-badge');
-    const outLabel = card.querySelector('.tool-out-label');
-    const outPre = card.querySelector('.tool-out-pre');
+    const durEl = row.querySelector('.step-dur');
+    const badgeEl = row.querySelector('.step-badge');
+    const outLabel = row.querySelector('.step-out-label');
+    const outPre = row.querySelector('.step-out-pre');
 
     if (durEl) durEl.textContent = formatDuration(elapsed);
     if (badgeEl) {
-      badgeEl.className = `badge tool-status-badge ${isError ? 'badge-err' : 'badge-ok'}`;
+      badgeEl.className = `badge step-badge ${isError ? 'badge-err' : 'badge-ok'}`;
       badgeEl.textContent = isError ? 'Failed' : 'Done';
     }
     if (outLabel) outLabel.style.display = 'block';
@@ -867,24 +1442,50 @@
       const text = String(output || '');
       outPre.textContent = text.length > 4000 ? `${text.slice(0, 4000)}\n... (${text.length} chars total)` : text;
     }
-    if (isError) card.classList.add('open');
+    if (state.activeTurn) updateActiveTurnSummary(state.activeTurn);
+    scrollFeedToBottom();
+  }
+
+  function finalizeActiveTurn(finalAnswer) {
+    const turn = ensureActiveTurn();
+    turn.done = true;
+    turn.activityEl.classList.remove('working');
+    turn.activityEl.classList.add('done');
+    // Auto-collapse accordion cleanly (Antigravity / Gemini style)
+    turn.activityEl.classList.remove('open');
+
+    const incoming = splitThinkAndAnswer(finalAnswer || turn.rawStream);
+    if (incoming.think && !turn.thinkText.includes(incoming.think)) {
+      turn.thinkText = [turn.thinkText, incoming.think].filter(Boolean).join('\n\n');
+      turn.thinkEl.style.display = 'block';
+      turn.thinkEl.textContent = turn.thinkText;
+    }
+
+    const cleanAnswer = incoming.answer || splitThinkAndAnswer(turn.rawStream).answer || 'Done.';
+    turn.answerEl.innerHTML = renderSafeMarkdown(cleanAnswer);
+    updateActiveTurnSummary(turn);
+    state.activeTurn = null;
+    state.currentThoughtEl = null;
+    scrollFeedToBottom();
+    return cleanAnswer;
+  }
+
+  function appendAssistantMarkdown(markdownText) {
+    hideEmptyState();
+    const feed = el('agent-feed');
+    const wrap = document.createElement('div');
+    wrap.className = 'chat-entry turn-assistant';
+    const split = splitThinkAndAnswer(markdownText);
+    const ans = document.createElement('div');
+    ans.className = 'turn-answer md-readme';
+    ans.innerHTML = renderSafeMarkdown(split.answer || markdownText || '');
+    wrap.appendChild(ans);
+    feed.appendChild(wrap);
     scrollFeedToBottom();
   }
 
   function appendFinalAnswer(answer) {
-    hideEmptyState();
-    state.currentThoughtEl = null;
-    const feed = el('agent-feed');
-    const div = document.createElement('div');
-    div.className = 'chat-entry';
-    div.innerHTML = `
-      <div class="chat-final-answer">
-        <div class="chat-final-label">${icon('checkCircle', 13)} Completed</div>
-        <div>${escapeHtml(answer)}</div>
-      </div>
-    `;
-    feed.appendChild(div);
-    scrollFeedToBottom();
+    return finalizeActiveTurn(answer);
   }
 
   function appendSystemNote(text, variant) {
@@ -980,6 +1581,7 @@
       });
     } catch (err) {
       appendSystemNote(`Failed to launch agent: ${err}`, 'error');
+      presentActionableError(err, 'view-agent');
       setRunningState(false);
     }
   }
@@ -1110,7 +1712,7 @@
 
     const sidebarRam = el('sidebar-ram-metric');
     if (sidebarRam) {
-      sidebarRam.textContent = `${used.toFixed(1)} / ${total.toFixed(1)} GB · ${Math.round(pct)}%`;
+      sidebarRam.textContent = `${used.toFixed(1)}/${total.toFixed(0)} GB (${Math.round(pct)}%)`;
     }
     const bar = el('sidebar-ram-bar-fill');
     if (bar) {
@@ -1168,7 +1770,8 @@
         const topRec = (res.recommendations && res.recommendations[0])
           ? res.recommendations[0].tier || res.recommendations[0].model_name
           : 'Detected';
-        const platformLabel = p.is_apple_silicon ? 'Apple Silicon' : (p.os_name || 'Desktop');
+        const platformLabel = p.cpu_brand || (p.is_apple_silicon ? 'Apple Silicon' : (p.os_name || 'Desktop'));
+        const osLabel = p.os_version || p.os_name || '';
         statsEl.innerHTML = `
           <div class="stat-tile">
             <span class="stat-label">Used Memory</span>
@@ -1186,9 +1789,9 @@
             <span class="card-meta">${p.is_apple_silicon ? 'Unified Memory Architecture' : 'System RAM'}</span>
           </div>
           <div class="stat-tile">
-            <span class="stat-label">Platform &amp; CPU</span>
+            <span class="stat-label">Host Chip &amp; OS</span>
             <span class="stat-value">${escapeHtml(platformLabel)}</span>
-            <span class="card-meta mono">${escapeHtml(p.cpu_cores || 'n/a')} cores · ${escapeHtml(p.arch || '')} · ${escapeHtml(topRec)}</span>
+            <span class="card-meta mono">${escapeHtml(p.cpu_cores || 'n/a')} cores · ${escapeHtml(osLabel)} · ${escapeHtml(topRec)}</span>
           </div>
         `;
       }
@@ -1336,22 +1939,37 @@
       const sub = rt.available
         ? (rt.binary_path || 'Ready')
         : (installing ? 'Installing isolated runtime...' : rt.install_hint);
-      const btnLabel = rt.id === 'mlx' ? 'Install MLX Runtime (1-click)' : 'Install llama.cpp (1-click)';
-      const actionHtml = rt.available
+      const btnLabelMap = {
+        mlx: 'Install MLX (1-click)',
+        llamacpp: 'Install llama.cpp (1-click)',
+        'mlx-whisper': 'Install Whisper (1-click)',
+        mflux: 'Install mflux (1-click)',
+        'mlx-audio': 'Install mlx-audio (1-click)',
+        'parakeet-mlx': 'Install Parakeet (1-click)',
+        'faster-whisper': 'Install Faster-Whisper',
+      };
+      const btnLabel = btnLabelMap[rt.id] || `Install ${rt.id} (1-click)`;
+      const statusBadge = rt.available
         ? '<span class="badge badge-ok">Ready</span>'
-        : `<button class="btn btn-sm btn-primary" ${installing ? 'disabled' : ''} onclick="DexApp.installRuntime('${escapeHtml(rt.id)}')">
+        : '<span class="badge badge-warn">Not Installed</span>';
+      const footerAction = rt.available
+        ? ''
+        : `<button class="btn btn-sm btn-primary" style="align-self: flex-start;" ${installing ? 'disabled' : ''} onclick="DexApp.installRuntime('${escapeHtml(rt.id)}')">
              ${icon('download', 12)} <span>${installing ? 'Installing...' : escapeHtml(btnLabel)}</span>
            </button>`;
       return `
         <div class="runtime-card ${rt.available ? 'ready' : ''}" title="${escapeHtml(rt.binary_path || rt.managed_dir || '')}">
           <div class="runtime-card-info">
-            <div class="runtime-card-title">
-              <span class="status-dot" style="${dotStyle}"></span>
-              <span>${escapeHtml(rt.name)}</span>
+            <div class="runtime-card-head">
+              <div class="runtime-card-title">
+                <span class="status-dot" style="${dotStyle}"></span>
+                <span>${escapeHtml(rt.name)}</span>
+              </div>
+              ${statusBadge}
             </div>
             <div class="runtime-card-sub">${escapeHtml(sub)}</div>
           </div>
-          ${actionHtml}
+          ${footerAction}
         </div>
       `;
     }).join('');
@@ -1418,6 +2036,13 @@
 
   async function loadLocalModelFromSpec(m, switchToAgent) {
     if (!m || !m.path) return;
+    if (m.integrity_status === 'Incomplete') {
+      presentActionableError(
+        `ModelIntegrityError: Cannot load '${m.name}' (${m.integrity_note || 'incomplete weights'}).`,
+        'view-models'
+      );
+      return;
+    }
     const noteEl = el('library-status-note');
     const sizeText = m.size_bytes ? formatSizeGb(m.size_bytes) : 'model';
     state.modelLoadingText = `Loading ${sizeText}...`;
@@ -1489,6 +2114,7 @@
       }
       appendRuntimeLog(`Model load failed: ${err}`, true);
       appendSystemNote(`Failed to load local model: ${err}`, 'error');
+      presentActionableError(err, 'view-models');
     }
   }
 
@@ -1567,14 +2193,17 @@
   async function addModelDirFromUi() {
     const inp = el('input-model-dir');
     const path = inp ? inp.value.trim() : '';
-    if (!path) return alert('Enter a folder path (e.g. ~/.lmstudio/models).');
+    if (!path) {
+      showGlobalToast({ title: 'Folder Path Required', message: 'Enter or browse a model folder (e.g. ~/.lmstudio/models).', variant: 'warn' });
+      return;
+    }
     try {
       await invoke('add_model_dir', { path });
       inp.value = '';
       closeModelsDrawers();
       await refreshModelsLibrary();
     } catch (err) {
-      alert(`Could not add folder: ${err}`);
+      showGlobalToast({ title: 'Could Not Add Folder', message: String(err), variant: 'error' });
     }
   }
 
@@ -1585,7 +2214,7 @@
       await invoke('remove_model_dir', { path: entry.path });
       await refreshModelsLibrary();
     } catch (err) {
-      alert(`Could not remove folder: ${err}`);
+      showGlobalToast({ title: 'Could Not Remove Folder', message: String(err), variant: 'error' });
     }
   }
 
@@ -1668,26 +2297,39 @@
         : '';
 
       const isLoaded = state.activeLoadedModel && m.path && state.activeLoadedModel.path === m.path;
-      const actionBtn = isLoaded
-        ? `<button class="btn btn-sm btn-danger" onclick="DexApp.unloadLocalModel()">
-             ${icon('power', 12)} <span>Unload</span>
+      const isIncomplete = m.integrity_status === 'Incomplete';
+      const integrityBadge = isIncomplete
+        ? `<span class="badge badge-warn" title="${escapeHtml(m.integrity_note || 'Incomplete weights')}">${icon('alertTriangle', 10)} Incomplete</span>`
+        : '';
+      const integrityNoteHtml = isIncomplete
+        ? `<div class="integrity-note">${escapeHtml(m.integrity_note || 'Missing or partial model weights on disk. Re-download before loading.')}</div>`
+        : '';
+      const actionBtn = isIncomplete
+        ? `<button class="btn btn-sm" disabled title="${escapeHtml(m.integrity_note || 'Incomplete model cannot be loaded')}">
+             ${icon('alertTriangle', 12)} <span>Incomplete</span>
            </button>`
-        : `<button class="btn btn-sm btn-primary" onclick="DexApp.useLibraryModel('${escapeHtml(m.id)}')">
-             ${icon('zap', 12)} <span>Use Model</span>
-           </button>`;
+        : isLoaded
+          ? `<button class="btn btn-sm btn-danger" onclick="DexApp.unloadLocalModel()">
+               ${icon('power', 12)} <span>Unload</span>
+             </button>`
+          : `<button class="btn btn-sm btn-primary" onclick="DexApp.useLibraryModel('${escapeHtml(m.id)}')">
+               ${icon('zap', 12)} <span>Use Model</span>
+             </button>`;
 
       return `
-        <div class="library-row">
+        <div class="library-row ${isIncomplete ? 'incomplete' : ''}">
           <div class="library-row-main">
             <div class="library-row-head">
               ${isLoaded ? '<span class="model-pill-dot ready" title="Loaded in Dex Native Runtime"></span>' : ''}
               <span class="library-model-name">${escapeHtml(m.name)}</span>
               ${fmtBadge}
+              ${integrityBadge}
               ${variantHtml}
               ${capsHtml}
               ${ctxBadge}
             </div>
             <div class="library-row-path" title="${escapeHtml(m.path || subText)}">${escapeHtml(subText)}</div>
+            ${integrityNoteHtml}
           </div>
           <div class="library-row-actions">
             <span class="library-size">${formatSizeGb(m.size_bytes)}</span>
@@ -1703,6 +2345,13 @@
   async function useLibraryModel(modelId) {
     const m = state.scannedModels.find((x) => x.id === modelId);
     if (!m) return;
+    if (m.integrity_status === 'Incomplete') {
+      presentActionableError(
+        `ModelIntegrityError: Cannot load '${m.name}' (${m.integrity_note || 'incomplete weights'}).`,
+        'view-models'
+      );
+      return;
+    }
 
     if (m.format === 'ollama') {
       el('sel-provider').value = 'ollama';
@@ -1740,7 +2389,7 @@
   }
 
   async function revealModelPath(path) {
-    try { await invoke('reveal_in_finder', { path }); } catch (err) { alert(err); }
+    try { await invoke('reveal_in_finder', { path }); } catch (err) { showGlobalToast({ title: 'Finder Error', message: String(err), variant: 'error' }); }
   }
 
   function useModel(name, source) {
@@ -1756,13 +2405,12 @@
   }
 
   async function deleteModel(modelId) {
-    if (!confirm(`Delete model '${modelId}'?`)) return;
     try {
       await invoke('delete_model', { modelId });
       appendSystemNote(`Removed model ${modelId}`);
       refreshModelsLibrary();
     } catch (err) {
-      alert(`Failed to delete model: ${err}`);
+      showGlobalToast({ title: 'Delete Model Failed', message: String(err), variant: 'error' });
     }
   }
 
@@ -1925,7 +2573,8 @@
           <select id="hf-variant-select" class="select mono" onchange="DexApp.onSelectHfVariant()">
             ${filesRes.value.map((f, i) => {
               const recTag = f.is_recommended ? ' (Recommended)' : '';
-              return `<option value="${i}" ${i === defaultIdx ? 'selected' : ''}>[${escapeHtml(f.format)} · ${escapeHtml(f.quantization)}] ${escapeHtml(f.filename)} — ${formatSizeGb(f.size_bytes)}${recTag}</option>`;
+              const auxTag = f.is_auxiliary ? ' [Aux]' : '';
+              return `<option value="${i}" ${i === defaultIdx ? 'selected' : ''}>[${escapeHtml(f.format)} · ${escapeHtml(f.quantization)}]${auxTag} ${escapeHtml(f.filename)} — ${formatSizeGb(f.size_bytes)}${recTag}</option>`;
             }).join('')}
           </select>
           <div class="item-card-row">
@@ -1992,11 +2641,27 @@
     const f = state.selectedHfFiles[Number(sel.value) || 0];
     if (!f) return;
     if (String(f.format || '').toUpperCase() === 'MLX') {
-      // Multi-shard MLX repos are best cloned/downloaded via huggingface-cli or LM Studio
       const hint = `hf download ${state.selectedHfRepoId} --local-dir ~/.dex/models/${state.selectedHfRepoId.split('/').pop()}`;
-      if (confirm(`MLX repositories contain multiple safetensors shards.\n\nCopy / open repository on Hugging Face, or run:\n${hint}\n\nOpen repository page now?`)) {
-        openExternalUrl(`https://huggingface.co/${state.selectedHfRepoId}`);
-      }
+      const repoUrl = `https://huggingface.co/${state.selectedHfRepoId}`;
+      showGlobalToast({
+        title: 'Multi-Shard MLX Repository',
+        message: `Run: ${hint}`,
+        variant: 'ok',
+        actions: [
+          { label: 'Open on Hugging Face', icon: 'externalLink', primary: true, onClick: (tid) => { dismissGlobalToast(tid); openExternalUrl(repoUrl); } },
+          {
+            label: 'Copy CLI Command',
+            icon: 'copy',
+            onClick: (tid) => {
+              if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(hint).catch(() => {});
+              }
+              dismissGlobalToast(tid);
+              showGlobalToast({ title: 'Copied', message: 'Copied `hf download` command to clipboard.', variant: 'ok', autoHideMs: 3000 });
+            },
+          },
+        ],
+      });
       return;
     }
     await startDownload(state.selectedHfRepoId, f.filename, f.download_url);
@@ -2011,7 +2676,7 @@
     try {
       await invoke('open_external_url', { url });
     } catch (err) {
-      alert(`Could not open URL: ${err}`);
+      showGlobalToast({ title: 'Could Not Open URL', message: String(err), variant: 'error' });
     }
   }
 
@@ -2038,14 +2703,90 @@
     return `https://huggingface.co/${cleanRepo}/blob/main/${cleanRel}`;
   }
 
-  // Safe Full GFM Markdown Renderer (GFM Tables, Relative/Absolute HF Images, Blockquotes, Nested Lists, Code)
+  function decodeCommonHtmlEntities(str) {
+    const named = {
+      middot: '\u00B7',
+      nbsp: ' ',
+      mdash: '\u2014',
+      ndash: '\u2013',
+      rarr: '\u2192',
+      larr: '\u2190',
+      harr: '\u2194',
+      copy: '\u00A9',
+      reg: '\u00AE',
+      trade: '\u2122',
+      hellip: '\u2026',
+      bull: '\u2022',
+      times: '\u00D7',
+      lsquo: '\u2018',
+      rsquo: '\u2019',
+      ldquo: '\u201C',
+      rdquo: '\u201D',
+    };
+    return String(str || '')
+      .replace(/&([a-zA-Z]+);/g, (full, key) => (named[key] !== undefined ? named[key] : full))
+      .replace(/&#(\d+);/g, (full, num) => {
+        const cp = parseInt(num, 10);
+        if (cp === 60 || cp === 62 || cp === 38 || cp === 34 || cp === 39) return full;
+        return cp > 0 && cp <= 0x10FFFF ? String.fromCodePoint(cp) : full;
+      })
+      .replace(/&#x([0-9a-fA-F]+);/g, (full, hex) => {
+        const cp = parseInt(hex, 16);
+        if (cp === 60 || cp === 62 || cp === 38 || cp === 34 || cp === 39) return full;
+        return cp > 0 && cp <= 0x10FFFF ? String.fromCodePoint(cp) : full;
+      });
+  }
+
+  function sanitizeSafeInlineStyle(rawStyle) {
+    const safeProps = [];
+    const decls = String(rawStyle || '').split(';');
+    for (let i = 0; i < decls.length; i++) {
+      const pair = decls[i].split(':');
+      if (pair.length < 2) continue;
+      const prop = pair[0].trim().toLowerCase();
+      const val = pair.slice(1).join(':').trim();
+      if (!val || /url\s*\(|expression\s*\(|javascript:/i.test(val)) continue;
+      if (prop === 'text-align' && /^(left|center|right)$/i.test(val)) {
+        safeProps.push(`text-align: ${val}`);
+      } else if (prop === 'max-width' && /^\d+(?:px|%)$/.test(val)) {
+        safeProps.push(`max-width: ${val}`);
+      } else if (prop === 'border-radius' && /^\d+(?:px|%)$/.test(val)) {
+        safeProps.push(`border-radius: ${val}`);
+      }
+    }
+    return safeProps.join('; ');
+  }
+
+  function renderCodeBlockHtml(codeText) {
+    return `<div class="md-code-wrap"><button type="button" class="md-code-copy" onclick="DexApp.copyCodeBlock(this)">Copy</button><pre><code>${escapeHtml(codeText)}</code></pre></div>`;
+  }
+
+  // Safe Full GFM Markdown + Sanitized HF HTML Renderer
+  // Strips HTML comments, decodes entities, sanitizes safe HTML subset, resolves relative HF images/links, renders GFM tables & copyable code blocks
   function renderSafeMarkdown(md, repoId) {
-    const lines = String(md || '').replace(/\r\n/g, '\n').split('\n');
+    // 1. Strip HTML comments and dangerous blocks (<script>, <style>, <iframe>, <object>, <embed>, <svg>)
+    let cleaned = String(md || '')
+      .replace(/\r\n/g, '\n')
+      .replace(/<!--[\s\S]*?-->/g, '')
+      .replace(/<(script|style|iframe|object|embed|form)\b[\s\S]*?<\/\1>/gi, '')
+      .replace(/<(script|style|iframe|object|embed|input)\b[^>]*\/?>/gi, '');
+
+    // 2. Decode safe HTML entities (keeps <, >, &, ", ' untouched for XSS safety)
+    cleaned = decodeCommonHtmlEntities(cleaned);
+
+    const lines = cleaned.split('\n');
     const out = [];
     let inCode = false;
     let codeBuf = [];
     let listStack = []; // entries: { tag: 'ul'|'ol', indent: number }
     let inBlockquote = false;
+
+    const ALLOWED_HTML_TAGS = new Set([
+      'div', 'span', 'p', 'br', 'hr', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+      'ul', 'ol', 'li', 'a', 'strong', 'b', 'em', 'i', 'code', 'pre',
+      'details', 'summary', 'table', 'thead', 'tbody', 'tr', 'th', 'td',
+      'img', 'blockquote', 'sup', 'sub', 'center',
+    ]);
 
     function closeLists() {
       while (listStack.length > 0) {
@@ -2075,43 +2816,109 @@
       return cells.length >= 1 && cells.every((c) => /^:?-{2,}:?$/.test(c));
     }
 
-    function formatInline(raw) {
-      // 1. Extract safe HTML <img ...> tags into placeholders before HTML-escaping raw text
-      const tokens = [];
-      let work = String(raw || '').replace(/<img\b([^>]*?)\/?>/gi, (_, attrs) => {
+    function sanitizeHtmlTag(fullTag, closingSlash, tagNameRaw, rawAttrs) {
+      const tag = tagNameRaw.toLowerCase();
+      if (!ALLOWED_HTML_TAGS.has(tag)) return '';
+      const mappedTag = tag === 'center' ? 'div' : tag;
+      if (closingSlash) {
+        return mappedTag === 'br' || mappedTag === 'hr' || mappedTag === 'img'
+          ? ''
+          : `</${mappedTag}>`;
+      }
+      if (mappedTag === 'br') return '<br />';
+      if (mappedTag === 'hr') return '<hr />';
+
+      const attrs = String(rawAttrs || '');
+      if (mappedTag === 'img') {
         const srcMatch = attrs.match(/\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))/i);
         const altMatch = attrs.match(/\balt\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+        const wMatch = attrs.match(/\bwidth\s*=\s*(?:"(\d+(?:px|%)?)"|'(\d+(?:px|%)?)'|(\d+))/i);
+        const hMatch = attrs.match(/\bheight\s*=\s*(?:"(\d+(?:px)?)"|'(\d+(?:px)?)'|(\d+))/i);
         const rawSrc = srcMatch ? (srcMatch[1] || srcMatch[2] || srcMatch[3] || '') : '';
         const alt = altMatch ? (altMatch[1] || altMatch[2] || '') : '';
         const resolved = resolveHfImageUrl(repoId, rawSrc);
         if (!resolved) return '';
-        const idx = tokens.length;
-        tokens.push(`<img src="${escapeHtml(resolved)}" alt="${escapeHtml(alt)}" loading="lazy" onerror="this.style.display='none'" />`);
-        return `\u0000IMG${idx}\u0000`;
-      });
+        const styleBits = [];
+        const wVal = wMatch ? (wMatch[1] || wMatch[2] || wMatch[3]) : '';
+        const hVal = hMatch ? (hMatch[1] || hMatch[2] || hMatch[3]) : '';
+        if (wVal && /^\d+(?:px)?$/.test(wVal)) styleBits.push(`width:${wVal.endsWith('px') ? wVal : wVal + 'px'}`);
+        if (hVal && /^\d+(?:px)?$/.test(hVal)) styleBits.push(`height:${hVal.endsWith('px') ? hVal : hVal + 'px'}`);
+        const st = styleBits.length > 0 ? ` style="${styleBits.join(';')}"` : '';
+        return `<img src="${escapeHtml(resolved)}" alt="${escapeHtml(alt)}"${st} loading="lazy" onerror="this.style.display='none'" />`;
+      }
 
-      // 2. Escape all remaining raw HTML to guarantee zero XSS
-      let s = escapeHtml(work);
+      if (mappedTag === 'a') {
+        const hrefMatch = attrs.match(/\bhref\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))/i);
+        const rawHref = hrefMatch ? (hrefMatch[1] || hrefMatch[2] || hrefMatch[3] || '') : '';
+        const resolved = resolveHfLinkUrl(repoId, rawHref);
+        if (!resolved) return '<span>';
+        return `<a href="#" onclick="event.preventDefault(); DexApp.openExternalUrl('${escapeHtml(resolved)}')">`;
+      }
 
-      // 3. Inline code spans (protect contents from bold/italic/image replacements)
-      s = s.replace(/`([^`]+)`/g, (_, code) => {
+      const outAttrs = [];
+      if (tag === 'center') {
+        outAttrs.push('style="text-align: center"');
+      } else {
+        const alignMatch = attrs.match(/\balign\s*=\s*(?:"(left|center|right)"|'(left|center|right)'|(left|center|right))/i);
+        const styleMatch = attrs.match(/\bstyle\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+        const parts = [];
+        if (alignMatch) parts.push(`text-align: ${(alignMatch[1] || alignMatch[2] || alignMatch[3]).toLowerCase()}`);
+        if (styleMatch) {
+          const cleanSt = sanitizeSafeInlineStyle(styleMatch[1] || styleMatch[2] || '');
+          if (cleanSt) parts.push(cleanSt);
+        }
+        if (parts.length > 0) outAttrs.push(`style="${escapeHtml(parts.join('; '))}"`);
+      }
+
+      if (mappedTag === 'table') outAttrs.push('class="md-table"');
+      if (mappedTag === 'details' && /\bopen\b/i.test(attrs)) outAttrs.push('open');
+      if (mappedTag === 'td' || mappedTag === 'th') {
+        const cs = attrs.match(/\bcolspan\s*=\s*(?:"(\d+)"|'(\d+)'|(\d+))/i);
+        const rs = attrs.match(/\browspan\s*=\s*(?:"(\d+)"|'(\d+)'|(\d+))/i);
+        if (cs) outAttrs.push(`colspan="${cs[1] || cs[2] || cs[3]}"`);
+        if (rs) outAttrs.push(`rowspan="${rs[1] || rs[2] || rs[3]}"`);
+      }
+
+      const attrStr = outAttrs.length > 0 ? ' ' + outAttrs.join(' ') : '';
+      return `<${mappedTag}${attrStr}>`;
+    }
+
+    function formatInline(raw) {
+      const tokens = [];
+
+      // 1. Protect inline Markdown code spans first so literal HTML inside backticks stays escaped
+      let work = String(raw || '').replace(/`([^`]+)`/g, (_, code) => {
         const idx = tokens.length;
-        tokens.push(`<code>${code}</code>`);
+        tokens.push(`<code>${escapeHtml(code)}</code>`);
         return `\u0000TOK${idx}\u0000`;
       });
 
-      // 4. Markdown images ![alt](url) (including linked badge images [![alt](img)](href))
+      // 2. Sanitize allowed HTML tags into safe tokens before escaping arbitrary text
+      work = work.replace(/<(\/?)([a-zA-Z][a-zA-Z0-9]*)\b([^>]*)>/g, (full, slash, tagName, attrs) => {
+        const sanitized = sanitizeHtmlTag(full, slash, tagName, attrs);
+        if (!sanitized) return '';
+        const idx = tokens.length;
+        tokens.push(sanitized);
+        return `\u0000TOK${idx}\u0000`;
+      });
+
+      // 3. Escape any leftover angle brackets / raw text
+      let s = escapeHtml(work);
+
+      // 4. Linked Markdown images [![alt](img)](href)
       s = s.replace(/\[!\[([^\]]*)\]\(([^)\s]+)(?:\s+&quot;[^&]*&quot;)?\)\]\(([^)\s]+)\)/g, (_, alt, imgUrl, href) => {
         const resolvedImg = resolveHfImageUrl(repoId, imgUrl);
         const resolvedHref = resolveHfLinkUrl(repoId, href);
         if (!resolvedImg) return '';
         const imgTag = `<img src="${escapeHtml(resolvedImg)}" alt="${alt}" loading="lazy" onerror="this.style.display='none'" />`;
-        if (!resolvedHref) return imgTag;
         const idx = tokens.length;
-        tokens.push(`<a href="#" onclick="event.preventDefault(); DexApp.openExternalUrl('${escapeHtml(resolvedHref)}')">${imgTag}</a>`);
+        tokens.push(resolvedHref
+          ? `<a href="#" onclick="event.preventDefault(); DexApp.openExternalUrl('${escapeHtml(resolvedHref)}')">${imgTag}</a>`
+          : imgTag);
         return `\u0000TOK${idx}\u0000`;
       });
 
+      // 5. Markdown images ![alt](url)
       s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+&quot;[^&]*&quot;)?\)/g, (_, alt, imgUrl) => {
         const resolved = resolveHfImageUrl(repoId, imgUrl);
         if (!resolved) return '';
@@ -2120,7 +2927,7 @@
         return `\u0000TOK${idx}\u0000`;
       });
 
-      // 5. Markdown links [label](url)
+      // 6. Markdown links [label](url)
       s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label, rawUrl) => {
         const resolved = resolveHfLinkUrl(repoId, rawUrl);
         if (!resolved) return label;
@@ -2129,12 +2936,12 @@
         return `\u0000TOK${idx}\u0000`;
       });
 
-      // 6. Bold & italic
+      // 7. Bold & italic
       s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
       s = s.replace(/(^|[^*])\*([^*]+)\*(?!\*)/g, '$1<em>$2</em>');
 
-      // 7. Restore safe HTML tokens
-      s = s.replace(/\u0000(?:IMG|TOK)(\d+)\u0000/g, (_, idxStr) => tokens[Number(idxStr)] || '');
+      // 8. Restore safe tokens
+      s = s.replace(/\u0000TOK(\d+)\u0000/g, (_, idxStr) => tokens[Number(idxStr)] || '');
       return s;
     }
 
@@ -2150,7 +2957,7 @@
           inCode = true;
           codeBuf = [];
         } else {
-          out.push(`<pre><code>${escapeHtml(codeBuf.join('\n'))}</code></pre>`);
+          out.push(renderCodeBlockHtml(codeBuf.join('\n')));
           inCode = false;
         }
         continue;
@@ -2163,12 +2970,6 @@
       if (!trimmed) {
         closeLists();
         closeBlockquote();
-        continue;
-      }
-
-      // Skip standalone HTML wrapper tags like <div align="center">, </p>, <br/> cleanly
-      if (/^<\/?(?:div|p|center|section|details|summary|table|thead|tbody|tr|td|th|br|hr|span|h[1-6]|a)\b[^>]*>$/i.test(trimmed)) {
-        if (/^<br\s*\/?>$/i.test(trimmed)) out.push('<br />');
         continue;
       }
 
@@ -2186,7 +2987,7 @@
         closeBlockquote();
         const headerCells = splitTableRow(trimmed);
         const bodyRows = [];
-        i += 2; // consume header + separator
+        i += 2;
         while (i < lines.length) {
           const rowTrim = lines[i].trim();
           if (!rowTrim || !rowTrim.includes('|')) {
@@ -2209,11 +3010,11 @@
       }
 
       // Headings
-      const hMatch = trimmed.match(/^(#{1,4})\s+(.*)$/);
+      const hMatch = trimmed.match(/^(#{1,6})\s+(.*)$/);
       if (hMatch) {
         closeLists();
         closeBlockquote();
-        const lvl = hMatch[1].length;
+        const lvl = Math.min(4, hMatch[1].length);
         out.push(`<h${lvl}>${formatInline(hMatch[2])}</h${lvl}>`);
         continue;
       }
@@ -2254,10 +3055,16 @@
       }
 
       closeLists();
-      out.push(`<p>${formatInline(trimmed)}</p>`);
+      // Pass through block-level sanitized HTML lines directly without wrapping inside redundant <p>
+      if (/^<\/?(?:div|p|table|thead|tbody|tr|th|td|details|summary|ul|ol|li|h[1-6]|hr|blockquote|center)\b/i.test(trimmed)) {
+        const rendered = formatInline(trimmed);
+        if (rendered.trim()) out.push(rendered);
+      } else {
+        out.push(`<p>${formatInline(trimmed)}</p>`);
+      }
     }
 
-    if (inCode) out.push(`<pre><code>${escapeHtml(codeBuf.join('\n'))}</code></pre>`);
+    if (inCode) out.push(renderCodeBlockHtml(codeBuf.join('\n')));
     closeLists();
     closeBlockquote();
     return out.join('\n');
@@ -2269,7 +3076,7 @@
       el('download-progress-box').style.display = 'block';
       el('dl-title').textContent = `Downloading ${filename}`;
     } catch (err) {
-      alert(`Download failed: ${err}`);
+      showGlobalToast({ title: 'Download Failed', message: String(err), variant: 'error' });
     }
   }
 
@@ -2285,7 +3092,10 @@
     const path = el('import-path').value.trim();
     const name = el('import-name').value.trim() || null;
     const toOllama = el('import-to-ollama').checked;
-    if (!path) return alert('Specify a .gguf file or MLX model directory path.');
+    if (!path) {
+      showGlobalToast({ title: 'Model Path Required', message: 'Browse or enter a .gguf file or MLX folder path.', variant: 'warn' });
+      return;
+    }
     try {
       const meta = await invoke('import_local_gguf', { path, name, toOllama });
       el('import-path').value = '';
@@ -2294,7 +3104,7 @@
       appendSystemNote(`Imported local model ${meta.name} (${meta.id})`);
       refreshModelsLibrary();
     } catch (err) {
-      alert(`Import failed: ${err}`);
+      showGlobalToast({ title: 'Import Failed', message: String(err), variant: 'error' });
     }
   }
 
@@ -2308,7 +3118,7 @@
       el('dl-title').textContent = `Ollama: Pulling ${modelName}`;
       el('ollama-pull-input').value = '';
     } catch (err) {
-      alert(`Ollama pull failed: ${err}`);
+      showGlobalToast({ title: 'Ollama Pull Failed', message: String(err), variant: 'error' });
     }
   }
 
@@ -2442,8 +3252,9 @@
     try {
       await invoke('install_catalog_extension', { catalogId });
       refreshExtensions();
+      showGlobalToast({ title: 'Extension Installed', message: `Added '${catalogId}' to your installed extensions.`, variant: 'ok' });
     } catch (err) {
-      alert(`Install failed: ${err}`);
+      showGlobalToast({ title: 'Install Failed', message: String(err), variant: 'error' });
     }
   }
 
@@ -2452,7 +3263,7 @@
       await invoke('toggle_extension', { id, enabled });
       refreshExtensions();
     } catch (err) {
-      alert(`Toggle failed: ${err}`);
+      showGlobalToast({ title: 'Toggle Failed', message: String(err), variant: 'error' });
     }
   }
 
@@ -2461,7 +3272,7 @@
       await invoke('start_extension', { id });
       refreshExtensions();
     } catch (err) {
-      alert(`Start failed: ${err}`);
+      showGlobalToast({ title: 'Start Failed', message: String(err), variant: 'error' });
       refreshExtensions();
     }
   }
@@ -2471,17 +3282,16 @@
       await invoke('stop_extension', { id });
       refreshExtensions();
     } catch (err) {
-      alert(`Stop failed: ${err}`);
+      showGlobalToast({ title: 'Stop Failed', message: String(err), variant: 'error' });
     }
   }
 
   async function removeExt(id) {
-    if (!confirm(`Remove extension '${id}'?`)) return;
     try {
       await invoke('remove_extension', { id });
       refreshExtensions();
     } catch (err) {
-      alert(`Remove failed: ${err}`);
+      showGlobalToast({ title: 'Remove Failed', message: String(err), variant: 'error' });
     }
   }
 
@@ -2489,7 +3299,7 @@
     try {
       await invoke('update_extension_timeout', { id, idleTimeoutSecs });
     } catch (err) {
-      alert(`Update timeout failed: ${err}`);
+      showGlobalToast({ title: 'Update Timeout Failed', message: String(err), variant: 'error' });
     }
   }
 
@@ -2519,7 +3329,10 @@
     const estimatedRamMb = Number(el('mcp-ram').value) || 512;
     const idleTimeoutSecs = Number(el('mcp-timeout').value);
 
-    if (!id || !name) return alert('Extension ID and Display Name are required.');
+    if (!id || !name) {
+      showGlobalToast({ title: 'Missing Fields', message: 'Extension ID and Display Name are required.', variant: 'warn' });
+      return;
+    }
 
     try {
       await invoke('add_custom_mcp_extension', {
@@ -2540,18 +3353,376 @@
       });
       refreshExtensions();
     } catch (err) {
-      alert(`Failed to add custom MCP: ${err}`);
+      showGlobalToast({ title: 'Failed to Add Custom MCP', message: String(err), variant: 'error' });
     }
   }
 
   // =========================================================================
-  // Audio, Voice Push-to-Talk, OCR & Document Reader
+  // Voice Studio (STT, Multilingual TTS, Voice Cloning, Audio Models) & Docs
   // =========================================================================
+  const STUDIO_PRESET_VOICES = [
+    { id: 'Vivian', label: 'Vivian (Qwen3-TTS Multilingual)' },
+    { id: 'Serena', label: 'Serena (Qwen3-TTS Expressive)' },
+    { id: 'Ryan', label: 'Ryan (Qwen3-TTS Clear EN)' },
+    { id: 'Monica', label: 'Monica (macOS Spanish ES)' },
+    { id: 'Paulina', label: 'Paulina (macOS Spanish MX)' },
+    { id: 'Samantha', label: 'Samantha (macOS English US)' },
+  ];
+
+  async function refreshAudioStudio() {
+    try {
+      const res = await invoke('get_audio_studio_state');
+      if (res) {
+        if (res.settings) state.audioSettings = res.settings;
+        state.clonedVoices = res.voices || [];
+        state.audioCatalog = res.catalog || [];
+        if (Array.isArray(res.runtimes) && res.runtimes.length > 0) {
+          state.runtimes = res.runtimes;
+        }
+        syncAudioSettingsUi();
+        renderVoiceSelectAndClonedList();
+        renderAudioCatalog();
+      }
+    } catch (err) {
+      console.error('Audio studio refresh error:', err);
+    }
+    await refreshAudioMedia();
+  }
+
+  function syncAudioSettingsUi() {
+    const s = state.audioSettings || {};
+    const lang = s.language || 'auto';
+    const compLang = el('composer-stt-lang');
+    const studioLang = el('voice-studio-lang');
+    if (compLang) compLang.value = lang;
+    if (studioLang) studioLang.value = lang;
+
+    const modelSel = el('tts-model-select');
+    if (modelSel) {
+      const targetVal = `${s.tts_engine === 'auto' ? 'mlx-audio' : s.tts_engine}::${s.tts_model || 'mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit'}`;
+      const match = Array.from(modelSel.options).find((o) => o.value === targetVal || o.value.endsWith(`::${s.tts_model}`));
+      if (match) modelSel.value = match.value;
+    }
+
+    const sidecarWrap = el('tts-sidecar-url-wrap');
+    const sidecarInput = el('tts-sidecar-url-input');
+    const isSidecar = s.tts_engine === 'sidecar' || (modelSel && modelSel.value.startsWith('sidecar::'));
+    if (sidecarWrap) sidecarWrap.style.display = isSidecar ? 'flex' : 'none';
+    if (sidecarInput && s.tts_sidecar_url) sidecarInput.value = s.tts_sidecar_url;
+
+    const badge = el('voice-studio-engine-badge');
+    if (badge) {
+      const eng = s.tts_engine === 'auto' ? 'Auto (MLX / Say)' : s.tts_engine;
+      badge.textContent = `${eng} · ${(lang || 'auto').toUpperCase()}`;
+    }
+  }
+
+  async function persistAudioSettings() {
+    try {
+      await invoke('save_audio_settings_cmd', { settings: state.audioSettings });
+    } catch (err) {
+      console.error('Failed to save audio settings:', err);
+    }
+    syncAudioSettingsUi();
+  }
+
+  async function onVoiceLanguageChange(newLang) {
+    state.audioSettings.language = newLang || 'auto';
+    await persistAudioSettings();
+  }
+
+  async function onTtsModelSelectChange() {
+    const sel = el('tts-model-select');
+    if (!sel) return;
+    const parts = String(sel.value || '').split('::');
+    if (parts.length === 2) {
+      state.audioSettings.tts_engine = parts[0];
+      state.audioSettings.tts_model = parts[1];
+      const preset = (state.audioCatalog || []).find((p) => p.repo_id === parts[1]);
+      if (preset && preset.endpoint) {
+        state.audioSettings.tts_sidecar_url = preset.endpoint;
+        const inp = el('tts-sidecar-url-input');
+        if (inp) inp.value = preset.endpoint;
+      }
+    }
+    await persistAudioSettings();
+  }
+
+  async function onVoiceStudioSettingChange() {
+    const voiceSel = el('tts-voice-select');
+    const sidecarInput = el('tts-sidecar-url-input');
+    if (voiceSel) {
+      state.audioSettings.active_voice_id = voiceSel.value || null;
+    }
+    if (sidecarInput && sidecarInput.value.trim()) {
+      state.audioSettings.tts_sidecar_url = sidecarInput.value.trim();
+    }
+    await persistAudioSettings();
+  }
+
+  function toggleAudioModelsDrawer(forceState) {
+    const drawer = el('drawer-audio-models');
+    if (!drawer) return;
+    const willOpen = forceState !== undefined ? !!forceState : !drawer.classList.contains('open');
+    drawer.classList.toggle('open', willOpen);
+    if (willOpen) renderAudioCatalog();
+  }
+
+  function renderAudioCatalog() {
+    const box = el('audio-models-catalog-list');
+    if (!box) return;
+    const rtMap = new Map((state.runtimes || []).map((r) => [r.id, r]));
+    const items = state.audioCatalog || [];
+    if (items.length === 0) {
+      box.innerHTML = '<div class="empty-note">Loading audio model catalog...</div>';
+      return;
+    }
+
+    box.innerHTML = items.map((item) => {
+      const isBuiltin = item.runtime_id === 'builtin';
+      const isSidecar = item.kind === 'sidecar';
+      const rt = rtMap.get(item.runtime_id);
+      const installed = isBuiltin || (rt && rt.available);
+      const isActive =
+        (item.kind === 'asr' && state.audioSettings.asr_model === item.repo_id) ||
+        ((item.kind === 'tts' || isSidecar) && state.audioSettings.tts_model === item.repo_id);
+
+      const kindBadge = item.kind === 'asr'
+        ? '<span class="badge badge-accent">ASR</span>'
+        : isSidecar
+          ? '<span class="badge badge-warn">Sidecar</span>'
+          : '<span class="badge badge-ok">TTS</span>';
+      const cloneBadge = item.supports_cloning ? '<span class="badge">Cloning</span>' : '';
+
+      let actionBtn = '';
+      if (isSidecar) {
+        actionBtn = `
+          <button class="btn btn-sm" onclick="DexApp.selectAudioModelPreset('${escapeHtml(item.id)}')">
+            ${icon('check', 11)} <span>${isActive ? 'Selected' : 'Use Preset'}</span>
+          </button>
+          <button class="btn btn-sm btn-ghost" onclick="DexApp.installAudioSidecarPreset('${escapeHtml(item.runtime_id)}')">
+            ${icon('puzzle', 11)} <span>Extension</span>
+          </button>`;
+      } else if (installed) {
+        actionBtn = `
+          <span class="badge badge-ok">Ready</span>
+          <button class="btn btn-sm ${isActive ? 'btn-primary' : ''}" onclick="DexApp.selectAudioModelPreset('${escapeHtml(item.id)}')">
+            ${icon('check', 11)} <span>${isActive ? 'Active' : 'Select'}</span>
+          </button>`;
+      } else {
+        const isInstalling = state.installingRuntime === item.runtime_id;
+        actionBtn = `
+          <button class="btn btn-sm btn-primary" ${isInstalling ? 'disabled' : ''} onclick="DexApp.installRuntimeInline('${escapeHtml(item.runtime_id)}')">
+            ${icon('download', 11)} <span>${isInstalling ? 'Installing...' : 'Install (1-click)'}</span>
+          </button>`;
+      }
+
+      return `
+        <div class="audio-model-card ${isActive ? 'active' : ''}">
+          <div class="item-card-row">
+            <span class="item-title" style="font-size: 12px;">${escapeHtml(item.name)}</span>
+            <div class="row" style="gap: 4px;">${kindBadge}${cloneBadge}</div>
+          </div>
+          <div class="card-meta mono" style="font-size: 10.5px;">${escapeHtml(item.repo_id)}</div>
+          <div class="item-desc" style="font-size: 11px;">${escapeHtml(item.description)}</div>
+          <div class="card-meta" style="font-size: 10.5px;">${escapeHtml(item.languages)}</div>
+          <div class="row-wrap" style="gap: 6px; padding-top: 2px;">${actionBtn}</div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  async function selectAudioModelPreset(presetId) {
+    const preset = (state.audioCatalog || []).find((p) => p.id === presetId);
+    if (!preset) return;
+    if (preset.kind === 'asr') {
+      state.audioSettings.asr_engine = preset.engine;
+      state.audioSettings.asr_model = preset.repo_id;
+    } else {
+      state.audioSettings.tts_engine = preset.engine;
+      state.audioSettings.tts_model = preset.repo_id;
+      if (preset.endpoint) state.audioSettings.tts_sidecar_url = preset.endpoint;
+    }
+    await persistAudioSettings();
+    renderAudioCatalog();
+    showGlobalToast({
+      title: 'Audio Engine Selected',
+      message: `Active ${preset.kind.toUpperCase()} model set to ${preset.name}.`,
+      variant: 'ok',
+      autoHideMs: 4000,
+    });
+  }
+
+  async function installAudioSidecarPreset(catalogId) {
+    try {
+      await invoke('install_catalog_extension', { catalogId });
+      showGlobalToast({
+        title: 'Audio Sidecar Added',
+        message: `Installed '${catalogId}' into Extensions. Open Extensions to configure/start it.`,
+        variant: 'ok',
+        actions: [{ label: 'Open Extensions', icon: 'puzzle', primary: true, onClick: (tid) => { dismissGlobalToast(tid); navigate('view-extensions'); } }],
+      });
+    } catch (err) {
+      showGlobalToast({ title: 'Sidecar Install Failed', message: String(err), variant: 'error' });
+    }
+  }
+
+  function renderVoiceSelectAndClonedList() {
+    const sel = el('tts-voice-select');
+    const list = el('cloned-voices-list');
+    const activeId = state.audioSettings.active_voice_id || '';
+
+    if (sel) {
+      const parts = ['<option value="">Default Voice (Auto)</option>'];
+      if (state.clonedVoices.length > 0) {
+        parts.push('<optgroup label="Cloned Voices (~/.dex/voices/)">');
+        for (const v of state.clonedVoices) {
+          parts.push(`<option value="${escapeHtml(v.id)}" ${v.id === activeId ? 'selected' : ''}>${escapeHtml(v.name)} [${escapeHtml(v.language.toUpperCase())} · Cloned]</option>`);
+        }
+        parts.push('</optgroup>');
+      }
+      parts.push('<optgroup label="Studio &amp; System Presets">');
+      for (const p of STUDIO_PRESET_VOICES) {
+        parts.push(`<option value="${escapeHtml(p.id)}" ${p.id === activeId ? 'selected' : ''}>${escapeHtml(p.label)}</option>`);
+      }
+      parts.push('</optgroup>');
+      sel.innerHTML = parts.join('');
+    }
+
+    if (list) {
+      if (state.clonedVoices.length === 0) {
+        list.innerHTML = '<div class="card-meta" style="font-size: 11px;">No cloned voices saved yet. Record 5s or browse a clean .wav sample above.</div>';
+      } else {
+        list.innerHTML = state.clonedVoices.map((v) => `
+          <div class="cloned-voice-row ${v.id === activeId ? 'active' : ''}">
+            <div style="min-width: 0;">
+              <div class="row" style="gap: 6px;">
+                ${icon('user', 12)}
+                <span style="font-size: 12px; font-weight: 500;">${escapeHtml(v.name)}</span>
+                <span class="badge mono" style="font-size: 9.5px;">${escapeHtml(v.language.toUpperCase())}</span>
+              </div>
+              <div class="card-meta mono" style="font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(v.ref_audio_path)}</div>
+            </div>
+            <div class="row" style="gap: 4px; flex-shrink: 0;">
+              <button class="btn btn-sm ${v.id === activeId ? 'btn-primary' : ''}" onclick="DexApp.useClonedVoice('${escapeHtml(v.id)}')">Use</button>
+              <button class="btn btn-sm btn-ghost" title="Delete voice profile" onclick="DexApp.deleteClonedVoiceFromUi('${escapeHtml(v.id)}')">${icon('trash', 12)}</button>
+            </div>
+          </div>
+        `).join('');
+      }
+    }
+  }
+
+  async function useClonedVoice(id) {
+    state.audioSettings.active_voice_id = id;
+    const found = (state.clonedVoices || []).find((v) => v.id === id);
+    if (found && found.language && found.language !== 'auto') {
+      state.audioSettings.language = found.language;
+    }
+    if (state.audioSettings.tts_engine === 'macos-say') {
+      state.audioSettings.tts_engine = 'mlx-audio';
+      state.audioSettings.tts_model = 'mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit';
+    }
+    await persistAudioSettings();
+    renderVoiceSelectAndClonedList();
+    showGlobalToast({ title: 'Cloned Voice Active', message: `Selected '${found ? found.name : id}' for synthesis.`, variant: 'ok', autoHideMs: 3500 });
+  }
+
+  async function recordVoiceCloneSample() {
+    const btn = el('btn-record-clone-sample');
+    if (btn) btn.disabled = true;
+    showGlobalToast({ title: 'Recording Reference Sample (5s)', message: 'Speak naturally in a quiet room for 5 seconds...', variant: 'ok', autoHideMs: 5200 });
+    try {
+      const rec = await invoke('record_voice_sample', { seconds: 5 });
+      const inp = el('clone-ref-audio-path');
+      if (inp) inp.value = rec.path;
+      showGlobalToast({
+        title: 'Sample Recorded',
+        message: `Saved ${rec.duration_secs}s sample (peak ${Number(rec.peak_db || -60).toFixed(1)} dB).`,
+        variant: 'ok',
+        autoHideMs: 4500,
+      });
+      refreshAudioMedia();
+    } catch (err) {
+      showGlobalToast({ title: 'Recording Failed', message: String(err), variant: 'error' });
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  async function saveClonedVoiceFromUi() {
+    const name = (el('clone-voice-name') && el('clone-voice-name').value.trim()) || '';
+    const language = (el('clone-voice-lang') && el('clone-voice-lang').value) || 'auto';
+    const refAudioPath = (el('clone-ref-audio-path') && el('clone-ref-audio-path').value.trim()) || '';
+    const refText = (el('clone-ref-text') && el('clone-ref-text').value.trim()) || null;
+    if (!name || !refAudioPath) {
+      showGlobalToast({ title: 'Voice Profile Incomplete', message: 'Enter a profile name and browse or record a reference audio clip.', variant: 'warn' });
+      return;
+    }
+    try {
+      const prof = await invoke('save_cloned_voice', { name, language, refAudioPath, refText });
+      el('clone-voice-name').value = '';
+      el('clone-ref-text').value = '';
+      state.audioSettings.active_voice_id = prof.id;
+      await persistAudioSettings();
+      await refreshAudioStudio();
+      showGlobalToast({ title: 'Voice Profile Saved', message: `Saved '${prof.name}' to ~/.dex/voices/.`, variant: 'ok', autoHideMs: 4500 });
+    } catch (err) {
+      showGlobalToast({ title: 'Could Not Save Voice', message: String(err), variant: 'error' });
+    }
+  }
+
+  async function deleteClonedVoiceFromUi(id) {
+    try {
+      await invoke('delete_cloned_voice', { id });
+      if (state.audioSettings.active_voice_id === id) {
+        state.audioSettings.active_voice_id = null;
+        await persistAudioSettings();
+      }
+      await refreshAudioStudio();
+    } catch (err) {
+      showGlobalToast({ title: 'Delete Failed', message: String(err), variant: 'error' });
+    }
+  }
+
+  async function testMicAndSttFromUi() {
+    const btn = el('btn-test-mic-stt');
+    const outBox = el('stt-test-output');
+    const body = el('stt-test-body');
+    if (btn) btn.disabled = true;
+    if (outBox) outBox.style.display = 'block';
+    if (body) body.textContent = `Recording 3s test clip (language: ${(state.audioSettings.language || 'auto').toUpperCase()})... Speak now!`;
+
+    try {
+      const res = await invoke('test_mic_and_stt', {
+        seconds: 3,
+        language: state.audioSettings.language || 'auto',
+        engine: state.audioSettings.asr_engine || 'auto',
+        model: state.audioSettings.asr_model || null,
+      });
+      const peakStr = `${Number(res.peak_db || -60).toFixed(1)} dB`;
+      if (res.transcript && res.transcript.trim()) {
+        body.textContent = `Duration: ${res.duration_secs}s | Peak Level: ${peakStr} | Engine: ${res.backend || 'auto'} (${res.language || state.audioSettings.language})\nTranscript: "${res.transcript}"`;
+      } else {
+        body.textContent = `Duration: ${res.duration_secs}s | Peak Level: ${peakStr}\nWarning: ${res.stt_warning || 'No speech detected (check mic input level or language).'}`;
+        if (res.stt_warning) presentActionableError(res.stt_warning, 'view-audio');
+      }
+      refreshAudioMedia();
+    } catch (err) {
+      if (body) body.textContent = `Test failed: ${err}`;
+      presentActionableError(err, 'view-audio');
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
   async function toggleVoiceRecording() {
     const micBtn = el('btn-mic');
     const meter = el('voice-status-bar');
+    const installSttBtn = `<button class="btn btn-sm btn-primary" onclick="DexApp.installRuntimeInline('mlx-whisper')">${icon('download', 11)} <span>Install Voice STT (mlx-whisper)</span></button>`;
 
     if (!state.isRecordingVoice) {
+      hideComposerToast();
       try {
         await invoke('start_voice_recording');
         state.isRecordingVoice = true;
@@ -2559,43 +3730,86 @@
         micBtn.innerHTML = icon('square', 11);
         meter.classList.add('active');
       } catch (err) {
-        alert(`Microphone capture failed: ${err}`);
+        const msg = String(err || 'Unknown microphone error');
+        const permHint = /device|permission|stream|input/i.test(msg)
+          ? ' Check macOS System Settings -> Privacy & Security -> Microphone for Dex.'
+          : '';
+        showComposerToast(`Microphone capture failed: ${msg}.${permHint}`, 'error');
       }
     } else {
       state.isRecordingVoice = false;
       micBtn.classList.remove('recording');
       micBtn.innerHTML = icon('clock', 14);
       meter.classList.remove('active');
+      const lang = (el('composer-stt-lang') && el('composer-stt-lang').value) || state.audioSettings.language || 'auto';
+      showComposerToast(`Transcribing (${lang.toUpperCase()}) with VAD + normalization...`, 'ok');
       try {
-        const res = await invoke('stop_and_transcribe');
+        const res = await invoke('stop_and_transcribe', {
+          language: lang,
+          engine: state.audioSettings.asr_engine || 'auto',
+          model: state.audioSettings.asr_model || null,
+        });
         micBtn.innerHTML = icon('mic', 14);
         refreshAudioMedia();
-        if (res.transcript) {
+        if (res.transcript && res.transcript.trim()) {
+          hideComposerToast();
           const ta = el('input-goal');
           const cur = ta.value.trim();
-          ta.value = cur ? `${cur} ${res.transcript}` : res.transcript;
+          ta.value = cur ? `${cur} ${res.transcript.trim()}` : res.transcript.trim();
           autoResizeComposer();
           ta.focus();
         } else {
-          appendSystemNote(`Voice saved to ${res.audio_path} (${res.duration_secs}s). ${res.stt_warning || ''}`);
+          const warnText = res.stt_warning || `No speech detected (peak ${Number(res.peak_db || -60).toFixed(1)} dB).`;
+          showComposerToast(
+            `Audio saved (${res.duration_secs}s). ${warnText}`,
+            'warn',
+            installSttBtn
+          );
+          if (res.stt_warning) presentActionableError(res.stt_warning, 'view-audio');
         }
       } catch (err) {
         micBtn.innerHTML = icon('mic', 14);
-        alert(`Transcription failed: ${err}`);
+        showComposerToast(`Voice transcription failed: ${err}`, 'error', installSttBtn);
+        presentActionableError(err, 'view-audio');
       }
     }
   }
 
   async function speakTextFromUi() {
-    const text = el('tts-text-input').value.trim();
-    const voice = el('tts-voice-input').value.trim() || null;
-    if (!text) return;
+    const text = (el('tts-text-input') && el('tts-text-input').value.trim()) || '';
+    if (!text) {
+      showGlobalToast({ title: 'Text Required', message: 'Enter spoken text to synthesize audio.', variant: 'warn' });
+      return;
+    }
+    const voice = (el('tts-voice-select') && el('tts-voice-select').value) || null;
+    const language = (el('voice-studio-lang') && el('voice-studio-lang').value) || state.audioSettings.language || 'auto';
+    const rawModel = (el('tts-model-select') && el('tts-model-select').value) || '';
+    const [engine, model] = rawModel.includes('::') ? rawModel.split('::') : [state.audioSettings.tts_engine || 'auto', state.audioSettings.tts_model || null];
+    const sidecarUrl = (el('tts-sidecar-url-input') && el('tts-sidecar-url-input').value.trim()) || state.audioSettings.tts_sidecar_url || null;
+
+    const btn = el('btn-synthesize-audio');
+    const note = el('tts-status-note');
+    if (btn) btn.disabled = true;
+    if (note) note.textContent = `Synthesizing via ${engine}...`;
+
     try {
-      await invoke('speak_text', { text, voice });
-      el('tts-text-input').value = '';
+      const res = await invoke('speak_text', {
+        text,
+        voice,
+        language,
+        engine,
+        model,
+        refAudio: null,
+        refText: null,
+        sidecarUrl,
+      });
+      if (note) note.textContent = `Saved via ${res.backend} (${res.duration_secs || '?'}s)`;
       refreshAudioMedia();
     } catch (err) {
-      alert(`TTS failed: ${err}`);
+      if (note) note.textContent = `Error: ${err}`;
+      presentActionableError(err, 'view-audio');
+    } finally {
+      if (btn) btn.disabled = false;
     }
   }
 
@@ -2627,7 +3841,10 @@
 
   async function runOcrFromUi() {
     const path = el('doc-path-input').value.trim();
-    if (!path) return alert('Enter an image path (.png, .jpg, .webp).');
+    if (!path) {
+      showGlobalToast({ title: 'Image Path Required', message: 'Drop an image or click Browse to select one for OCR.', variant: 'warn' });
+      return;
+    }
     const metaEl = el('doc-result-meta');
     const boxEl = el('doc-result-box');
     const sendBtn = el('btn-send-doc-agent');
@@ -2644,12 +3861,16 @@
       state.lastParsedDoc = { path, engine: res.engine, text: res.text || '' };
     } catch (err) {
       metaEl.textContent = `OCR failed: ${err}`;
+      showGlobalToast({ title: 'OCR Failed', message: String(err), variant: 'error' });
     }
   }
 
   async function parseDocFromUi() {
     const path = el('doc-path-input').value.trim();
-    if (!path) return alert('Enter a document path (.pdf, .docx, .md, .png).');
+    if (!path) {
+      showGlobalToast({ title: 'Document Path Required', message: 'Drop a PDF/DOCX/PPTX/image or click Browse first.', variant: 'warn' });
+      return;
+    }
     const metaEl = el('doc-result-meta');
     const boxEl = el('doc-result-box');
     const sendBtn = el('btn-send-doc-agent');
@@ -2671,6 +3892,7 @@
       };
     } catch (err) {
       metaEl.textContent = `Parse failed: ${err}`;
+      showGlobalToast({ title: 'Document Parse Failed', message: String(err), variant: 'error' });
     }
   }
 
@@ -2683,8 +3905,26 @@
   }
 
   // =========================================================================
-  // Media Studio (Image Gen, Upscale, Process, Video Inspect, Visual Gallery)
+  // Media Studio (Image Gen, Model Picker, Upscale, Process, Video Inspect, Visual Gallery)
   // =========================================================================
+  function onMediaModelChange() {
+    const sel = el('media-model-select');
+    const customWrap = el('media-custom-model-wrap');
+    const stepsInput = el('media-steps-input');
+    if (!sel) return;
+    const val = sel.value;
+    if (customWrap) customWrap.style.display = val === 'custom' ? 'flex' : 'none';
+    if (stepsInput) {
+      if (val === 'flux-schnell-4bit' || val === 'z-image-turbo') {
+        stepsInput.value = '4';
+      } else if (val === 'flux2-klein-4b') {
+        stepsInput.value = '8';
+      } else if (val === 'qwen-image' || val === 'flux-dev-4bit') {
+        stepsInput.value = '20';
+      }
+    }
+  }
+
   async function refreshComfyWorkflows() {
     const sel = el('media-workflow-select');
     if (!sel) return;
@@ -2704,19 +3944,25 @@
 
   async function generateImageFromUi() {
     const prompt = el('media-prompt-input').value.trim();
-    if (!prompt) return alert('Enter a prompt to generate an image.');
+    if (!prompt) {
+      showGlobalToast({ title: 'Prompt Required', message: 'Describe the image you want to generate.', variant: 'warn' });
+      return;
+    }
     const negativePrompt = el('media-neg-input').value.trim() || null;
     const [wStr, hStr] = (el('media-res-select').value || '1024x1024').split('x');
     const width = parseInt(wStr, 10) || 1024;
     const height = parseInt(hStr, 10) || 1024;
-    const steps = parseInt(el('media-steps-input').value, 10) || 20;
+    const steps = parseInt(el('media-steps-input').value, 10) || 4;
     const backend = el('media-backend-select').value || 'auto';
     const workflow = el('media-workflow-select').value || null;
+    const selModel = (el('media-model-select') && el('media-model-select').value) || 'flux-schnell-4bit';
+    const customModel = (el('media-custom-model-input') && el('media-custom-model-input').value.trim()) || '';
+    const model = selModel === 'custom' ? (customModel || 'flux-schnell-4bit') : selModel;
 
     const btn = el('btn-generate-image');
     const statusEl = el('media-gen-status');
     btn.disabled = true;
-    statusEl.textContent = `Generating ${width}x${height} (${steps} steps, ${backend})...`;
+    statusEl.textContent = `Generating ${width}x${height} (${steps} steps, ${model}, ${backend})...`;
 
     try {
       const res = await invoke('generate_image', {
@@ -2727,12 +3973,14 @@
         steps,
         backend,
         workflow,
-        model: null,
+        model,
       });
       statusEl.textContent = `Saved ${res.width}x${res.height} via ${res.backend} (seed ${res.seed}): ${res.path}`;
       refreshVisualMedia();
+      showGlobalToast({ title: 'Image Generated', message: `Saved ${res.width}x${res.height} via ${res.backend}.`, variant: 'ok', autoHideMs: 4500 });
     } catch (err) {
       statusEl.textContent = `Error: ${err}`;
+      presentActionableError(err, 'view-media');
     } finally {
       btn.disabled = false;
     }
@@ -2809,12 +4057,15 @@
   async function revealGalleryItem(idx) {
     const item = state.visualMediaCache[idx];
     if (!item) return;
-    try { await invoke('reveal_in_finder', { path: item.path }); } catch (err) { alert(err); }
+    try { await invoke('reveal_in_finder', { path: item.path }); } catch (err) { showGlobalToast({ title: 'Finder Error', message: String(err), variant: 'error' }); }
   }
 
   async function upscaleAssetPathFromUi() {
     const path = el('media-asset-path').value.trim();
-    if (!path) return alert('Enter an image path first.');
+    if (!path) {
+      showGlobalToast({ title: 'Image Path Required', message: 'Drop an image or click Browse first.', variant: 'warn' });
+      return;
+    }
     const out = el('media-utility-output');
     out.style.display = 'block';
     out.textContent = `Upscaling ${path} 2x...`;
@@ -2824,12 +4075,16 @@
       refreshVisualMedia();
     } catch (err) {
       out.textContent = `Error: ${err}`;
+      showGlobalToast({ title: 'Upscale Failed', message: String(err), variant: 'error' });
     }
   }
 
   async function convertAssetWebpFromUi() {
     const path = el('media-asset-path').value.trim();
-    if (!path) return alert('Enter an image path first.');
+    if (!path) {
+      showGlobalToast({ title: 'Image Path Required', message: 'Drop an image or click Browse first.', variant: 'warn' });
+      return;
+    }
     const out = el('media-utility-output');
     out.style.display = 'block';
     out.textContent = `Converting ${path} to WebP...`;
@@ -2845,12 +4100,16 @@
       refreshVisualMedia();
     } catch (err) {
       out.textContent = `Error: ${err}`;
+      showGlobalToast({ title: 'Convert Failed', message: String(err), variant: 'error' });
     }
   }
 
   async function inspectVideoFromUi() {
     const path = el('media-asset-path').value.trim();
-    if (!path) return alert('Enter a video path first.');
+    if (!path) {
+      showGlobalToast({ title: 'Video Path Required', message: 'Drop a video or click Browse first.', variant: 'warn' });
+      return;
+    }
     const out = el('media-utility-output');
     out.style.display = 'block';
     out.textContent = `Inspecting ${path} via ffprobe...`;
@@ -2859,6 +4118,7 @@
       out.textContent = JSON.stringify(res, null, 2);
     } catch (err) {
       out.textContent = `Error: ${err}`;
+      showGlobalToast({ title: 'Video Inspect Failed', message: String(err), variant: 'error' });
     }
   }
 
@@ -3033,7 +4293,10 @@
   async function generate3dFromUi() {
     const imagePath = el('gen3d-image-path').value.trim() || null;
     const prompt = el('gen3d-prompt').value.trim() || null;
-    if (!imagePath && !prompt) return alert('Select an input image or enter a prompt.');
+    if (!imagePath && !prompt) {
+      showGlobalToast({ title: 'Image or Prompt Required', message: 'Browse/drop a concept image or enter a 3D prompt first.', variant: 'warn' });
+      return;
+    }
 
     const backend = el('gen3d-backend').value || 'auto';
     const textureResolution = parseInt(el('gen3d-texres').value, 10) || 1024;
@@ -3057,6 +4320,7 @@
       await load3dModelIntoViewer(res.path);
     } catch (err) {
       statusEl.textContent = `Error: ${err}`;
+      presentActionableError(err, 'view-3d');
     } finally {
       btn.disabled = false;
     }
@@ -3113,7 +4377,7 @@
   async function reveal3dGalleryItem(idx) {
     const item = state.models3dCache[idx];
     if (!item) return;
-    try { await invoke('reveal_in_finder', { path: item.path }); } catch (err) { alert(err); }
+    try { await invoke('reveal_in_finder', { path: item.path }); } catch (err) { showGlobalToast({ title: 'Finder Error', message: String(err), variant: 'error' }); }
   }
 
   function show3dActionOutput(text) {
@@ -3125,7 +4389,10 @@
   }
 
   async function convertSelected3dWithBlender() {
-    if (!state.selected3dModel) return alert('Select a 3D model first.');
+    if (!state.selected3dModel) {
+      showGlobalToast({ title: 'Select a 3D Model', message: 'Click a .glb model in the library or drop one onto the viewer first.', variant: 'warn' });
+      return;
+    }
     const targetFmt = el('blender-target-fmt').value || 'fbx';
     const ratioVal = parseFloat(el('blender-decimate-ratio').value);
     const decimateRatio = (!Number.isNaN(ratioVal) && ratioVal < 1.0) ? ratioVal : null;
@@ -3145,11 +4412,15 @@
       refresh3dModels();
     } catch (err) {
       show3dActionOutput(`Error: ${err}`);
+      showGlobalToast({ title: 'Blender Convert Failed', message: String(err), variant: 'error' });
     }
   }
 
   async function renderSelected3dPreview() {
-    if (!state.selected3dModel) return alert('Select a 3D model first.');
+    if (!state.selected3dModel) {
+      showGlobalToast({ title: 'Select a 3D Model', message: 'Select or drop a 3D model first.', variant: 'warn' });
+      return;
+    }
     show3dActionOutput(`Rendering studio preview of ${state.selected3dModel}...`);
     try {
       const res = await invoke('render_3d_preview', {
@@ -3161,11 +4432,15 @@
       show3dActionOutput(`Preview rendered (${res.width}x${res.height}): ${res.preview_png}`);
     } catch (err) {
       show3dActionOutput(`Error: ${err}`);
+      showGlobalToast({ title: 'Preview Render Failed', message: String(err), variant: 'error' });
     }
   }
 
   function sendSelected3dToAgent() {
-    if (!state.selected3dModel) return alert('Select a 3D model first.');
+    if (!state.selected3dModel) {
+      showGlobalToast({ title: 'Select a 3D Model', message: 'Select a 3D model first.', variant: 'warn' });
+      return;
+    }
     const tris = state.selected3dReport
       ? ` (${state.selected3dReport.triangle_count} triangles, ${state.selected3dReport.vertex_count} vertices)`
       : '';
@@ -3176,26 +4451,39 @@
   }
 
   async function revealSelected3dInFinder() {
-    if (!state.selected3dModel) return alert('Select a 3D model first.');
-    try { await invoke('reveal_in_finder', { path: state.selected3dModel }); } catch (err) { alert(err); }
+    if (!state.selected3dModel) {
+      showGlobalToast({ title: 'Select a 3D Model', message: 'Select a 3D model first.', variant: 'warn' });
+      return;
+    }
+    try { await invoke('reveal_in_finder', { path: state.selected3dModel }); } catch (err) { showGlobalToast({ title: 'Finder Error', message: String(err), variant: 'error' }); }
   }
 
   async function inspectUnityProjectFromUi() {
     const projectDir = el('unity-project-path').value.trim();
-    if (!projectDir) return alert('Enter a Unity project directory path first.');
+    if (!projectDir) {
+      showGlobalToast({ title: 'Unity Folder Required', message: 'Click Browse to pick a Unity project folder first.', variant: 'warn' });
+      return;
+    }
     show3dActionOutput(`Inspecting Unity project '${projectDir}'...`);
     try {
       const report = await invoke('inspect_unity_project', { projectDir });
       show3dActionOutput(JSON.stringify(report, null, 2));
     } catch (err) {
       show3dActionOutput(`Error: ${err}`);
+      showGlobalToast({ title: 'Unity Inspect Failed', message: String(err), variant: 'error' });
     }
   }
 
   async function exportSelected3dToUnity() {
-    if (!state.selected3dModel) return alert('Select a 3D model first.');
+    if (!state.selected3dModel) {
+      showGlobalToast({ title: 'Select a 3D Model', message: 'Select a 3D model first.', variant: 'warn' });
+      return;
+    }
     const projectDir = el('unity-project-path').value.trim();
-    if (!projectDir) return alert('Enter a Unity project directory path first.');
+    if (!projectDir) {
+      showGlobalToast({ title: 'Unity Folder Required', message: 'Click Browse to pick a Unity project folder first.', variant: 'warn' });
+      return;
+    }
     const subdir = el('unity-subdir-input').value.trim() || 'Assets/DexGenerated';
     const overwrite = el('unity-overwrite').checked;
 
@@ -3208,9 +4496,132 @@
         overwrite,
       });
       show3dActionOutput(JSON.stringify(res, null, 2));
+      showGlobalToast({ title: 'Exported to Unity', message: `Copied asset into ${subdir}.`, variant: 'ok', autoHideMs: 4500 });
     } catch (err) {
       show3dActionOutput(`Error: ${err}`);
+      showGlobalToast({ title: 'Unity Export Failed', message: String(err), variant: 'error' });
     }
+  }
+
+  // =========================================================================
+  // Phase 14: Native Browse Pickers & Context-Aware Drag & Drop Routing
+  // =========================================================================
+  async function browseFileToInput(inputId, title, extensions, onPicked) {
+    try {
+      const picked = await invoke('pick_file_dialog', { title, extensions: extensions || null });
+      if (!picked) return;
+      const inp = el(inputId);
+      if (inp) inp.value = picked;
+      if (typeof onPicked === 'function') onPicked(picked);
+    } catch (err) {
+      showGlobalToast({ title: 'File Picker Error', message: String(err), variant: 'error' });
+    }
+  }
+
+  async function browseFolderToInput(inputId, title) {
+    try {
+      const picked = await invoke('pick_folder_dialog', { title });
+      if (!picked) return;
+      const inp = el(inputId);
+      if (inp) inp.value = picked;
+    } catch (err) {
+      showGlobalToast({ title: 'Folder Picker Error', message: String(err), variant: 'error' });
+    }
+  }
+
+  function browseDocFile() {
+    return browseFileToInput(
+      'doc-path-input',
+      'Select Document or Image for OCR / Parsing',
+      ['png', 'jpg', 'jpeg', 'webp', 'tiff', 'pdf', 'docx', 'pptx', 'md', 'txt']
+    );
+  }
+
+  function browseVoiceRefAudio() {
+    return browseFileToInput(
+      'clone-ref-audio-path',
+      'Select Voice Reference Sample (3-15s)',
+      ['wav', 'mp3', 'm4a', 'flac', 'ogg', 'aiff']
+    );
+  }
+
+  function browseMediaAssetFile() {
+    return browseFileToInput(
+      'media-asset-path',
+      'Select Image or Video Asset',
+      ['png', 'jpg', 'jpeg', 'webp', 'gif', 'mp4', 'mov', 'mkv', 'webm']
+    );
+  }
+
+  function browse3dSourceImage() {
+    return browseFileToInput(
+      'gen3d-image-path',
+      'Select Concept Image for Image-to-3D',
+      ['png', 'jpg', 'jpeg', 'webp']
+    );
+  }
+
+  function browseUnityProjectFolder() {
+    return browseFolderToInput('unity-project-path', 'Select Unity Project Root Folder');
+  }
+
+  function browseModelDirFolder() {
+    return browseFolderToInput('input-model-dir', 'Select Local Models Directory');
+  }
+
+  function browseImportModelFile() {
+    return browseFileToInput('import-path', 'Select Local GGUF Model File', ['gguf']);
+  }
+
+  function fileExtLower(path) {
+    const clean = String(path || '').trim();
+    const dot = clean.lastIndexOf('.');
+    return dot >= 0 ? clean.slice(dot + 1).toLowerCase() : '';
+  }
+
+  async function routeDroppedPaths(paths) {
+    if (!Array.isArray(paths) || paths.length === 0) return;
+    const first = paths[0];
+    const ext = fileExtLower(first);
+    const leaf = first.split('/').pop() || first;
+
+    if (state.activeView === 'view-audio') {
+      if (['wav', 'mp3', 'm4a', 'flac', 'ogg', 'aiff'].includes(ext)) {
+        const inp = el('clone-ref-audio-path');
+        if (inp) inp.value = first;
+        showGlobalToast({ title: 'Voice Sample Loaded', message: `Loaded '${leaf}' into Voice Cloning Reference Audio.`, variant: 'ok', autoHideMs: 3500 });
+      } else {
+        const inp = el('doc-path-input');
+        if (inp) inp.value = first;
+        showGlobalToast({ title: 'Document Loaded', message: `Loaded '${leaf}' into OCR & Document Reader.`, variant: 'ok', autoHideMs: 3500 });
+      }
+      return;
+    }
+
+    if (state.activeView === 'view-media') {
+      const inp = el('media-asset-path');
+      if (inp) inp.value = first;
+      showGlobalToast({ title: 'Asset Loaded', message: `Loaded '${leaf}' into Local Asset Utilities.`, variant: 'ok', autoHideMs: 3500 });
+      return;
+    }
+
+    if (state.activeView === 'view-3d') {
+      if (['glb', 'gltf', 'obj'].includes(ext)) {
+        await load3dModelIntoViewer(first);
+        showGlobalToast({ title: '3D Model Loaded', message: `Inspecting '${leaf}' in WebGL2 Viewer.`, variant: 'ok', autoHideMs: 3500 });
+      } else if (['png', 'jpg', 'jpeg', 'webp'].includes(ext)) {
+        const inp = el('gen3d-image-path');
+        if (inp) inp.value = first;
+        showGlobalToast({ title: 'Concept Image Loaded', message: `Loaded '${leaf}' into Image to 3D.`, variant: 'ok', autoHideMs: 3500 });
+      } else {
+        const inp = el('unity-project-path');
+        if (inp) inp.value = first;
+      }
+      return;
+    }
+
+    // Default (`view-agent` or other views): attach to Agent composer
+    await addAttachmentPaths(paths);
   }
 
   // =========================================================================
@@ -3294,17 +4705,26 @@
         const badge = el('voice-db-badge');
         if (badge) badge.textContent = `${Number(d.level_db || -60).toFixed(1)} dB`;
       } else if (ev.type === 'RuntimeProgress') {
-        appendRuntimeLog(`[${d.runtime || 'runtime'}:${d.stage || 'log'}] ${d.message || ''}`, !!d.is_error);
+        const line = `[${d.runtime || 'runtime'}:${d.stage || 'log'}] ${d.message || ''}`;
+        appendRuntimeLog(line, !!d.is_error);
+        if (state.activeInstallToastId) {
+          appendToastInstallProgress(state.activeInstallToastId, line);
+        }
       }
     });
 
     listen('dex-files-dropped', (event) => {
       const paths = event.payload;
       if (Array.isArray(paths) && paths.length > 0) {
-        addAttachmentPaths(paths);
-        const box = el('composer-box');
-        if (box) box.classList.remove('drag-over');
+        routeDroppedPaths(paths);
+        document.querySelectorAll('.drag-over').forEach((n) => n.classList.remove('drag-over'));
       }
+    });
+
+    listen('dex-vision-advisory', (event) => {
+      const msg = (event.payload && event.payload.message) || 'Active model server is text-only; falling back to Apple Vision OCR.';
+      appendSystemNote(msg, 'warn');
+      showGlobalToast({ title: 'Vision Fallback (OCR)', message: msg, variant: 'warn', autoHideMs: 7000 });
     });
 
     listen('dex-approval-request', (event) => {
@@ -3316,19 +4736,32 @@
       const data = event.payload || {};
       setRunningState(false);
       if (data.status === 'success') {
-        const ans = data.answer || 'Objective completed.';
-        appendFinalAnswer(ans);
+        const cleanedAnswer = finalizeActiveTurn(data.answer || '');
         state.sessionMessages.push({
           role: 'assistant',
-          content: ans,
+          content: cleanedAnswer,
           attachments: [],
           timestamp: Math.floor(Date.now() / 1000),
         });
         persistCurrentSession();
       } else if (data.status === 'cancelled') {
+        if (state.activeTurn) {
+          state.activeTurn.done = true;
+          state.activeTurn.activityEl.classList.remove('working');
+          updateActiveTurnSummary(state.activeTurn);
+          state.activeTurn = null;
+        }
         appendSystemNote(data.error || 'Execution cancelled by user.', 'warn');
       } else {
-        appendSystemNote(data.error || 'Execution failed.', 'error');
+        if (state.activeTurn) {
+          state.activeTurn.done = true;
+          state.activeTurn.activityEl.classList.remove('working');
+          updateActiveTurnSummary(state.activeTurn);
+          state.activeTurn = null;
+        }
+        const errMsg = data.error || 'Execution failed.';
+        appendSystemNote(errMsg, 'error');
+        presentActionableError(errMsg, 'view-agent');
       }
     });
 
@@ -3342,6 +4775,119 @@
       const tab = event.payload && event.payload.tab;
       if (tab === 'cookbook') navigate('view-cookbook');
     });
+  }
+
+  // =========================================================================
+  // Phase 14: Automated Visual & Interactive QA Walkthrough (DEX_QA_WALKTHROUGH=1)
+  // =========================================================================
+  function qaSleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  async function runAutomatedQaWalkthrough() {
+    const views = [
+      { id: 'view-agent', shot: '01_agent.png' },
+      { id: 'view-media', shot: '02_media_studio.png' },
+      { id: 'view-audio', shot: '03_voice_studio_docs.png' },
+      { id: 'view-3d', shot: '04_3d_game_studio.png' },
+      { id: 'view-models', shot: '05_models_hub.png' },
+      { id: 'view-extensions', shot: '06_extensions.png' },
+      { id: 'view-cookbook', shot: '07_cookbook.png' },
+    ];
+    const report = {
+      timestamp: new Date().toISOString(),
+      views_checked: [],
+      assertions: {},
+      screenshots: [],
+      js_errors: [],
+      passed: false,
+    };
+
+    try {
+      await qaSleep(1200);
+      for (const v of views) {
+        navigate(v.id);
+        await qaSleep(900);
+
+        if (v.id === 'view-audio') {
+          toggleAudioModelsDrawer(false);
+          await qaSleep(200);
+        }
+        if (v.id === 'view-3d') {
+          try { await createSample3dCubeFromUi(); } catch (_) {}
+          // Verify actionable toast renders visibly without window.alert
+          presentActionableError('BackendNotInstalled (3d): trellis-3d sidecar is not running.', 'view-3d');
+          await qaSleep(350);
+        }
+
+        const panel = el(v.id);
+        const overflowX = panel ? panel.scrollWidth > panel.clientWidth + 4 : false;
+        report.views_checked.push({
+          id: v.id,
+          active: !!(panel && panel.classList.contains('active')),
+          overflow_x: overflowX,
+        });
+
+        try {
+          const shotPath = await invoke('qa_capture_screenshot', { filename: v.shot });
+          report.screenshots.push(shotPath);
+        } catch (shotErr) {
+          report.screenshots.push(`FAILED:${v.shot}:${shotErr}`);
+        }
+
+        if (v.id === 'view-audio') {
+          toggleAudioModelsDrawer(true);
+          await qaSleep(300);
+          try {
+            const drawerShot = await invoke('qa_capture_screenshot', { filename: '03b_audio_models_drawer.png' });
+            report.screenshots.push(drawerShot);
+          } catch (_) {}
+          toggleAudioModelsDrawer(false);
+        }
+        if (v.id === 'view-3d') {
+          const stack = el('global-toast-stack');
+          if (stack) stack.innerHTML = '';
+        }
+      }
+
+      // Return to Agent view at the end so 01_agent.png is guaranteed centered & settled
+      navigate('view-agent');
+      await qaSleep(500);
+      try {
+        await invoke('qa_capture_screenshot', { filename: '01_agent.png' });
+      } catch (_) {}
+
+      // Check mandatory Phase 14 UI controls
+      report.assertions = {
+        composer_lang_selector: !!el('composer-stt-lang'),
+        voice_studio_lang_selector: !!el('voice-studio-lang'),
+        media_model_selector: !!el('media-model-select'),
+        global_toast_stack: !!el('global-toast-stack'),
+        browse_buttons_count: document.querySelectorAll('button').length > 0
+          ? Array.from(document.querySelectorAll('button')).filter((b) => (b.textContent || '').trim() === 'Browse').length
+          : 0,
+        drop_zones_count: document.querySelectorAll('[data-drop-target]').length,
+        scanned_models_count: (state.scannedModels || []).length,
+        incomplete_models_detected: (state.scannedModels || []).filter((m) => m.integrity_status === 'Incomplete').map((m) => m.name),
+      };
+      report.js_errors = (global.__DEX_QA_ERRORS__ || []).slice();
+      report.passed =
+        report.js_errors.length === 0 &&
+        report.assertions.composer_lang_selector &&
+        report.assertions.voice_studio_lang_selector &&
+        report.assertions.media_model_selector &&
+        report.assertions.global_toast_stack &&
+        report.assertions.browse_buttons_count >= 5 &&
+        report.assertions.drop_zones_count >= 4;
+
+      await invoke('qa_write_report', { report });
+    } catch (err) {
+      report.js_errors.push(`Walkthrough exception: ${err}`);
+      try { await invoke('qa_write_report', { report }); } catch (_) {}
+    } finally {
+      await qaSleep(250);
+      try { await invoke('qa_exit_app'); } catch (_) {}
+    }
   }
 
   // =========================================================================
@@ -3362,21 +4908,21 @@
       });
     }
 
-    // Drag & Drop highlight & fallback path extraction on Agent Composer
-    const composerBox = el('composer-box');
-    if (composerBox) {
-      composerBox.addEventListener('dragover', (e) => {
+    // Drag & Drop highlight & fallback path extraction on Agent Composer and ALL Studio Drop Zones
+    const dropTargets = [el('composer-box'), ...Array.from(document.querySelectorAll('[data-drop-target]'))].filter(Boolean);
+    dropTargets.forEach((zone) => {
+      zone.addEventListener('dragover', (e) => {
         e.preventDefault();
-        composerBox.classList.add('drag-over');
+        zone.classList.add('drag-over');
       });
-      composerBox.addEventListener('dragleave', (e) => {
-        if (!composerBox.contains(e.relatedTarget)) {
-          composerBox.classList.remove('drag-over');
+      zone.addEventListener('dragleave', (e) => {
+        if (!zone.contains(e.relatedTarget)) {
+          zone.classList.remove('drag-over');
         }
       });
-      composerBox.addEventListener('drop', (e) => {
+      zone.addEventListener('drop', (e) => {
         e.preventDefault();
-        composerBox.classList.remove('drag-over');
+        zone.classList.remove('drag-over');
         const files = e.dataTransfer && e.dataTransfer.files;
         if (files && files.length > 0) {
           const droppedPaths = [];
@@ -3384,11 +4930,11 @@
             if (files[i].path) droppedPaths.push(files[i].path);
           }
           if (droppedPaths.length > 0) {
-            addAttachmentPaths(droppedPaths);
+            routeDroppedPaths(droppedPaths);
           }
         }
       });
-    }
+    });
 
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
@@ -3421,7 +4967,7 @@
     syncModelLabels();
     registerEventListeners();
 
-    // Sync initial execution mode, live RAM telemetry, projects, and detected models
+    // Sync initial execution mode, live RAM telemetry, projects, audio settings, and detected models
     if (global.__TAURI__) {
       try {
         const mode = await invoke('get_mode');
@@ -3431,7 +4977,15 @@
       refreshCookbook();
       refreshProjects();
       refreshModelPickerOptions();
+      refreshAudioStudio();
       refreshTasks();
+
+      try {
+        const qaCfg = await invoke('get_qa_walkthrough_config');
+        if (qaCfg && qaCfg.enabled) {
+          runAutomatedQaWalkthrough();
+        }
+      } catch (_) {}
     }
   }
 
@@ -3464,6 +5018,24 @@
     startNewChat,
     refreshProjectSessions,
     openProjectSession,
+    renameProjectSession,
+    cancelRenameProjectSession,
+    commitRenameProjectSession,
+    deleteProjectSession,
+    showComposerToast,
+    hideComposerToast,
+    showGlobalToast,
+    dismissGlobalToast,
+    presentActionableError,
+    installRuntimeInline,
+    installVoiceEngineBundle,
+    loadRecommendedLocalModel,
+    setupTrellisAndOpenExtensions,
+    generateProcedural3dWithBlender,
+    installRuntimeFromAnywhere,
+    copyCodeBlock,
+    splitThinkAndAnswer,
+    decodeCommonHtmlEntities,
     setMode,
     runGoal,
     stopGoal,
@@ -3515,12 +5087,25 @@
     closeCustomMcpModal,
     toggleMcpTransportFields,
     submitCustomMcp,
+    refreshAudioStudio,
+    onVoiceLanguageChange,
+    onTtsModelSelectChange,
+    onVoiceStudioSettingChange,
+    toggleAudioModelsDrawer,
+    selectAudioModelPreset,
+    installAudioSidecarPreset,
+    useClonedVoice,
+    recordVoiceCloneSample,
+    saveClonedVoiceFromUi,
+    deleteClonedVoiceFromUi,
+    testMicAndSttFromUi,
     toggleVoiceRecording,
     speakTextFromUi,
     refreshAudioMedia,
     runOcrFromUi,
     parseDocFromUi,
     sendDocToAgent,
+    onMediaModelChange,
     refreshComfyWorkflows,
     generateImageFromUi,
     refreshVisualMedia,
@@ -3546,6 +5131,14 @@
     revealSelected3dInFinder,
     inspectUnityProjectFromUi,
     exportSelected3dToUnity,
+    browseDocFile,
+    browseVoiceRefAudio,
+    browseMediaAssetFile,
+    browse3dSourceImage,
+    browseUnityProjectFolder,
+    browseModelDirFolder,
+    browseImportModelFile,
+    routeDroppedPaths,
   };
 
   if (document.readyState === 'loading') {

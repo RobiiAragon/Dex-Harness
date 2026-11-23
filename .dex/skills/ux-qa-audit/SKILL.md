@@ -51,10 +51,25 @@ Every feature, phase, and release targeting `Dex.app` or any `harness-*` crate *
 ## 6. Real `.app` Bundle & `$PATH` Verification (`cwd = /`)
 
 - All subprocess invocations from `Dex.app` must enrich `$PATH` with `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, `~/.cargo/bin`, `~/.dex/runtimes/mlx-venv/bin`, and `/Applications/Blender.app/Contents/MacOS`.
-- Every release build must pass:
-  1. `cargo check --workspace --all-targets`
-  2. `cargo clippy --workspace --all-targets -- -D warnings`
-  3. `cargo test --workspace` (including tests simulating `cwd = /`)
-  4. Apple WebKit `jsc` syntax + Markdown/HTML sanitizer unit assertions
-  5. 0 `.unwrap()`/`.expect()` in production Rust, 0 `tokio::spawn` in `harness-desktop`, 0 emojis in UI
-  6. Startup smoke-test of `Dex.app/Contents/MacOS/dex-desktop` executed explicitly from `(cd / && ...)` confirming zero `os error 30` errors.
+- Never use `window.alert()` in `Dex.app` — Apple WKWebView drops `alert()` silently without a custom `UIDelegate`. Always present errors via visible inline toasts or actionable recovery banners with 1-click remediation buttons.
+
+---
+
+## 7. End-to-End Self-Verification Gate (MANDATORY Before Marking Any Phase Complete)
+
+Unit tests alone are **NOT sufficient**. Every phase touching runtimes, multimodal engines, models, or desktop UI **must** pass ALL five real-host E2E gates before delivery:
+
+1. **Real Subprocess & Flag Verification:** Execute `--help` and a real smoke invocation against installed local binaries (`mflux-generate`, `mlx_whisper`, `mlx_audio`, `blender`, `ffmpeg`, `llama-server`) confirming full `stdout` + `stderr` capture on failure and zero blind `exit status: 1` errors.
+2. **Real Model Integrity Scan:** Execute `dex models list` against the user's live model directories (e.g., `~/.lmstudio/models`) confirming corrupted/partial downloads (missing shards in `model.safetensors.index.json`, `.part` files, 0-byte weights) are flagged `Incomplete` and blocked from loading, while intact models report `Valid`.
+3. **Real Audio Pre-Processing & STT Roundtrip:** Generate or load a real spoken `.wav` (e.g., `dex audio speak "Hola mundo probando Dex en español"`), run Rust VAD silence trim + soft peak normalization + local STT with explicit `--language es`, and confirm the returned transcription matches the spoken Spanish (no language hallucinations).
+4. **Live Visual & Interactive `Dex.app` Walkthrough (`DEX_QA_WALKTHROUGH=1` under `cwd = /`):**
+   - Launch the freshly built `Dex.app/Contents/MacOS/dex-desktop` explicitly from `(cd / && DEX_QA_WALKTHROUGH=1 ...)`.
+   - Automatically traverse every primary view (`Agent`, `Media Studio`, `Audio & Docs`, `3D & Game Studio`, `Models Hub`, `Extensions`, `Hardware Cookbook`).
+   - Verify `0` uncaught JS errors (`window.__DEX_QA_ERRORS__`), `0` `os error 30` / `Read-only file system` logs, presence of key interactive controls (`Browse`, language selectors, model pickers, actionable toasts), and visually inspect captured window screenshots (`/tmp/dex-qa/*.png`) to confirm zero layout clipping or broken states.
+5. **Full Rust + WebKit Static & Build Gate:**
+   - `cargo check --workspace --all-targets` (0 warnings)
+   - `cargo clippy --workspace --all-targets -- -D warnings` (0 warnings)
+   - `cargo test --workspace` (0 failures, including `cwd = /` tests)
+   - Apple WebKit `jsc` syntax + unit checks on `crates/harness-desktop/ui/*.js`
+   - Static audit: `0` production `.unwrap()`/`.expect()`, `0` `tokio::spawn` in `harness-desktop`, `0` UI emojis, `0` raw relative `.dex/...` paths
+   - Rebuilt `Dex.app` bundle (`cargo-tauri build --bundles app --debug --no-sign`) verified under `cwd = /`.

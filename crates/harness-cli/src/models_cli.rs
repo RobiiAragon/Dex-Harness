@@ -276,12 +276,12 @@ pub async fn list_models() -> Result<()> {
         println!("   (No local models found in configured folders.)\n");
     } else {
         println!(
-            "{:<34} {:<7} {:<12} {:<10} {:<24}",
-            "NAME", "FORMAT", "QUANT", "SIZE", "CAPS"
+            "{:<34} {:<7} {:<10} {:<10} {:<12} {:<20}",
+            "NAME", "FORMAT", "QUANT", "SIZE", "INTEGRITY", "CAPS"
         );
         println!(
-            "{:-<34} {:-<7} {:-<12} {:-<10} {:-<24}",
-            "", "", "", "", ""
+            "{:-<34} {:-<7} {:-<10} {:-<10} {:-<12} {:-<20}",
+            "", "", "", "", "", ""
         );
         for m in &scanned {
             let size_str = format!("{:.2} GB", m.size_bytes as f64 / (1024.0 * 1024.0 * 1024.0));
@@ -291,13 +291,17 @@ pub async fn list_models() -> Result<()> {
                 m.capabilities.join(",")
             };
             println!(
-                "{:<34} {:<7} {:<12} {:<10} {:<24}",
+                "{:<34} {:<7} {:<10} {:<10} {:<12} {:<20}",
                 truncate_str(&m.name, 32),
                 m.format.to_string(),
                 m.quantization.as_deref().unwrap_or("-"),
                 size_str,
-                truncate_str(&caps, 22)
+                m.integrity_status.to_string(),
+                truncate_str(&caps, 18)
             );
+            if let Some(ref note) = m.integrity_note {
+                println!("   -> WARNING: {note}");
+            }
         }
         println!();
     }

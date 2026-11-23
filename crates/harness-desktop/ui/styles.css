@@ -2592,19 +2592,28 @@ button, input, select, textarea {
 
 .runtime-cards-row {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
   gap: 8px;
 }
 
 .runtime-card {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
   justify-content: space-between;
-  gap: 10px;
-  padding: 9px 12px;
+  gap: 8px;
+  padding: 10px 12px;
   border-radius: var(--radius-md);
   background: var(--bg-elevated);
   border: 1px solid var(--border);
+}
+
+.runtime-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
 }
 
 .runtime-card.ready {
@@ -2615,7 +2624,7 @@ button, input, select, textarea {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
 }
 
 .runtime-card-title {
@@ -2625,6 +2634,10 @@ button, input, select, textarea {
   font-size: 12px;
   font-weight: 600;
   color: var(--text-primary);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .runtime-card-sub {
@@ -2772,12 +2785,36 @@ button, input, select, textarea {
 
 .md-readme img {
   max-width: 100%;
+  width: auto;
   height: auto;
   border-radius: 8px;
   border: 1px solid var(--border);
-  margin: 8px 0;
+  margin: 6px 0;
   display: inline-block;
-  background: var(--bg-base);
+  vertical-align: middle;
+  background: transparent;
+}
+
+.md-readme p img,
+.md-readme a img {
+  margin: 2px 3px;
+  border: none;
+  border-radius: 4px;
+}
+
+.md-readme details {
+  margin: 8px 0;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.md-readme summary {
+  cursor: pointer;
+  font-weight: 500;
+  color: var(--text-primary);
+  user-select: none;
 }
 
 .md-readme blockquote {
@@ -2800,4 +2837,566 @@ button, input, select, textarea {
 .md-readme ol ol {
   margin-top: 3px;
   margin-bottom: 3px;
+}
+
+/* ==========================================================================
+   Phase 13: Frontier Chat Turn Accordion (Antigravity / Gemini), Markdown Code Copy & Toast
+   ========================================================================== */
+
+.turn-assistant {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.turn-activity {
+  display: none;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.02);
+  overflow: hidden;
+  transition: border-color 0.14s var(--ease);
+}
+
+.turn-activity.has-activity {
+  display: flex;
+}
+
+.turn-activity:hover {
+  border-color: var(--border-strong);
+}
+
+.turn-activity-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  background: transparent;
+  border: none;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  font-weight: 500;
+  user-select: none;
+}
+
+.turn-activity-head:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.turn-activity-head-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.turn-activity-chevron {
+  display: inline-flex;
+  color: var(--text-muted);
+  transition: transform 0.15s var(--ease);
+}
+
+.turn-activity.open .turn-activity-chevron {
+  transform: rotate(90deg);
+}
+
+.turn-activity-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 99px;
+  background: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.turn-activity.working .turn-activity-dot {
+  background: var(--accent);
+  animation: pulseDot 1s infinite;
+}
+
+.turn-activity.done .turn-activity-dot {
+  background: var(--ok-fg);
+}
+
+.turn-activity-body {
+  display: none;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 10px 8px 10px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-base);
+}
+
+.turn-activity.open .turn-activity-body {
+  display: flex;
+}
+
+.turn-think-block {
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.02);
+  border-left: 2px solid var(--border-strong);
+  padding: 6px 10px;
+  border-radius: 0 4px 4px 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin-bottom: 4px;
+}
+
+.step-row {
+  border: 1px solid transparent;
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.step-row:hover {
+  border-color: var(--border);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.step-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 7px;
+  cursor: pointer;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  user-select: none;
+}
+
+.step-row-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.step-row-title {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.step-row-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.step-row-body {
+  display: none;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 8px 8px 22px;
+  border-top: 1px solid var(--border);
+}
+
+.step-row.open .step-row-body {
+  display: flex;
+}
+
+.step-row-chevron {
+  display: inline-flex;
+  color: var(--text-muted);
+  transition: transform 0.14s var(--ease);
+}
+
+.step-row.open .step-row-chevron {
+  transform: rotate(90deg);
+}
+
+.turn-answer {
+  padding: 2px 4px;
+  color: var(--text-primary);
+  font-size: 13.5px;
+  line-height: 1.65;
+}
+
+.turn-answer p:first-child {
+  margin-top: 0;
+}
+
+.turn-answer p:last-child {
+  margin-bottom: 0;
+}
+
+/* Code Block with Copy Button */
+.md-code-wrap {
+  position: relative;
+  margin: 8px 0;
+}
+
+.md-code-wrap pre {
+  margin: 0;
+  padding-top: 28px;
+}
+
+.md-code-copy {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: 10px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.12s var(--ease);
+}
+
+.md-code-copy:hover {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+/* Composer Inline Toast Banner (Voice / Runtime Feedback) */
+.composer-toast {
+  display: none;
+  width: 100%;
+  max-width: 820px;
+  margin: 0 auto 8px auto;
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--warn-border);
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+  font-size: 12px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.composer-toast.visible {
+  display: flex;
+}
+
+.composer-toast.error {
+  border-color: var(--err-border);
+  background: var(--err-bg);
+  color: var(--err-fg);
+}
+
+.composer-toast.ok {
+  border-color: var(--ok-border);
+  background: rgba(16, 185, 129, 0.1);
+  color: var(--ok-fg);
+}
+
+/* Session Row Hover Rename / Delete Controls */
+.session-row-wrap {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: 5px;
+  padding-right: 3px;
+}
+
+.session-row-wrap:hover {
+  background: var(--bg-hover);
+}
+
+.session-row-wrap.active {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.session-row-wrap .session-row {
+  background: transparent;
+}
+
+.session-row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  opacity: 0;
+  transition: opacity 0.12s var(--ease);
+}
+
+.session-row-wrap:hover .session-row-actions {
+  opacity: 1;
+}
+
+.session-icon-btn {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 2px 3px;
+  border-radius: 4px;
+  display: inline-flex;
+}
+
+.session-icon-btn:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.session-icon-btn.danger:hover {
+  color: var(--err-fg);
+  background: var(--err-bg);
+}
+
+
+/* ==========================================================================
+   Phase 14: Actionable Global Toasts, Language Pill, Voice Studio, Drop Zones & Integrity Badges
+   ========================================================================== */
+
+.global-toast-stack {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 120;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 390px;
+  max-width: calc(100vw - 36px);
+  pointer-events: none;
+}
+
+.action-toast {
+  pointer-events: auto;
+  background: #17171C;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  box-shadow: 0 22px 54px rgba(0, 0, 0, 0.88);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  animation: toastSlideIn 0.18s var(--ease);
+}
+
+@keyframes toastSlideIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.action-toast.warn {
+  border-color: var(--warn-border);
+  border-left: 3px solid var(--warn-fg);
+  background: #1D1A14;
+}
+
+.action-toast.error {
+  border-color: var(--err-border);
+  border-left: 3px solid var(--err-fg);
+  background: #1E1418;
+}
+
+.action-toast.ok {
+  border-color: var(--ok-border);
+  border-left: 3px solid var(--ok-fg);
+  background: #131D18;
+}
+
+.action-toast-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.action-toast-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.action-toast.warn .action-toast-title {
+  color: var(--warn-fg);
+}
+
+.action-toast.error .action-toast-title {
+  color: var(--err-fg);
+}
+
+.action-toast.ok .action-toast-title {
+  color: var(--ok-fg);
+}
+
+.action-toast-body {
+  font-size: 12px;
+  line-height: 1.48;
+  color: var(--text-secondary);
+  word-break: break-word;
+}
+
+.action-toast-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-top: 2px;
+}
+
+.action-toast-progress {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-muted);
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 5px 8px;
+  max-height: 76px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  display: none;
+}
+
+.action-toast-progress.visible {
+  display: block;
+}
+
+/* Compact Speech Language Selector Pill in Agent Composer */
+.lang-pill-select {
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 99px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.14s var(--ease), color 0.14s var(--ease);
+}
+
+.lang-pill-select:hover,
+.lang-pill-select:focus {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+/* Input + Browse Button Combo Row */
+.input-browse-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+}
+
+.input-browse-row .input {
+  flex: 1;
+  min-width: 0;
+}
+
+.input-browse-row .btn {
+  flex-shrink: 0;
+  height: 32px;
+}
+
+/* Visual Drag & Drop Zones across Studios */
+.drop-zone {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px dashed var(--border-strong);
+  background: rgba(255, 255, 255, 0.018);
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  cursor: pointer;
+  text-align: center;
+  transition: border-color 0.15s var(--ease), background 0.15s var(--ease), color 0.15s var(--ease);
+}
+
+.drop-zone:hover,
+.drop-zone.drag-over {
+  border-color: var(--accent);
+  background: rgba(99, 102, 241, 0.09);
+  color: var(--text-primary);
+}
+
+.studio3d-stage.drag-over {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 2px rgba(99, 102, 241, 0.45);
+}
+
+/* Voice Studio Catalog Grid & Cloned Voice Rows */
+.audio-catalog-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.audio-model-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.audio-model-card.active {
+  border-color: var(--accent);
+  background: rgba(99, 102, 241, 0.06);
+}
+
+.cloned-voice-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+}
+
+.cloned-voice-row.active {
+  border-color: var(--accent);
+}
+
+/* Incomplete Model Row & Integrity Note */
+.library-row.incomplete {
+  border-color: var(--warn-border);
+  background: rgba(245, 158, 11, 0.04);
+}
+
+.integrity-note {
+  font-size: 11px;
+  color: var(--warn-fg);
+  margin-top: 2px;
+  line-height: 1.4;
 }

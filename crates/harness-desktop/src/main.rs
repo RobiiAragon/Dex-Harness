@@ -101,6 +101,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             commands::stop_and_transcribe,
             commands::speak_text,
             commands::list_audio_media,
+            commands::get_audio_studio_state,
+            commands::save_audio_settings_cmd,
+            commands::list_cloned_voices,
+            commands::save_cloned_voice,
+            commands::delete_cloned_voice,
+            commands::record_voice_sample,
+            commands::test_mic_and_stt,
             commands::run_ocr_image,
             commands::parse_document,
             commands::generate_image,
@@ -126,10 +133,18 @@ fn main() -> Result<(), Box<dyn Error>> {
             commands::select_project,
             commands::remove_project,
             commands::pick_attachment_files,
+            commands::pick_file_dialog,
+            commands::pick_folder_dialog,
             commands::inspect_attachment_paths,
             commands::list_project_sessions,
             commands::save_project_session,
             commands::load_project_session,
+            commands::rename_project_session,
+            commands::delete_project_session,
+            commands::get_qa_walkthrough_config,
+            commands::qa_capture_screenshot,
+            commands::qa_write_report,
+            commands::qa_exit_app,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -144,16 +159,23 @@ fn main() -> Result<(), Box<dyn Error>> {
                 tracing::warn!("Failed to register global shortcuts: {}", e);
             }
 
-            // Restore last active project workspace from ~/.dex/projects.json
+            // Restore last active project workspace from ~/.dex/projects.json and anchor writable storage root
             tauri::async_runtime::spawn(async move {
                 let store = projects::ProjectsStore::load_or_default().await;
                 if let Some(active) = store.active_project() {
                     let p = PathBuf::from(&active.path);
-                    if tokio::fs::try_exists(&p).await.unwrap_or(false) {
-                        let mut ws = workspace_for_init.write().await;
-                        *ws = p;
+                    if !harness_core::is_unwritable_system_root(&p)
+                        && tokio::fs::try_exists(&p).await.unwrap_or(false)
+                    {
+                        {
+                            let mut ws = workspace_for_init.write().await;
+                            *ws = p.clone();
+                        }
+                        harness_core::set_default_storage_root(p.join(".dex"));
+                        return;
                     }
                 }
+                harness_core::set_default_storage_root(harness_core::home_dex_dir());
             });
 
             // Forward EventBus events in real time to the Apple WKWebView frontend

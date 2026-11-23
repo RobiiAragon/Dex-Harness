@@ -11,7 +11,10 @@ use harness_3d::{
     UnityExportResult, UnityProjectReport, DEFAULT_3D_DIR,
 };
 use harness_audio::{
-    register_audio_tools, synthesize_speech, AutoSttEngine, TtsResult, VoiceRecorderHandle,
+    builtin_audio_catalog, delete_voice_profile, list_voice_profiles, load_audio_settings,
+    record_fixed_duration, register_audio_tools, save_audio_settings, save_voice_profile,
+    synthesize_speech_with_options, AudioModelPreset, AudioStudioSettings, AutoSttEngine,
+    ClonedVoiceProfile, RecordingResult, SttOptions, TtsOptions, TtsResult, VoiceRecorderHandle,
     DEFAULT_MUSIC_DIR, DEFAULT_RECORDINGS_DIR, DEFAULT_SFX_DIR, DEFAULT_TTS_DIR,
 };
 use harness_docs::{
@@ -33,10 +36,11 @@ use harness_models::{
     build_launch_spec, compute_group_key, detect_local_servers as detect_servers_impl,
     detect_runtime_binary, detect_runtimes as detect_runtimes_impl, import_local_model,
     infer_capabilities, install_runtime as install_runtime_impl, parse_quantization,
-    scan_model_dirs, ActiveLoadedModel, DiscoveredModel, HfClient, HfGgufFile, HfModelSummary,
-    LoadModelOutcome, LocalServerInfo, ModelDirsConfig, ModelDownloader, ModelFormat,
-    ModelMetadata, ModelRegistry, ModelSource, OllamaBridge, RuntimeKind, RuntimeStatus,
-    DEX_RUNTIME_SIDECAR_ID, LM_STUDIO_DEFAULT_URL, LOCAL_MODEL_STARTUP_TIMEOUT_SECS,
+    scan_model_dirs, verify_model_path_integrity, ActiveLoadedModel, DiscoveredModel, HfClient,
+    HfGgufFile, HfModelSummary, IntegrityStatus, LoadModelOutcome, LocalServerInfo,
+    ModelDirsConfig, ModelDownloader, ModelFormat, ModelMetadata, ModelRegistry, ModelSource,
+    OllamaBridge, RuntimeKind, RuntimeStatus, DEX_RUNTIME_SIDECAR_ID, LM_STUDIO_DEFAULT_URL,
+    LOCAL_MODEL_STARTUP_TIMEOUT_SECS,
 };
 use tokio_util::sync::CancellationToken;
 use harness_computer::{
@@ -59,11 +63,11 @@ use tauri::{AppHandle, Emitter, State};
 use tokio::sync::oneshot;
 
 use crate::projects::{
-    classify_attachment_kind, create_project_on_disk, ensure_project_dex_dirs,
-    inspect_attachment_file, list_project_sessions as list_sessions_impl,
-    load_project_session as load_session_impl, pick_attachment_files_native, pick_folder_native,
-    save_project_session as save_session_impl, AttachmentMeta, ChatSession, ChatSessionSummary,
-    ProjectsResponse, ProjectsStore,
+    classify_attachment_kind, create_project_on_disk, delete_session_in_dir,
+    ensure_project_dex_dirs, inspect_attachment_file, list_sessions_in_dir, load_session_in_dir,
+    pick_attachment_files_native, pick_file_dialog_native, pick_folder_dialog_native,
+    pick_folder_native, rename_session_in_dir, resolve_sessions_dir, save_session_in_dir,
+    AttachmentMeta, ChatSession, ChatSessionSummary, ProjectsResponse, ProjectsStore,
 };
 use crate::state::{DesktopSecurityHook, DesktopState};
 
@@ -227,7 +231,21 @@ fn build_tools(
     registry
 }
 
-fn model_supports_vision(provider: &str, model: &str) -> bool {
+fn runtime_supports_vision_payload(
+    provider: &str,
+    model: &str,
+    active_local_runtime: Option<&str>,
+) -> bool {
+    // `mlx_lm.server` (used by `dex-local` for MLX folders) is text-only and raises
+    // `ValueError("Only 'text' content type is supported.")` on OpenAI `image_url` blocks.
+    // `llama-server` without an explicit `--mmproj` flag also rejects `image_url` payloads.
+    if provider.eq_ignore_ascii_case("dex-local")
+        || provider.eq_ignore_ascii_case("dex_local")
+        || matches!(active_local_runtime, Some("mlx") | Some("llamacpp"))
+    {
+        return false;
+    }
+
     let caps = infer_capabilities(model, None, false);
     if caps.iter().any(|c| c == "Vision") {
         return true;
@@ -249,6 +267,16 @@ fn model_supports_vision(provider: &str, model: &str) -> bool {
         || lower.contains("qwen3.5")
 }
 
+fn is_multimodal_rejection_error(err_msg: &str) -> bool {
+    let lower = err_msg.to_lowercase();
+    lower.contains("only 'text' content type")
+        || lower.contains("image_url")
+        || lower.contains("does not support image")
+        || lower.contains("multimodal")
+        || lower.contains("vision is not supported")
+        || lower.contains("expected string, got array")
+}
+
 fn image_mime_for_path(path: &Path) -> Option<&'static str> {
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     match ext.as_str() {
@@ -263,14 +291,15 @@ fn image_mime_for_path(path: &Path) -> Option<&'static str> {
 async fn prepare_attachments_context(
     attachments: &[String],
     include_vision_payload: bool,
-) -> (String, Vec<String>) {
+) -> (String, Vec<String>, bool) {
     if attachments.is_empty() {
-        return (String::new(), Vec::new());
+        return (String::new(), Vec::new(), false);
     }
 
     const MAX_INLINE_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
     let mut lines = vec!["\n\n[Attached Files]".to_string()];
     let mut image_urls = Vec::new();
+    let mut had_image_without_vision = false;
 
     for raw in attachments {
         let p = PathBuf::from(raw);
@@ -283,7 +312,12 @@ async fn prepare_attachments_context(
         };
         let kind = classify_attachment_kind(&p);
         let hint = match kind {
-            "image" => "use vision input directly or call `ocr_image` for text extraction",
+            "image" if include_vision_payload => {
+                "use vision input directly or call `ocr_image` for exact text extraction"
+            }
+            "image" => {
+                "active runtime is text-only; call `ocr_image` (activate via `search_tools`) to extract text/contents from this image"
+            }
             "document" => "call `doc_parse` (activate via `search_tools`) to extract structured Markdown",
             "mesh_3d" => "call `mesh_inspect` (activate via `search_tools`) to analyze 3D geometry",
             "audio" => "call `audio_transcribe` (activate via `search_tools`) to transcribe",
@@ -292,17 +326,170 @@ async fn prepare_attachments_context(
         };
         lines.push(format!("- `{}` ({}, {}) — {}", p.display(), kind, size_str, hint));
 
-        if include_vision_payload && kind == "image" && size_bytes > 0 && size_bytes <= MAX_INLINE_IMAGE_BYTES {
-            if let Some(mime) = image_mime_for_path(&p) {
-                if let Ok(bytes) = tokio::fs::read(&p).await {
-                    let b64 = to_base64(&bytes);
-                    image_urls.push(format!("data:{mime};base64,{b64}"));
+        if kind == "image" {
+            if include_vision_payload && size_bytes > 0 && size_bytes <= MAX_INLINE_IMAGE_BYTES {
+                if let Some(mime) = image_mime_for_path(&p) {
+                    if let Ok(bytes) = tokio::fs::read(&p).await {
+                        let b64 = to_base64(&bytes);
+                        image_urls.push(format!("data:{mime};base64,{b64}"));
+                    }
                 }
+            } else if !include_vision_payload {
+                had_image_without_vision = true;
             }
         }
     }
 
-    (lines.join("\n"), image_urls)
+    if had_image_without_vision {
+        lines.push(
+            "\n[Vision Advisory] The currently loaded local server does not accept raw `image_url` payloads. Do NOT guess image contents — call `search_tools` for `ocr_image` and extract text from the attached image path(s), or advise the user to inspect visually via a vision-capable model."
+                .to_string(),
+        );
+    }
+
+    (lines.join("\n"), image_urls, had_image_without_vision)
+}
+
+async fn probe_local_port(port: u16) -> bool {
+    matches!(
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            tokio::net::TcpStream::connect(("127.0.0.1", port)),
+        )
+        .await,
+        Ok(Ok(_))
+    )
+}
+
+/// Builds a live Host Hardware & Multimodal Capabilities Manifest injected into the Agent system prompt
+/// so the LLM knows exact hardware specs and which creative engines are READY vs NOT INSTALLED.
+async fn build_host_capabilities_manifest(workspace_dir: &Path) -> String {
+    let profile = tokio::task::spawn_blocking(HardwareProfile::detect)
+        .await
+        .unwrap_or_else(|_| HardwareProfile::detect());
+
+    let (blender_status, has_mlx_gen, has_comfy, has_3d_sidecar, has_soundbox) = tokio::join!(
+        check_blender_impl(),
+        probe_local_port(8190),
+        probe_local_port(8188),
+        probe_local_port(8195),
+        probe_local_port(8189),
+    );
+
+    let has_mflux = harness_core::find_executable_in_enriched_path("mflux-generate").is_some();
+    let has_http_img = std::env::var("DEX_IMAGE_URL")
+        .ok()
+        .is_some_and(|s| !s.trim().is_empty())
+        || std::env::var("OPENAI_API_KEY")
+            .ok()
+            .is_some_and(|s| !s.trim().is_empty());
+    let has_mlx_whisper = harness_core::find_executable_in_enriched_path("mlx_whisper").is_some();
+    let has_parakeet = harness_core::find_executable_in_enriched_path("parakeet-mlx").is_some();
+    let has_whisper_cli = harness_core::find_executable_in_enriched_path("whisper-cli").is_some();
+    let has_mlx_audio = harness_core::find_executable_in_enriched_path("mlx_audio.tts.generate").is_some();
+    let has_3d_env = std::env::var("DEX_3D_ENDPOINT")
+        .ok()
+        .is_some_and(|s| !s.trim().is_empty());
+    let has_audio_env = std::env::var("DEX_AUDIO_GEN_URL")
+        .ok()
+        .is_some_and(|s| !s.trim().is_empty());
+
+    let blender_line = if blender_status.available {
+        format!(
+            "READY ({})",
+            blender_status.version.as_deref().unwrap_or("Blender installed")
+        )
+    } else {
+        "NOT INSTALLED (install via `brew install --cask blender`)".to_string()
+    };
+
+    let image_gen_line = if has_mflux {
+        "READY (`mflux-generate` Apple Silicon MLX)".to_string()
+    } else if has_mlx_gen {
+        "READY (`mlx-gen` local server :8190)".to_string()
+    } else if has_comfy {
+        "READY (ComfyUI :8188)".to_string()
+    } else if has_http_img {
+        "READY (HTTP image endpoint)".to_string()
+    } else {
+        "NOT INSTALLED (install `mflux` with 1 click in Media Studio or Models Hub -> Runtimes, or start ComfyUI :8188)".to_string()
+    };
+
+    let stt_line = if has_mlx_whisper && has_parakeet {
+        "READY (`mlx_whisper` + `parakeet-mlx`)".to_string()
+    } else if has_mlx_whisper {
+        "READY (`mlx_whisper`)".to_string()
+    } else if has_parakeet {
+        "READY (`parakeet-mlx`)".to_string()
+    } else if has_whisper_cli {
+        "READY (`whisper-cli`)".to_string()
+    } else if cfg!(target_os = "macos") {
+        "READY (Apple Speech fallback; `mlx-whisper` / `parakeet-mlx` available 1-click in Audio & Docs)".to_string()
+    } else {
+        "NOT INSTALLED (`mlx-whisper` / `whisper-cli`)".to_string()
+    };
+
+    let gen3d_line = if has_3d_sidecar || has_3d_env {
+        "READY (TRELLIS / 3D sidecar)".to_string()
+    } else {
+        "NOT INSTALLED (`trellis-3d` / Hunyuan3D sidecar in Extensions)".to_string()
+    };
+
+    let music_line = if has_soundbox || has_audio_env {
+        "READY (`soundbox-mcp`)".to_string()
+    } else {
+        "NOT INSTALLED (`soundbox-mcp` in Extensions)".to_string()
+    };
+
+    let ocr_line = if cfg!(target_os = "macos") {
+        "READY (Apple Vision native OCR)"
+    } else {
+        "Tesseract (if installed)"
+    };
+
+    let tts_line = if has_mlx_audio {
+        "READY (`mlx-audio` neural TTS + Voice Cloning + macOS `say`)"
+    } else if cfg!(target_os = "macos") {
+        "READY (macOS native `say` TTS; `mlx-audio` neural TTS + Voice Cloning available 1-click in Audio & Docs)"
+    } else {
+        "HTTP TTS sidecar"
+    };
+
+    format!(
+        "\
+### Host & Capabilities Manifest (Live Ground Truth — Do NOT run shell commands just to guess host specs)
+- Chip / CPU: {chip} ({cores} logical cores, {arch})
+- OS: {os_ver}
+- Memory: {total:.1} GB Total ({used:.1} GB Used, {avail:.1} GB Available)
+- Active Workspace Root: `{ws}`
+- Dex Writable Storage Root: `{storage}`
+
+### Installed Capabilities Status
+- Core Code, Files, Search, Shell, PTY, Git, TaskBoard: READY
+- Pure-Rust 3D GLB Inspector (`mesh_inspect`) & Sample GLB: READY
+- Pure-Rust Image Processing & Lanczos Upscale (`image_process`, `image_upscale`): READY
+- Blender Headless 3D Modeling / Conversion / Preview: {blender_line}
+- Document Parser & OCR (`doc_parse`, `ocr_image`): {ocr_line}
+- Speech Synthesis (`audio_speak`): {tts_line}
+- Voice Transcription (`audio_transcribe`): {stt_line}
+- AI Image Generation (`image_generate`): {image_gen_line}
+- AI Image-to-3D Reconstruction (`mesh_generate_3d`): {gen3d_line}
+- AI Music & SFX Generation (`audio_generate_music`, `audio_generate_sfx`): {music_line}
+
+### Capability Routing Rules (MANDATORY)
+1. Never invent hardware specs — rely directly on the Host Manifest above.
+2. If the user asks for an image, video, AI music/SFX, or AI image-to-3D reconstruction whose backend is listed as `NOT INSTALLED` (or if a tool returns `BackendNotInstalled`), DO NOT retry that tool in a loop.
+3. Instead, transparently tell the user which backend is needed (and how to install it with 1 click in Dex's Models Hub / Extensions) AND proactively offer concrete alternatives that ARE `READY` right now (for example: building procedural 3D meshes in Blender via Python + exporting `.glb` and inspecting with `mesh_inspect`, or creating SVG/HTML visual prototypes).",
+        chip = profile.cpu_brand,
+        cores = profile.cpu_cores,
+        arch = profile.arch,
+        os_ver = profile.os_version,
+        total = profile.total_memory_gb,
+        used = profile.used_memory_gb,
+        avail = profile.available_memory_gb,
+        ws = workspace_dir.display(),
+        storage = harness_core::dex_storage_root().display(),
+    )
 }
 
 #[tauri::command]
@@ -335,11 +522,15 @@ pub async fn run_goal(
     let mut provider_name = provider.unwrap_or_else(|| "dex-local".to_string());
     let mut model_name = model.unwrap_or_default();
     let mut effective_api_base = api_base.filter(|s| !s.trim().is_empty());
+    let mut active_local_runtime: Option<String> = None;
+    let mut active_sidecar_id: Option<String> = None;
 
     // If using Dex Native Runtime (`dex-local`), resolve live mounted model endpoint & refresh idle timer
     if provider_name.eq_ignore_ascii_case("dex-local") || provider_name.eq_ignore_ascii_case("dex_local") {
         let active_opt = state.active_loaded_model.read().await.clone();
         if let Some(active) = active_opt {
+            active_local_runtime = Some(active.runtime.clone());
+            active_sidecar_id = Some(active.sidecar_id.clone());
             state
                 .extension_supervisor
                 .touch_last_used(&active.sidecar_id)
@@ -360,7 +551,7 @@ pub async fn run_goal(
             }
         } else if effective_api_base.is_none() {
             return Err(
-                "No local model is loaded in Dex Native Runtime yet. Select a local MLX or GGUF model from the Model Selector or Models Hub."
+                "RuntimeMissing (llm): No local model is loaded in Dex Native Runtime yet. Click 'Load Recommended Local Model' or select a model in the Model Picker."
                     .to_string(),
             );
         }
@@ -408,9 +599,10 @@ pub async fn run_goal(
         .with_hooks(hooks)
         .with_compactor(ContextCompactor::new(8000, 10));
 
+    let host_manifest = build_host_capabilities_manifest(&workspace_dir).await;
     let mut sys_prompt = format!(
-        "You are Dex, a high-performance autonomous AI agent harness in Rust with native macOS, terminal, browser, multimodal, and external MCP extension capabilities.\nActive Project Workspace Root: `{}`\nAll relative file paths, searches, shell commands, git operations, and TaskBoard actions execute rooted inside this workspace.\nUse `search_tools` to discover and activate specialized deferred tools (OCR, document parsing, image/video studio, 3D/Blender/Unity, audio, MCP).",
-        workspace_dir.display()
+        "You are Dex, a high-performance autonomous AI agent harness in Rust with native macOS, terminal, browser, multimodal, and external MCP extension capabilities.\nAll relative file paths, searches, shell commands, git operations, and TaskBoard actions execute rooted inside the active workspace.\nUse `search_tools` to discover and activate specialized deferred tools (OCR, document parsing, image/video studio, 3D/Blender/Unity, audio, MCP).\n\n{}",
+        host_manifest
     );
     if !skills_summary.is_empty() {
         sys_prompt.push_str(&format!(
@@ -420,9 +612,22 @@ pub async fn run_goal(
     }
     agent = agent.with_system_prompt(sys_prompt);
 
-    let vision_enabled = model_supports_vision(&provider_name, &model_name);
-    let (att_block, image_data_urls) =
+    let vision_enabled = runtime_supports_vision_payload(
+        &provider_name,
+        &model_name,
+        active_local_runtime.as_deref(),
+    );
+    let (att_block, image_data_urls, had_image_without_vision) =
         prepare_attachments_context(&attachment_list, vision_enabled).await;
+    if had_image_without_vision {
+        let _ = app.emit(
+            "dex-vision-advisory",
+            serde_json::json!({
+                "message": "Active local model server is text-only (mlx_lm.server). Attached image(s) will be inspected via Apple Vision OCR (`ocr_image`) instead of raw `image_url` payloads."
+            }),
+        );
+    }
+
     let effective_goal = if att_block.is_empty() {
         goal.clone()
     } else if goal.trim().is_empty() {
@@ -445,12 +650,16 @@ pub async fn run_goal(
 
     let event_bus = state.event_bus.clone();
     let app_handle_for_task = app.clone();
+    let supervisor_for_task = state.extension_supervisor.clone();
+    let active_goal_ref = state.active_goal.clone();
+    let cancel_sender_ref = state.cancel_sender.clone();
 
     tauri::async_runtime::spawn(async move {
         tracing::info!(
             workspace = %workspace_dir.display(),
             attachments = attachment_list.len(),
             images = image_data_urls.len(),
+            vision_enabled = vision_enabled,
             "Starting autonomous execution in Dex Desktop"
         );
 
@@ -458,7 +667,27 @@ pub async fn run_goal(
             if image_data_urls.is_empty() {
                 agent.run(&effective_goal).await
             } else {
-                agent.run_with_images(&effective_goal, image_data_urls).await
+                match agent.run_with_images(&effective_goal, image_data_urls).await {
+                    Ok(ans) => Ok(ans),
+                    Err(err) if is_multimodal_rejection_error(&err.to_string()) => {
+                        tracing::warn!(
+                            error = %err,
+                            "Model endpoint rejected image_url payload; automatically falling back to text + ocr_image"
+                        );
+                        let _ = app_handle_for_task.emit(
+                            "dex-vision-advisory",
+                            serde_json::json!({
+                                "message": "Model rejected direct vision payload; automatically falling back to text mode with Apple Vision OCR (`ocr_image`)."
+                            }),
+                        );
+                        let fallback_goal = format!(
+                            "{}\n\n[Automatic Vision Fallback] The LLM endpoint rejected raw `image_url` input. Call `ocr_image` (via `search_tools`) on the attached image path(s) to read their text, or tell the user this model is text-only.",
+                            effective_goal
+                        );
+                        agent.run(&fallback_goal).await
+                    }
+                    Err(err) => Err(err),
+                }
             }
         };
         tokio::pin!(run_future);
@@ -477,7 +706,14 @@ pub async fn run_goal(
                         }));
                     }
                     Err(e) => {
-                        let err_msg = e.to_string();
+                        let mut err_msg = e.to_string();
+                        if let Some(ref sidecar_id) = active_sidecar_id {
+                            let recent = supervisor_for_task.recent_logs(sidecar_id, 12).await;
+                            if !recent.is_empty() {
+                                err_msg.push_str("\n\n[dex-local-runtime stderr tail]\n");
+                                err_msg.push_str(&recent.join("\n"));
+                            }
+                        }
                         tracing::error!("Agent execution failed: {}", err_msg);
                         let _ = app_handle_for_task.emit("dex-goal-finished", serde_json::json!({
                             "status": "error",
@@ -493,6 +729,16 @@ pub async fn run_goal(
                     "error": "Goal execution was stopped by user",
                 }));
             }
+        }
+
+        // Always clear active goal & cancellation handle so state returns cleanly to Idle
+        {
+            let mut goal_lock = active_goal_ref.write().await;
+            *goal_lock = None;
+        }
+        {
+            let mut cancel_lock = cancel_sender_ref.lock().await;
+            *cancel_lock = None;
         }
     });
 
@@ -845,6 +1091,18 @@ pub async fn scan_local_models() -> Result<Vec<DiscoveredModel>, String> {
                 Some("pt") => ModelFormat::PyTorch,
                 _ => ModelFormat::Gguf,
             };
+            let fmt_str = match fmt {
+                ModelFormat::Mlx => "mlx",
+                ModelFormat::PyTorch => "pt",
+                _ => "gguf",
+            };
+            let p_check = PathBuf::from(p);
+            let (integrity_status, integrity_note) = tokio::task::spawn_blocking(move || {
+                verify_model_path_integrity(fmt_str, &p_check)
+            })
+            .await
+            .unwrap_or((IntegrityStatus::Valid, None));
+
             discovered.push(DiscoveredModel {
                 id: m.id.clone(),
                 name: m.name.clone(),
@@ -860,6 +1118,8 @@ pub async fn scan_local_models() -> Result<Vec<DiscoveredModel>, String> {
                 capabilities: infer_capabilities(&m.name, None, false),
                 modified_at: m.created_at,
                 is_reference: true,
+                integrity_status,
+                integrity_note,
             });
         }
     }
@@ -890,6 +1150,8 @@ pub async fn scan_local_models() -> Result<Vec<DiscoveredModel>, String> {
                 capabilities: caps,
                 modified_at: 0,
                 is_reference: false,
+                integrity_status: IntegrityStatus::Valid,
+                integrity_note: None,
             });
         }
     }
@@ -915,7 +1177,9 @@ pub async fn install_runtime(
     runtime: String,
 ) -> Result<RuntimeStatus, String> {
     let kind = RuntimeKind::from_str_loose(&runtime).ok_or_else(|| {
-        format!("Unknown runtime '{runtime}'. Supported: 'mlx', 'llamacpp'.")
+        format!(
+            "Unknown runtime '{runtime}'. Supported: 'mlx', 'llamacpp', 'mlx-whisper', 'mflux', 'mlx-audio', 'parakeet-mlx', 'faster-whisper'."
+        )
     })?;
     install_runtime_impl(kind, Some(&state.event_bus))
         .await
@@ -1013,12 +1277,29 @@ pub async fn load_local_model(
         }
     };
 
-    // 2. Verify model path exists on disk
+    // 2. Verify model path exists on disk and passes weight integrity verification
     if !tokio::fs::try_exists(Path::new(&model_path))
         .await
         .unwrap_or(false)
     {
         return Err(format!("Local model path does not exist: '{model_path}'"));
+    }
+
+    let fmt_for_check = fmt_lower.clone();
+    let path_for_check = PathBuf::from(&model_path);
+    let (integrity_status, integrity_note) = tokio::task::spawn_blocking(move || {
+        verify_model_path_integrity(&fmt_for_check, &path_for_check)
+    })
+    .await
+    .map_err(|e| format!("Model integrity check failed: {e}"))?;
+
+    if integrity_status == IntegrityStatus::Incomplete {
+        let reason = integrity_note
+            .unwrap_or_else(|| "Model weights are missing or corrupted".to_string());
+        return Err(format!(
+            "ModelIntegrityError: Cannot load '{}' because its local weights are incomplete ({reason}). Re-download the model before loading.",
+            model_name
+        ));
     }
 
     let spec = build_launch_spec(&fmt_lower, &model_path, &bin_path).map_err(|e| e.to_string())?;
@@ -1465,9 +1746,19 @@ pub async fn update_extension_timeout(
 pub struct VoiceTranscribeResponse {
     pub audio_path: String,
     pub duration_secs: f64,
+    pub peak_db: f32,
     pub transcript: Option<String>,
     pub backend: Option<String>,
+    pub language: Option<String>,
     pub stt_warning: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioStudioStateResponse {
+    pub settings: AudioStudioSettings,
+    pub voices: Vec<ClonedVoiceProfile>,
+    pub catalog: Vec<AudioModelPreset>,
+    pub runtimes: Vec<RuntimeStatus>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1480,13 +1771,127 @@ pub struct AudioMediaEntry {
 }
 
 #[tauri::command]
+pub async fn get_audio_studio_state() -> Result<AudioStudioStateResponse, String> {
+    let (settings, voices, runtimes) = tokio::join!(
+        load_audio_settings(),
+        list_voice_profiles(),
+        async {
+            tokio::task::spawn_blocking(detect_runtimes_impl)
+                .await
+                .unwrap_or_default()
+        }
+    );
+    Ok(AudioStudioStateResponse {
+        settings,
+        voices,
+        catalog: builtin_audio_catalog(),
+        runtimes,
+    })
+}
+
+#[tauri::command]
+pub async fn save_audio_settings_cmd(
+    settings: AudioStudioSettings,
+) -> Result<AudioStudioSettings, String> {
+    save_audio_settings(&settings)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(settings)
+}
+
+#[tauri::command]
+pub async fn list_cloned_voices() -> Result<Vec<ClonedVoiceProfile>, String> {
+    Ok(list_voice_profiles().await)
+}
+
+#[tauri::command]
+pub async fn save_cloned_voice(
+    name: String,
+    language: String,
+    ref_audio_path: String,
+    ref_text: Option<String>,
+) -> Result<ClonedVoiceProfile, String> {
+    save_voice_profile(
+        &name,
+        &language,
+        Path::new(&ref_audio_path),
+        ref_text.as_deref(),
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn delete_cloned_voice(id: String) -> Result<bool, String> {
+    delete_voice_profile(&id).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn record_voice_sample(
+    state: State<'_, DesktopState>,
+    seconds: Option<u64>,
+) -> Result<RecordingResult, String> {
+    let dur = seconds.unwrap_or(5).clamp(2, 20);
+    let rec_dir = harness_core::resolve_dex_subpath(DEFAULT_RECORDINGS_DIR);
+    record_fixed_duration(dur, &rec_dir, Some(state.event_bus.clone()))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn test_mic_and_stt(
+    state: State<'_, DesktopState>,
+    seconds: Option<u64>,
+    language: Option<String>,
+    engine: Option<String>,
+    model: Option<String>,
+) -> Result<VoiceTranscribeResponse, String> {
+    let dur = seconds.unwrap_or(3).clamp(2, 10);
+    let rec_dir = harness_core::resolve_dex_subpath(DEFAULT_RECORDINGS_DIR);
+    let rec = record_fixed_duration(dur, &rec_dir, Some(state.event_bus.clone()))
+        .await
+        .map_err(|e| e.to_string())?;
+    let path_str = rec.path.to_string_lossy().to_string();
+    let opts = SttOptions {
+        language: language.filter(|s| !s.trim().is_empty()),
+        engine: engine.filter(|s| !s.trim().is_empty()),
+        model: model.filter(|s| !s.trim().is_empty()),
+        include_timestamps: false,
+        // Recording already ran VAD + soft peak normalization inside `run_capture_thread`
+        preprocess: false,
+    };
+
+    match AutoSttEngine::transcribe_with_options(&rec.path, &opts).await {
+        Ok(stt) => Ok(VoiceTranscribeResponse {
+            audio_path: path_str,
+            duration_secs: rec.duration_secs,
+            peak_db: rec.peak_db,
+            transcript: Some(stt.text),
+            backend: Some(stt.backend),
+            language: stt.language,
+            stt_warning: None,
+        }),
+        Err(err) => Ok(VoiceTranscribeResponse {
+            audio_path: path_str,
+            duration_secs: rec.duration_secs,
+            peak_db: rec.peak_db,
+            transcript: None,
+            backend: None,
+            language: None,
+            stt_warning: Some(err.to_string()),
+        }),
+    }
+}
+
+#[tauri::command]
 pub async fn start_voice_recording(state: State<'_, DesktopState>) -> Result<String, String> {
     let mut lock = state.active_recorder.lock().await;
     if lock.is_some() {
         return Err("Voice recording is already in progress".to_string());
     }
 
-    let handle = VoiceRecorderHandle::start(DEFAULT_RECORDINGS_DIR, Some(state.event_bus.clone()))
+    let rec_dir = harness_core::resolve_dex_subpath(DEFAULT_RECORDINGS_DIR);
+    let handle = VoiceRecorderHandle::start(&rec_dir, Some(state.event_bus.clone()))
         .await
         .map_err(|e| e.to_string())?;
     *lock = Some(handle);
@@ -1496,6 +1901,9 @@ pub async fn start_voice_recording(state: State<'_, DesktopState>) -> Result<Str
 #[tauri::command]
 pub async fn stop_and_transcribe(
     state: State<'_, DesktopState>,
+    language: Option<String>,
+    engine: Option<String>,
+    model: Option<String>,
 ) -> Result<VoiceTranscribeResponse, String> {
     let handle = {
         let mut lock = state.active_recorder.lock().await;
@@ -1506,7 +1914,16 @@ pub async fn stop_and_transcribe(
     let rec = handle.stop().await.map_err(|e| e.to_string())?;
     let path_str = rec.path.to_string_lossy().to_string();
 
-    match AutoSttEngine::transcribe(&rec.path, false).await {
+    let opts = SttOptions {
+        language: language.filter(|s| !s.trim().is_empty()),
+        engine: engine.filter(|s| !s.trim().is_empty()),
+        model: model.filter(|s| !s.trim().is_empty()),
+        include_timestamps: false,
+        // Recording already ran VAD + soft peak normalization on capture stop
+        preprocess: false,
+    };
+
+    match AutoSttEngine::transcribe_with_options(&rec.path, &opts).await {
         Ok(stt) => {
             let preview: String = stt.text.chars().take(120).collect();
             state.event_bus.publish(DexEvent::MediaGenerated {
@@ -1518,31 +1935,53 @@ pub async fn stop_and_transcribe(
             Ok(VoiceTranscribeResponse {
                 audio_path: path_str,
                 duration_secs: rec.duration_secs,
+                peak_db: rec.peak_db,
                 transcript: Some(stt.text),
                 backend: Some(stt.backend),
+                language: stt.language,
                 stt_warning: None,
             })
         }
         Err(err) => Ok(VoiceTranscribeResponse {
             audio_path: path_str,
             duration_secs: rec.duration_secs,
+            peak_db: rec.peak_db,
             transcript: None,
             backend: None,
+            language: None,
             stt_warning: Some(err.to_string()),
         }),
     }
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn speak_text(
     state: State<'_, DesktopState>,
     text: String,
     voice: Option<String>,
+    language: Option<String>,
+    engine: Option<String>,
+    model: Option<String>,
+    ref_audio: Option<String>,
+    ref_text: Option<String>,
+    sidecar_url: Option<String>,
 ) -> Result<TtsResult, String> {
-    synthesize_speech(
+    let opts = TtsOptions {
+        voice: voice.filter(|s| !s.trim().is_empty()),
+        language: language.filter(|s| !s.trim().is_empty()),
+        engine: engine.filter(|s| !s.trim().is_empty()),
+        model: model.filter(|s| !s.trim().is_empty()),
+        ref_audio: ref_audio
+            .filter(|s| !s.trim().is_empty())
+            .map(PathBuf::from),
+        ref_text: ref_text.filter(|s| !s.trim().is_empty()),
+        sidecar_url: sidecar_url.filter(|s| !s.trim().is_empty()),
+        output_path: None,
+    };
+    synthesize_speech_with_options(
         &text,
-        voice.as_deref(),
-        None,
+        opts,
         Some(state.extension_supervisor.clone()),
         Some(&state.event_bus),
     )
@@ -1563,11 +2002,11 @@ pub async fn list_audio_media() -> Result<Vec<AudioMediaEntry>, String> {
     const MAX_INLINE_AUDIO_BYTES: u64 = 25 * 1024 * 1024;
 
     for (kind, dir_str) in dirs_to_scan {
-        let dir = Path::new(dir_str);
-        if !tokio::fs::try_exists(dir).await.unwrap_or(false) {
+        let dir = harness_core::resolve_dex_subpath(dir_str);
+        if !tokio::fs::try_exists(&dir).await.unwrap_or(false) {
             continue;
         }
-        let mut rd = match tokio::fs::read_dir(dir).await {
+        let mut rd = match tokio::fs::read_dir(&dir).await {
             Ok(r) => r,
             Err(_) => continue,
         };
@@ -1673,6 +2112,7 @@ pub async fn generate_image(
         backend: parsed_backend,
         workflow: workflow.filter(|s| !s.trim().is_empty()),
         model: model.filter(|s| !s.trim().is_empty()),
+        output_path: None,
     };
 
     generate_image_impl(
@@ -1784,7 +2224,8 @@ pub async fn inspect_video_file(path: String) -> Result<VideoMetadata, String> {
 
 #[tauri::command]
 pub async fn list_comfyui_workflows() -> Result<Vec<String>, String> {
-    list_workflows(Path::new(DEFAULT_WORKFLOWS_DIR))
+    let wf_dir = harness_core::resolve_dex_subpath(DEFAULT_WORKFLOWS_DIR);
+    list_workflows(&wf_dir)
         .await
         .map_err(|e| e.to_string())
 }
@@ -1888,7 +2329,7 @@ pub async fn read_glb_base64(path: String) -> Result<String, String> {
 
 #[tauri::command]
 pub async fn create_sample_3d_model(state: State<'_, DesktopState>) -> Result<MeshReport, String> {
-    let dest = PathBuf::from(DEFAULT_3D_DIR).join("sample_cube.glb");
+    let dest = harness_core::resolve_dex_subpath(DEFAULT_3D_DIR).join("sample_cube.glb");
     write_sample_cube_glb(&dest)
         .await
         .map_err(|e| e.to_string())?;
@@ -2014,16 +2455,43 @@ async fn build_projects_response(state: &DesktopState, store: &ProjectsStore) ->
     }
 }
 
+async fn sync_storage_root_for_store(state: &DesktopState, store: &ProjectsStore) {
+    if let Some(active) = store.active_project() {
+        let active_path = PathBuf::from(&active.path);
+        if !harness_core::is_unwritable_system_root(&active_path)
+            && tokio::fs::try_exists(&active_path).await.unwrap_or(false)
+        {
+            {
+                let mut ws = state.active_workspace_dir.write().await;
+                *ws = active_path.clone();
+            }
+            harness_core::set_default_storage_root(active_path.join(".dex"));
+            return;
+        }
+    }
+    let home_ws = dirs::home_dir().unwrap_or_else(harness_core::home_dex_dir);
+    {
+        let mut ws = state.active_workspace_dir.write().await;
+        if harness_core::is_unwritable_system_root(&ws) {
+            *ws = home_ws;
+        }
+    }
+    harness_core::set_default_storage_root(harness_core::home_dex_dir());
+}
+
+async fn active_sessions_dir_for_state() -> PathBuf {
+    let store = ProjectsStore::load_or_default().await;
+    let active_proj_path = store
+        .active_project()
+        .map(|p| PathBuf::from(&p.path))
+        .filter(|p| !harness_core::is_unwritable_system_root(p));
+    resolve_sessions_dir(active_proj_path.as_deref())
+}
+
 #[tauri::command]
 pub async fn list_projects(state: State<'_, DesktopState>) -> Result<ProjectsResponse, String> {
     let store = ProjectsStore::load_or_default().await;
-    if let Some(active) = store.active_project() {
-        let active_path = PathBuf::from(&active.path);
-        if tokio::fs::try_exists(&active_path).await.unwrap_or(false) {
-            let mut ws = state.active_workspace_dir.write().await;
-            *ws = active_path;
-        }
-    }
+    sync_storage_root_for_store(&state, &store).await;
     Ok(build_projects_response(&state, &store).await)
 }
 
@@ -2040,11 +2508,7 @@ pub async fn create_project(
     store.upsert_and_activate(clean_name, project_path.clone());
     store.save().await?;
 
-    {
-        let mut ws = state.active_workspace_dir.write().await;
-        *ws = project_path;
-    }
-
+    sync_storage_root_for_store(&state, &store).await;
     Ok(build_projects_response(&state, &store).await)
 }
 
@@ -2067,11 +2531,7 @@ pub async fn open_project_dialog(
     store.upsert_and_activate(name, picked.clone());
     store.save().await?;
 
-    {
-        let mut ws = state.active_workspace_dir.write().await;
-        *ws = picked;
-    }
-
+    sync_storage_root_for_store(&state, &store).await;
     Ok(Some(build_projects_response(&state, &store).await))
 }
 
@@ -2088,11 +2548,7 @@ pub async fn select_project(
     ensure_project_dex_dirs(&proj_path).await?;
     store.save().await?;
 
-    {
-        let mut ws = state.active_workspace_dir.write().await;
-        *ws = proj_path;
-    }
-
+    sync_storage_root_for_store(&state, &store).await;
     Ok(build_projects_response(&state, &store).await)
 }
 
@@ -2105,14 +2561,7 @@ pub async fn remove_project(
     store.remove_by_id(&id);
     store.save().await?;
 
-    if let Some(active) = store.active_project() {
-        let p = PathBuf::from(&active.path);
-        if tokio::fs::try_exists(&p).await.unwrap_or(false) {
-            let mut ws = state.active_workspace_dir.write().await;
-            *ws = p;
-        }
-    }
-
+    sync_storage_root_for_store(&state, &store).await;
     Ok(build_projects_response(&state, &store).await)
 }
 
@@ -2133,29 +2582,220 @@ pub async fn inspect_attachment_paths(paths: Vec<String>) -> Result<Vec<Attachme
 }
 
 #[tauri::command]
-pub async fn list_project_sessions(
-    state: State<'_, DesktopState>,
-) -> Result<Vec<ChatSessionSummary>, String> {
-    let ws = state.active_workspace_dir.read().await.clone();
-    list_sessions_impl(&ws).await
+pub async fn list_project_sessions() -> Result<Vec<ChatSessionSummary>, String> {
+    let dir = active_sessions_dir_for_state().await;
+    list_sessions_in_dir(&dir).await
 }
 
 #[tauri::command]
-pub async fn save_project_session(
-    state: State<'_, DesktopState>,
-    session: ChatSession,
-) -> Result<ChatSession, String> {
-    let ws = state.active_workspace_dir.read().await.clone();
-    save_session_impl(&ws, session).await
+pub async fn save_project_session(session: ChatSession) -> Result<ChatSession, String> {
+    let dir = active_sessions_dir_for_state().await;
+    save_session_in_dir(&dir, session).await
 }
 
 #[tauri::command]
-pub async fn load_project_session(
-    state: State<'_, DesktopState>,
+pub async fn load_project_session(session_id: String) -> Result<ChatSession, String> {
+    let dir = active_sessions_dir_for_state().await;
+    load_session_in_dir(&dir, &session_id).await
+}
+
+#[tauri::command]
+pub async fn rename_project_session(
     session_id: String,
+    title: String,
 ) -> Result<ChatSession, String> {
-    let ws = state.active_workspace_dir.read().await.clone();
-    load_session_impl(&ws, &session_id).await
+    let dir = active_sessions_dir_for_state().await;
+    rename_session_in_dir(&dir, &session_id, &title).await
+}
+
+#[tauri::command]
+pub async fn delete_project_session(session_id: String) -> Result<(), String> {
+    let dir = active_sessions_dir_for_state().await;
+    delete_session_in_dir(&dir, &session_id).await
+}
+
+// =========================================================================
+// Phase 14: Reusable Native Pickers & Automated QA E2E Walkthrough Hooks
+// =========================================================================
+
+#[tauri::command]
+pub async fn pick_file_dialog(
+    title: Option<String>,
+    extensions: Option<Vec<String>>,
+) -> Result<Option<String>, String> {
+    let picked = pick_file_dialog_native(title.as_deref(), extensions.as_deref()).await?;
+    Ok(picked.map(|p| p.to_string_lossy().to_string()))
+}
+
+#[tauri::command]
+pub async fn pick_folder_dialog(title: Option<String>) -> Result<Option<String>, String> {
+    let picked = pick_folder_dialog_native(title.as_deref()).await?;
+    Ok(picked.map(|p| p.to_string_lossy().to_string()))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QaWalkthroughConfig {
+    pub enabled: bool,
+    pub output_dir: String,
+}
+
+fn qa_output_dir() -> PathBuf {
+    std::env::var("DEX_QA_OUT_DIR")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp/dex-qa"))
+}
+
+#[tauri::command]
+pub async fn get_qa_walkthrough_config() -> Result<QaWalkthroughConfig, String> {
+    let enabled = std::env::var("DEX_QA_WALKTHROUGH")
+        .ok()
+        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+    Ok(QaWalkthroughConfig {
+        enabled,
+        output_dir: qa_output_dir().to_string_lossy().to_string(),
+    })
+}
+
+#[tauri::command]
+pub async fn qa_capture_screenshot(
+    app: AppHandle,
+    filename: String,
+) -> Result<String, String> {
+    let enabled = std::env::var("DEX_QA_WALKTHROUGH")
+        .ok()
+        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+    if !enabled {
+        return Err("QA screenshot capture is only enabled when DEX_QA_WALKTHROUGH=1".to_string());
+    }
+
+    let safe_name: String = filename
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || *c == '.')
+        .collect();
+    if safe_name.is_empty() || safe_name.contains("..") {
+        return Err("Invalid screenshot filename".to_string());
+    }
+    let final_name = if safe_name.ends_with(".png") {
+        safe_name
+    } else {
+        format!("{safe_name}.png")
+    };
+
+    let out_dir = qa_output_dir();
+    tokio::fs::create_dir_all(&out_dir)
+        .await
+        .map_err(|e| format!("Failed to create QA dir '{}': {e}", out_dir.display()))?;
+    let dest = out_dir.join(final_name);
+
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::Manager;
+        let region_arg = app.get_webview_window("main").and_then(|win| {
+            let _ = win.show();
+            let _ = win.unminimize();
+            let _ = win.center();
+            let _ = win.set_focus();
+            let scale = win.scale_factor().ok().filter(|s| *s > 0.0).unwrap_or(1.0);
+            let pos = win.outer_position().ok()?;
+            let size = win.outer_size().ok()?;
+            let x = (f64::from(pos.x) / scale).round() as i64;
+            let y = (f64::from(pos.y) / scale).round() as i64;
+            let w = (f64::from(size.width) / scale).round() as i64;
+            let h = (f64::from(size.height) / scale).round() as i64;
+            if w > 100 && h > 100 {
+                Some(format!("{x},{y},{w},{h}"))
+            } else {
+                None
+            }
+        });
+
+        // Brief settle after focusing window
+        tokio::time::sleep(Duration::from_millis(120)).await;
+
+        let mut cmd = tokio::process::Command::new("/usr/sbin/screencapture");
+        cmd.arg("-x");
+        if let Some(ref rect) = region_arg {
+            cmd.args(["-R", rect]);
+        }
+        cmd.arg(&dest);
+
+        let direct_ok = match tokio::time::timeout(Duration::from_secs(10), cmd.output()).await {
+            Ok(Ok(out)) => out.status.success(),
+            _ => false,
+        };
+
+        if !direct_ok {
+            // Unsigned local .app bundles may lack macOS Screen Recording TCC; coordinate with external QA runner if active
+            let req_path = out_dir.join(".capture_req.json");
+            let req_payload = serde_json::json!({
+                "dest": dest.to_string_lossy().to_string(),
+                "rect": region_arg,
+            });
+            if let Ok(req_json) = serde_json::to_string(&req_payload) {
+                let _ = tokio::fs::write(&req_path, req_json).await;
+                let deadline = std::time::Instant::now() + Duration::from_millis(3500);
+                while std::time::Instant::now() < deadline {
+                    if tokio::fs::metadata(&dest)
+                        .await
+                        .map(|m| m.len() > 0)
+                        .unwrap_or(false)
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(80)).await;
+                }
+                let _ = tokio::fs::remove_file(&req_path).await;
+            }
+
+            if !tokio::fs::metadata(&dest)
+                .await
+                .map(|m| m.len() > 0)
+                .unwrap_or(false)
+            {
+                return Err(
+                    "screencapture failed (unsigned .app lacks macOS Screen Recording permission and no QA capture helper responded)"
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    Ok(dest.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub async fn qa_write_report(report: serde_json::Value) -> Result<String, String> {
+    let enabled = std::env::var("DEX_QA_WALKTHROUGH")
+        .ok()
+        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+    if !enabled {
+        return Err("QA report write is only enabled when DEX_QA_WALKTHROUGH=1".to_string());
+    }
+    let out_dir = qa_output_dir();
+    tokio::fs::create_dir_all(&out_dir)
+        .await
+        .map_err(|e| format!("Failed to create QA dir '{}': {e}", out_dir.display()))?;
+    let dest = out_dir.join("qa_report.json");
+    let json = serde_json::to_string_pretty(&report)
+        .map_err(|e| format!("Failed to serialize QA report: {e}"))?;
+    tokio::fs::write(&dest, json)
+        .await
+        .map_err(|e| format!("Failed to write QA report: {e}"))?;
+    Ok(dest.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub async fn qa_exit_app(app: AppHandle) -> Result<(), String> {
+    let enabled = std::env::var("DEX_QA_WALKTHROUGH")
+        .ok()
+        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+    if !enabled {
+        return Err("qa_exit_app is only enabled when DEX_QA_WALKTHROUGH=1".to_string());
+    }
+    app.exit(0);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2169,5 +2809,16 @@ mod tests {
         assert_eq!(to_base64(b"fo"), "Zm8=");
         assert_eq!(to_base64(b"foo"), "Zm9v");
         assert_eq!(to_base64(b"Dex Autonomous Agent"), "RGV4IEF1dG9ub21vdXMgQWdlbnQ=");
+    }
+
+    #[test]
+    fn test_runtime_vision_capability_blocks_mlx_lm_server() {
+        assert!(!runtime_supports_vision_payload("dex-local", "gemma-4-vision", Some("mlx")));
+        assert!(!runtime_supports_vision_payload("dex-local", "qwen3.5-9b", Some("llamacpp")));
+        assert!(runtime_supports_vision_payload("openai", "gpt-4o", None));
+        assert!(runtime_supports_vision_payload("ollama", "qwen3.5-vl", None));
+        assert!(is_multimodal_rejection_error(
+            "ValueError: Only 'text' content type is supported."
+        ));
     }
 }

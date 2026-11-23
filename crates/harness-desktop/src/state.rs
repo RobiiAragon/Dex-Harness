@@ -35,9 +35,13 @@ impl DesktopState {
         let extension_supervisor = Arc::new(ExtensionSupervisor::new(event_bus.clone()));
         let default_workspace = std::env::current_dir()
             .ok()
-            .filter(|p| p != &PathBuf::from("/"))
+            .filter(|p| !harness_core::is_unwritable_system_root(p))
             .or_else(dirs::home_dir)
-            .unwrap_or_else(|| PathBuf::from("."));
+            .unwrap_or_else(harness_core::home_dex_dir);
+
+        // Anchor process-wide Dex storage root away from `/` immediately so macOS .app never hits os error 30
+        harness_core::set_default_storage_root(harness_core::home_dex_dir());
+
         Self {
             event_bus,
             mode: Arc::new(RwLock::new(ExecutionMode::Autopilot)),

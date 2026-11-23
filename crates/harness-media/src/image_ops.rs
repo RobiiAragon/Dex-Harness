@@ -243,9 +243,9 @@ pub async fn process_image(
         };
 
         let out_path = match opts.output_path {
-            Some(p) => p,
+            Some(p) => harness_core::resolve_safe_path(p),
             None => {
-                let dir = PathBuf::from(DEFAULT_IMAGES_DIR);
+                let dir = harness_core::resolve_dex_subpath(DEFAULT_IMAGES_DIR);
                 std::fs::create_dir_all(&dir).map_err(|e| MediaError::Io {
                     path: dir.to_string_lossy().to_string(),
                     source: e,
@@ -325,9 +325,9 @@ pub async fn lanczos_upscale(
     let target_h = info.height.saturating_mul(scale);
 
     let default_out = if let Some(p) = output_path {
-        p.to_path_buf()
+        harness_core::resolve_safe_path(p)
     } else {
-        let dir = PathBuf::from(DEFAULT_IMAGES_DIR);
+        let dir = harness_core::resolve_dex_subpath(DEFAULT_IMAGES_DIR);
         tokio::fs::create_dir_all(&dir)
             .await
             .map_err(|e| MediaError::Io {

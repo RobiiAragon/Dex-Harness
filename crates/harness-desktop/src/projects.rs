@@ -318,11 +318,22 @@ pub async fn ensure_project_dex_dirs(project_dir: &Path) -> Result<(), String> {
 }
 
 // =========================================================================
-// Chat Session Persistence (`<project>/.dex/sessions/*.json`)
+// Chat Session Persistence (`<project>/.dex/sessions/*.json` or global `~/.dex/sessions/*.json`)
 // =========================================================================
 
-fn sessions_dir(project_dir: &Path) -> PathBuf {
-    project_dir.join(".dex").join("sessions")
+pub fn global_sessions_dir() -> PathBuf {
+    harness_core::home_dex_dir().join("sessions")
+}
+
+/// Resolves the sessions directory: `<project>/.dex/sessions` when a project is active,
+/// or `~/.dex/sessions` globally when no project is open.
+pub fn resolve_sessions_dir(active_project_dir: Option<&Path>) -> PathBuf {
+    match active_project_dir {
+        Some(dir) if !harness_core::is_unwritable_system_root(dir) => {
+            dir.join(".dex").join("sessions")
+        }
+        _ => global_sessions_dir(),
+    }
 }
 
 fn sanitize_session_id(session_id: &str) -> Result<String, String> {
@@ -337,13 +348,12 @@ fn sanitize_session_id(session_id: &str) -> Result<String, String> {
     Ok(trimmed.to_string())
 }
 
-pub async fn list_project_sessions(project_dir: &Path) -> Result<Vec<ChatSessionSummary>, String> {
-    let dir = sessions_dir(project_dir);
-    if !tokio::fs::try_exists(&dir).await.unwrap_or(false) {
+pub async fn list_sessions_in_dir(dir: &Path) -> Result<Vec<ChatSessionSummary>, String> {
+    if !tokio::fs::try_exists(dir).await.unwrap_or(false) {
         return Ok(Vec::new());
     }
 
-    let mut read_dir = tokio::fs::read_dir(&dir)
+    let mut read_dir = tokio::fs::read_dir(dir)
         .await
         .map_err(|e| format!("Failed to read sessions directory '{}': {e}", dir.display()))?;
 
@@ -369,8 +379,8 @@ pub async fn list_project_sessions(project_dir: &Path) -> Result<Vec<ChatSession
     Ok(summaries)
 }
 
-pub async fn save_project_session(
-    project_dir: &Path,
+pub async fn save_session_in_dir(
+    dir: &Path,
     mut session: ChatSession,
 ) -> Result<ChatSession, String> {
     let clean_id = sanitize_session_id(&session.id)?;
@@ -381,8 +391,7 @@ pub async fn save_project_session(
     }
     session.updated_at = now;
 
-    let dir = sessions_dir(project_dir);
-    tokio::fs::create_dir_all(&dir)
+    tokio::fs::create_dir_all(dir)
         .await
         .map_err(|e| format!("Failed to create sessions directory '{}': {e}", dir.display()))?;
 
@@ -396,12 +405,9 @@ pub async fn save_project_session(
     Ok(session)
 }
 
-pub async fn load_project_session(
-    project_dir: &Path,
-    session_id: &str,
-) -> Result<ChatSession, String> {
+pub async fn load_session_in_dir(dir: &Path, session_id: &str) -> Result<ChatSession, String> {
     let clean_id = sanitize_session_id(session_id)?;
-    let target = sessions_dir(project_dir).join(format!("{clean_id}.json"));
+    let target = dir.join(format!("{clean_id}.json"));
     let raw = tokio::fs::read_to_string(&target)
         .await
         .map_err(|e| format!("Could not read session '{}': {e}", target.display()))?;
@@ -409,16 +415,88 @@ pub async fn load_project_session(
         .map_err(|e| format!("Corrupted session JSON '{}': {e}", target.display()))
 }
 
+pub async fn rename_session_in_dir(
+    dir: &Path,
+    session_id: &str,
+    new_title: &str,
+) -> Result<ChatSession, String> {
+    let clean_title = new_title.trim();
+    if clean_title.is_empty() {
+        return Err("Session title cannot be empty".to_string());
+    }
+    let mut session = load_session_in_dir(dir, session_id).await?;
+    session.title = clean_title.chars().take(80).collect();
+    save_session_in_dir(dir, session).await
+}
+
+pub async fn delete_session_in_dir(dir: &Path, session_id: &str) -> Result<(), String> {
+    let clean_id = sanitize_session_id(session_id)?;
+    let target = dir.join(format!("{clean_id}.json"));
+    if tokio::fs::try_exists(&target).await.unwrap_or(false) {
+        tokio::fs::remove_file(&target)
+            .await
+            .map_err(|e| format!("Failed to delete session '{}': {e}", target.display()))?;
+    }
+    Ok(())
+}
+
 // =========================================================================
 // Native macOS Folder & Multi-File Pickers via `osascript`
 // =========================================================================
 
+fn sanitize_applescript_string(raw: &str) -> String {
+    raw.chars()
+        .filter(|&c| c != '"' && c != '\\' && c != '\n' && c != '\r' && c != '\0')
+        .take(120)
+        .collect()
+}
+
+pub fn build_pick_folder_applescript(title: Option<&str>) -> String {
+    let prompt = title
+        .map(sanitize_applescript_string)
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "Select Folder for Dex".to_string());
+    format!(r#"POSIX path of (choose folder with prompt "{prompt}")"#)
+}
+
+pub fn build_pick_file_applescript(title: Option<&str>, extensions: Option<&[String]>) -> String {
+    let prompt = title
+        .map(sanitize_applescript_string)
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "Select File for Dex".to_string());
+
+    let clean_exts: Vec<String> = extensions
+        .unwrap_or(&[])
+        .iter()
+        .map(|ext| {
+            ext.trim()
+                .trim_start_matches('.')
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .collect::<String>()
+                .to_ascii_lowercase()
+        })
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if clean_exts.is_empty() {
+        format!(r#"POSIX path of (choose file with prompt "{prompt}")"#)
+    } else {
+        let type_list = clean_exts
+            .iter()
+            .map(|e| format!(r#""{e}""#))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(r#"POSIX path of (choose file with prompt "{prompt}" of type {{{type_list}}})"#)
+    }
+}
+
 #[cfg(target_os = "macos")]
-pub async fn pick_folder_native() -> Result<Option<PathBuf>, String> {
-    let script = r#"POSIX path of (choose folder with prompt "Select Project Folder for Dex")"#;
+pub async fn pick_folder_dialog_native(title: Option<&str>) -> Result<Option<PathBuf>, String> {
+    let script = build_pick_folder_applescript(title);
     let output = tokio::time::timeout(
         Duration::from_secs(DIALOG_TIMEOUT_SECS),
-        Command::new("osascript").args(["-e", script]).output(),
+        Command::new("osascript").args(["-e", &script]).output(),
     )
     .await
     .map_err(|_| "Folder selection dialog timed out".to_string())?
@@ -441,8 +519,49 @@ pub async fn pick_folder_native() -> Result<Option<PathBuf>, String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub async fn pick_folder_native() -> Result<Option<PathBuf>, String> {
+pub async fn pick_folder_dialog_native(_title: Option<&str>) -> Result<Option<PathBuf>, String> {
     Err("Native osascript folder dialog is only supported on macOS".to_string())
+}
+
+pub async fn pick_folder_native() -> Result<Option<PathBuf>, String> {
+    pick_folder_dialog_native(Some("Select Project Folder for Dex")).await
+}
+
+#[cfg(target_os = "macos")]
+pub async fn pick_file_dialog_native(
+    title: Option<&str>,
+    extensions: Option<&[String]>,
+) -> Result<Option<PathBuf>, String> {
+    let script = build_pick_file_applescript(title, extensions);
+    let output = tokio::time::timeout(
+        Duration::from_secs(DIALOG_TIMEOUT_SECS),
+        Command::new("osascript").args(["-e", &script]).output(),
+    )
+    .await
+    .map_err(|_| "File selection dialog timed out".to_string())?
+    .map_err(|e| format!("Failed to launch native file picker: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("-128") || stderr.to_lowercase().contains("cancel") {
+            return Ok(None);
+        }
+        return Err(format!("File picker error: {}", stderr.trim()));
+    }
+
+    let picked = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if picked.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(PathBuf::from(picked)))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub async fn pick_file_dialog_native(
+    _title: Option<&str>,
+    _extensions: Option<&[String]>,
+) -> Result<Option<PathBuf>, String> {
+    Err("Native osascript file dialog is only supported on macOS".to_string())
 }
 
 #[cfg(target_os = "macos")]
@@ -568,22 +687,55 @@ mod tests {
             ],
         };
 
-        save_project_session(&temp_proj, session.clone())
+        let dir = resolve_sessions_dir(Some(&temp_proj));
+        save_session_in_dir(&dir, session.clone())
             .await
             .expect("save session");
 
-        let list = list_project_sessions(&temp_proj).await.expect("list sessions");
+        let list = list_sessions_in_dir(&dir).await.expect("list sessions");
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, "sess-001");
         assert_eq!(list[0].message_count, 2);
 
-        let loaded = load_project_session(&temp_proj, "sess-001")
+        let loaded = load_session_in_dir(&dir, "sess-001")
             .await
             .expect("load session");
         assert_eq!(loaded.title, "Build Rust API");
         assert_eq!(loaded.messages.len(), 2);
         assert_eq!(loaded.messages[0].attachments, vec!["/tmp/spec.pdf".to_string()]);
 
+        // Rename & delete session
+        let renamed = rename_session_in_dir(&dir, "sess-001", "Refactored API")
+            .await
+            .expect("rename session");
+        assert_eq!(renamed.title, "Refactored API");
+
+        delete_session_in_dir(&dir, "sess-001")
+            .await
+            .expect("delete session");
+        let after_del = list_sessions_in_dir(&dir).await.expect("list after delete");
+        assert!(after_del.is_empty());
+
+        // When no project is open (or root is `/`), sessions resolve globally to `~/.dex/sessions`
+        assert_eq!(resolve_sessions_dir(None), global_sessions_dir());
+        assert_eq!(resolve_sessions_dir(Some(Path::new("/"))), global_sessions_dir());
+
         let _ = tokio::fs::remove_dir_all(&temp_proj).await;
+    }
+
+    #[test]
+    fn test_pick_dialog_applescript_builders_sanitize_inputs() {
+        let folder_script = build_pick_folder_applescript(Some("Select \"Unity\"\nFolder"));
+        assert!(folder_script.contains("Select UnityFolder"));
+        assert!(!folder_script.contains('\n'));
+
+        let file_script = build_pick_file_applescript(
+            Some("Pick Audio"),
+            Some(&[".wav".to_string(), "MP3!".to_string(), "m4a".to_string()]),
+        );
+        assert!(file_script.contains(r#"of type {"wav", "mp3", "m4a"}"#));
+
+        let any_file = build_pick_file_applescript(None, None);
+        assert!(!any_file.contains("of type"));
     }
 }

@@ -8,6 +8,25 @@ use crate::error::ModelError;
 use crate::huggingface::parse_quantization;
 
 const MAX_SCAN_DEPTH: usize = 6;
+const MIN_STANDARD_WEIGHT_BYTES: u64 = 100 * 1024 * 1024; // 100 MB
+const MIN_TINY_WEIGHT_BYTES: u64 = 5 * 1024 * 1024; // 5 MB for explicitly tiny/230M models
+
+/// Integrity status of a discovered local model on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum IntegrityStatus {
+    #[default]
+    Valid,
+    Incomplete,
+}
+
+impl std::fmt::Display for IntegrityStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Valid => write!(f, "Valid"),
+            Self::Incomplete => write!(f, "Incomplete"),
+        }
+    }
+}
 
 /// Recognized local model weight format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,6 +76,10 @@ pub struct DiscoveredModel {
     pub modified_at: u64,
     #[serde(default)]
     pub is_reference: bool,
+    #[serde(default)]
+    pub integrity_status: IntegrityStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integrity_note: Option<String>,
 }
 
 /// Recursively scans all configured model directories inside `tokio::task::spawn_blocking`
@@ -203,14 +226,18 @@ pub fn inspect_model_directory(
     let mut has_bin_weights = false;
     let mut has_index_json = false;
     let mut total_size: u64 = 0;
+    let mut weight_bytes: u64 = 0;
     let mut latest_mtime: u64 = 0;
+    let mut partial_files: Vec<String> = Vec::new();
+    let mut safetensor_paths: Vec<PathBuf> = Vec::new();
 
     for entry in rd.flatten() {
         let p = entry.path();
         if !p.is_file() {
             continue;
         }
-        let name = entry.file_name().to_string_lossy().to_lowercase();
+        let orig_name = entry.file_name().to_string_lossy().to_string();
+        let name = orig_name.to_lowercase();
         let meta = entry.metadata().ok();
         let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
         let mtime = meta
@@ -223,14 +250,29 @@ pub fn inspect_model_directory(
             latest_mtime = mtime;
         }
 
+        if name.ends_with(".part")
+            || name.ends_with(".incomplete")
+            || name.ends_with(".tmp")
+            || name.ends_with(".download")
+            || name.starts_with("downloading_")
+        {
+            partial_files.push(orig_name);
+            continue;
+        }
+
         if name.ends_with(".safetensors") {
             has_safetensors = true;
+            weight_bytes = weight_bytes.saturating_add(size);
             total_size = total_size.saturating_add(size);
+            safetensor_paths.push(p);
         } else if name == "model.safetensors.index.json" {
             has_index_json = true;
             total_size = total_size.saturating_add(size);
-        } else if name.ends_with(".bin") && !name.contains("tokenizer") {
+        } else if (name.ends_with(".bin") || name.ends_with(".pt") || name.ends_with(".npz"))
+            && !name.contains("tokenizer")
+        {
             has_bin_weights = true;
+            weight_bytes = weight_bytes.saturating_add(size);
             total_size = total_size.saturating_add(size);
         } else if name.ends_with(".json") || name.ends_with(".model") || name.ends_with(".tiktoken")
         {
@@ -238,7 +280,7 @@ pub fn inspect_model_directory(
         }
     }
 
-    if !has_safetensors && !has_index_json && !has_bin_weights {
+    if !has_safetensors && !has_index_json && !has_bin_weights && partial_files.is_empty() {
         return None;
     }
 
@@ -282,7 +324,7 @@ pub fn inspect_model_directory(
             .is_some_and(|v| v.get("quantization").is_some())
         || dir_lower.contains("mlx");
 
-    let format = if is_mlx && (has_safetensors || has_index_json) {
+    let format = if is_mlx && (has_safetensors || has_index_json || !partial_files.is_empty()) {
         ModelFormat::Mlx
     } else {
         ModelFormat::PyTorch
@@ -293,6 +335,15 @@ pub fn inspect_model_directory(
         .and_then(|n| n.to_str())
         .unwrap_or("model")
         .to_string();
+
+    let (integrity_status, integrity_note) = evaluate_dir_integrity(
+        dir,
+        &raw_name,
+        weight_bytes,
+        has_index_json,
+        &safetensor_paths,
+        &partial_files,
+    );
 
     let quantization = config_quant_bits
         .map(|bits| format!("{bits}bit"))
@@ -333,6 +384,8 @@ pub fn inspect_model_directory(
         capabilities,
         modified_at: latest_mtime,
         is_reference: true,
+        integrity_status,
+        integrity_note,
     })
 }
 
@@ -357,6 +410,8 @@ fn inspect_gguf_file(
         .and_then(|s| s.to_str())
         .unwrap_or(&filename)
         .to_string();
+
+    let (integrity_status, integrity_note) = evaluate_gguf_integrity(file, &stem, size_bytes);
 
     let quant_raw = parse_quantization(&filename);
     let quantization = if quant_raw == "UNKNOWN" {
@@ -388,7 +443,223 @@ fn inspect_gguf_file(
         capabilities,
         modified_at,
         is_reference: true,
+        integrity_status,
+        integrity_note,
     })
+}
+
+fn is_explicitly_tiny_model(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    [
+        "230m", "135m", "160m", "360m", "0.5b", "0.6b", "82m", "tiny", "nano", "micro", "mini",
+        "smollm",
+    ]
+    .iter()
+    .any(|tok| lower.contains(tok))
+}
+
+fn has_valid_safetensors_header(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    let file_len = meta.len();
+    if file_len < 16 {
+        return false;
+    }
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = [0u8; 9];
+    if f.read_exact(&mut buf).is_err() {
+        return false;
+    }
+    let hdr_len = u64::from_le_bytes([
+        buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
+    ]);
+    hdr_len >= 2 && hdr_len < file_len && hdr_len <= 100 * 1024 * 1024 && buf[8] == b'{'
+}
+
+fn has_valid_gguf_header(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut magic = [0u8; 4];
+    if f.read_exact(&mut magic).is_err() {
+        return false;
+    }
+    &magic == b"GGUF"
+}
+
+fn evaluate_dir_integrity(
+    dir: &Path,
+    raw_name: &str,
+    weight_bytes: u64,
+    has_index_json: bool,
+    safetensor_paths: &[PathBuf],
+    partial_files: &[String],
+) -> (IntegrityStatus, Option<String>) {
+    let mut issues: Vec<String> = Vec::new();
+
+    if !partial_files.is_empty() {
+        let preview = partial_files
+            .iter()
+            .take(2)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        issues.push(format!("unfinished download artifact ({preview})"));
+    }
+
+    if has_index_json {
+        let idx_path = dir.join("model.safetensors.index.json");
+        if let Ok(raw) = std::fs::read_to_string(&idx_path) {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if let Some(map) = val.get("weight_map").and_then(|w| w.as_object()) {
+                    let mut shards: HashSet<String> = HashSet::new();
+                    for v in map.values() {
+                        if let Some(s) = v.as_str() {
+                            shards.insert(s.to_string());
+                        }
+                    }
+                    let mut missing: Vec<String> = Vec::new();
+                    for shard in &shards {
+                        let p = dir.join(shard);
+                        let ok = std::fs::metadata(&p)
+                            .map(|m| m.is_file() && m.len() > 0)
+                            .unwrap_or(false);
+                        if !ok {
+                            missing.push(shard.clone());
+                        }
+                    }
+                    missing.sort();
+                    if !missing.is_empty() {
+                        let sample = missing
+                            .iter()
+                            .take(2)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        issues.push(format!(
+                            "missing {}/{} indexed weight shard(s): {sample}",
+                            missing.len(),
+                            shards.len()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    if weight_bytes == 0 {
+        issues.push("no completed weight files (.safetensors / .bin) found".to_string());
+    } else if weight_bytes < MIN_STANDARD_WEIGHT_BYTES {
+        let tiny_ok = is_explicitly_tiny_model(raw_name)
+            && weight_bytes >= MIN_TINY_WEIGHT_BYTES
+            && !safetensor_paths.is_empty()
+            && safetensor_paths.iter().all(|p| has_valid_safetensors_header(p));
+        if !tiny_ok {
+            let mb = weight_bytes as f64 / (1024.0 * 1024.0);
+            issues.push(format!(
+                "weight size is only {mb:.1} MB (expected >= 100 MB or valid tiny model safetensors)"
+            ));
+        }
+    } else if !safetensor_paths.is_empty()
+        && !safetensor_paths.iter().all(|p| has_valid_safetensors_header(p))
+    {
+        issues.push("corrupted or truncated .safetensors header".to_string());
+    }
+
+    if issues.is_empty() {
+        (IntegrityStatus::Valid, None)
+    } else {
+        (
+            IntegrityStatus::Incomplete,
+            Some(format!("Incomplete model: {}", issues.join("; "))),
+        )
+    }
+}
+
+fn evaluate_gguf_integrity(
+    file: &Path,
+    stem: &str,
+    size_bytes: u64,
+) -> (IntegrityStatus, Option<String>) {
+    let mut issues = Vec::new();
+
+    if !has_valid_gguf_header(file) {
+        issues.push("invalid GGUF magic header".to_string());
+    }
+
+    let min_bytes = if is_explicitly_tiny_model(stem) {
+        MIN_TINY_WEIGHT_BYTES
+    } else {
+        MIN_STANDARD_WEIGHT_BYTES
+    };
+    if size_bytes < min_bytes {
+        let mb = size_bytes as f64 / (1024.0 * 1024.0);
+        issues.push(format!(
+            "GGUF file is only {mb:.1} MB (likely truncated download)"
+        ));
+    }
+
+    let part_sibling = PathBuf::from(format!("{}.part", file.display()));
+    if part_sibling.is_file() {
+        issues.push("unfinished .part sibling file present".to_string());
+    }
+
+    if issues.is_empty() {
+        (IntegrityStatus::Valid, None)
+    } else {
+        (
+            IntegrityStatus::Incomplete,
+            Some(format!("Incomplete GGUF: {}", issues.join("; "))),
+        )
+    }
+}
+
+/// Validates a model path (`mlx` directory or `gguf` file) before launching a local inference server.
+pub fn verify_model_path_integrity(format: &str, path: &Path) -> (IntegrityStatus, Option<String>) {
+    let fmt = format.trim().to_lowercase();
+    if fmt == "gguf" {
+        let Ok(meta) = std::fs::metadata(path) else {
+            return (
+                IntegrityStatus::Incomplete,
+                Some(format!("GGUF file does not exist: '{}'", path.display())),
+            );
+        };
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("model");
+        return evaluate_gguf_integrity(path, stem, meta.len());
+    }
+
+    if !path.is_dir() {
+        return (
+            IntegrityStatus::Incomplete,
+            Some(format!(
+                "Model directory does not exist: '{}'",
+                path.display()
+            )),
+        );
+    }
+
+    let source = path
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    match inspect_model_directory(path.parent().unwrap_or(path), path, &source) {
+        Some(m) => (m.integrity_status, m.integrity_note),
+        None => (
+            IntegrityStatus::Incomplete,
+            Some(format!(
+                "Folder '{}' is missing config.json or model weights",
+                path.display()
+            )),
+        ),
+    }
 }
 
 fn derive_repo_hint(root: &Path, target: &Path) -> Option<String> {
@@ -596,6 +867,78 @@ mod tests {
             .find(|m| m.format == ModelFormat::PyTorch)
             .expect("found PT");
         assert!(pt.capabilities.contains(&"Reasoning".to_string()));
+
+        let _ = tokio::fs::remove_dir_all(&base).await;
+    }
+
+    #[tokio::test]
+    async fn test_scanner_flags_incomplete_and_valid_models() {
+        let base = std::env::temp_dir().join(format!("dex_scan_integrity_{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&base).await;
+
+        // 1. Incomplete MLX folder with missing indexed shard + .part download artifact (exact supergemma4 case)
+        let broken_dir = base.join("Jiunsong/supergemma4-e4b-abliterated-mlx");
+        tokio::fs::create_dir_all(&broken_dir).await.expect("broken dir");
+        tokio::fs::write(
+            broken_dir.join("config.json"),
+            r#"{"model_type":"gemma4","quantization":{"bits":4}}"#,
+        )
+        .await
+        .expect("cfg");
+        tokio::fs::write(
+            broken_dir.join("model.safetensors.index.json"),
+            r#"{"weight_map":{"layer.0.weight":"model.safetensors"}}"#,
+        )
+        .await
+        .expect("idx");
+        tokio::fs::write(
+            broken_dir.join("downloading_bionic_model.safetensors.part"),
+            vec![0u8; 2048],
+        )
+        .await
+        .expect("part");
+
+        // 2. Valid tiny 230M model with valid safetensors JSON header (>= 5 MB)
+        let tiny_dir = base.join("org/LFM2.5-230M-MLX-4bit");
+        tokio::fs::create_dir_all(&tiny_dir).await.expect("tiny dir");
+        tokio::fs::write(
+            tiny_dir.join("config.json"),
+            r#"{"model_type":"lfm2","quantization":{"bits":4}}"#,
+        )
+        .await
+        .expect("tiny cfg");
+        let hdr = br#"{"w":{"dtype":"F16","shape":[1],"data_offsets":[0,2]}}"#;
+        let mut st_bytes = Vec::with_capacity(6 * 1024 * 1024);
+        st_bytes.extend_from_slice(&(hdr.len() as u64).to_le_bytes());
+        st_bytes.extend_from_slice(hdr);
+        st_bytes.resize(6 * 1024 * 1024, 0u8);
+        tokio::fs::write(tiny_dir.join("model.safetensors"), &st_bytes)
+            .await
+            .expect("tiny weights");
+
+        let discovered = scan_model_dirs(std::slice::from_ref(&base))
+            .await
+            .expect("scan");
+        assert_eq!(discovered.len(), 2);
+
+        let broken = discovered
+            .iter()
+            .find(|m| m.name.contains("supergemma4"))
+            .expect("found broken");
+        assert_eq!(broken.integrity_status, IntegrityStatus::Incomplete);
+        let note = broken.integrity_note.as_deref().unwrap_or("");
+        assert!(note.contains("model.safetensors"));
+        assert!(note.contains(".part"));
+
+        let tiny = discovered
+            .iter()
+            .find(|m| m.name.contains("LFM2.5-230M"))
+            .expect("found tiny");
+        assert_eq!(tiny.integrity_status, IntegrityStatus::Valid);
+        assert!(tiny.integrity_note.is_none());
+
+        let (check_status, _) = verify_model_path_integrity("mlx", &broken_dir);
+        assert_eq!(check_status, IntegrityStatus::Incomplete);
 
         let _ = tokio::fs::remove_dir_all(&base).await;
     }

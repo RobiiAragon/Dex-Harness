@@ -1,275 +1,201 @@
-# Dex-Harness 🦀🤖
+# Dex-Harness
 
-> **High-Performance Autonomous Agent Harness in Rust**  
-> Empowers open-weights and commercial language models (Ollama, vLLM, llama.cpp, OpenAI, Anthropic) with native execution capabilities, computer vision, browser/desktop control, bidirectional MCP interoperability, and real-time observability.
-
----
-
-## ⚡ Vision & Architectural Pillars
-
-**Dex-Harness** is an enterprise-grade agent execution harness designed from the ground up in Rust for ultra-low latency, memory safety, and zero-panic resilience. Inspired by systems like Goose, Claude Code, and Odysseus, it bridges the gap between raw LLM inference, browser/desktop perception, and deep operating system interaction.
-
-1. **Core & Inference Engine (`harness-core`, `harness-llm`):**
-   - Universal multi-provider client supporting Ollama, OpenAI-compatible backends (vLLM, llama.cpp, LocalAI), and cloud APIs.
-   - Built-in ReAct reasoning engine, real-time token streaming, dynamic tool calling with JSON Schema generation (`schemars`), and automated token compaction (`ContextCompactor`).
-2. **Real-Time EventBus (`harness-core`):**
-   - Non-blocking pub/sub message bus (`tokio::sync::broadcast`) broadcasting telemetry (`ThoughtToken`, `ToolStarted`, `ToolFinished`, `SubagentSpawned`, `TaskUpdated`, `ContextCompacted`, `SecurityBlocked`).
-3. **Computer Use & Perception (`harness-computer`):**
-   - **Browser CDP Automation (`chromiumoxide`):** Headless and visible Chrome automation (`browser_navigate`, `browser_extract_dom`, `browser_click`, `browser_type`, `browser_screenshot`).
-   - **Desktop Automation (`xcap` + `enigo`):** Primary monitor screenshot capture (`desktop_screenshot`) and mouse/keyboard simulation (`desktop_mouse`, `desktop_keyboard`) with coordinate validation.
-4. **Bidirectional Model Context Protocol (`harness-mcp`):**
-   - Exposes any Dex `ToolRegistry` as a compliant MCP Server over `stdio` (`dex mcp-serve`) for instant integration with Claude Desktop, Cursor, or Zed.
-5. **Real-time Interfaces: TUI & Embedded Web Dashboard (`harness-ui`):**
-   - **TUI Dashboard (`dex tui`):** Terminal dashboard (`ratatui` + `crossterm`) showing active subagents, live thought stream, taskboard, and context window gauge.
-   - **Web Dashboard (`dex web`):** Embedded web server (`axum` + WebSockets) with dark-mode dashboard, live telemetry, and screenshot gallery.
-6. **Hardware Cookbook & Autonomous Scheduler (`harness-core`, `harness-cli`):**
-   - **Hardware Profiling (`dex cookbook`):** Scans host RAM, CPU cores, and Apple Silicon unified memory to calculate recommended local model tiers and context sizes.
-   - **Autonomous Cron Scheduler (`dex schedule` & `dex daemon`):** Manages recurring agent tasks in `.dex/schedules.json` executed by a background daemon.
+> **Native Apple Silicon & Cross-Platform Autonomous AI Agent Harness in Rust (`dex` CLI + `Dex.app` macOS Tauri v2 Desktop Suite)**  
+> Zero-panic, local-first multi-agent runtime uniting autonomous MLX / `llama.cpp` / Ollama LLM inference, surgical code & Git worktree tools, Chrome CDP & desktop computer use, Voice Studio (multilingual ASR + neural TTS + zero-shot voice cloning), Visual Media Studio (`mflux` / ComfyUI / FFmpeg), 3D & Game Studio (offline WebGL2 `.glb` viewer + headless Blender + Unity bridge), and dynamic deferred MCP extensions with idle RAM reclamation.
 
 ---
 
-## 📦 Workspace Architecture
+## Visual Tour (`Dex.app` Native macOS Obsidian UI)
+
+### 1. Autonomous Agent Workspace & Frontier Turn Accordion
+Projects & workspaces (`~/.dex/projects.json`), persistent sessions with inline rename/delete, zero-typing grouped local model selector, file & multimodal attachments, push-to-talk voice dictation with explicit language selector (`Auto` / `Español` / `English`), and collapsible reasoning/tool-call accordions.
+
+![Dex Agent Workspace](docs/screenshots/01_agent.png)
+
+### 2. Local Models Hub (Autonomous MLX & GGUF Runtime + Weight Integrity Scanner)
+Multi-folder recursive model scanner (`~/.dex/models`, `~/.lmstudio/models`, custom SSDs), 1-click isolated runtime installer (`~/.dex/runtimes/mlx-venv` for `mlx-lm`, `mlx-whisper`, `mflux`, `mlx-audio`, `parakeet-mlx`, `faster-whisper` + Homebrew `llama.cpp`), shard & header integrity verification (`Valid` vs. `Incomplete` download detection), and 2-column Hugging Face Hub Explorer.
+
+![Dex Models Hub](docs/screenshots/05_models_hub.png)
+
+### 3. Voice Studio & Deep Document Reader (`harness-audio`, `harness-docs`)
+Energy-based VAD silence trimming + soft peak normalization in pure Rust, multilingual ASR (`mlx-whisper` `whisper-large-v3-turbo`, `parakeet-mlx` TDT v3, `faster-whisper`, native macOS `SFSpeechRecognizer`), neural Apple Silicon TTS & zero-shot voice cloning (`mlx-audio` Qwen3-TTS, Chatterbox, Kokoro 82M, plus Fish Audio S2-Pro / Step-Audio EditX / OmniVoice sidecar presets), persistent voice profiles (`~/.dex/voices/`), 3-second Mic & STT tester, Apple Vision native OCR, and PDF/Office Markdown extraction.
+
+![Dex Voice Studio & Documents](docs/screenshots/03_voice_studio_docs.png)
+
+![Dex Audio Models & Engines Drawer](docs/screenshots/03b_audio_models_drawer.png)
+
+### 4. Visual Media Studio (`harness-media`)
+Apple Silicon MLX image generation (`mflux-generate` with ungated 4-bit presets: `FLUX.1-schnell 4-bit`, `Z-Image Turbo 4-bit`, `FLUX.2 Klein 4B`, `Qwen-Image`, `FLUX.1-dev`), ComfyUI workflow orchestration, pure-Rust crop/resize/WebP conversion, Lanczos3 2x–8x upscaling, and declarative JSON-to-FFmpeg timeline rendering.
+
+![Dex Media Studio](docs/screenshots/02_media_studio.png)
+
+### 5. 3D & Game Studio (`harness-3d`)
+100% offline zero-CDN WebGL2 binary glTF 2.0 (`.glb`) interactive viewport (orbit, zoom, wireframe, reference grid, real-time vertex/triangle/UV/normal/bounding-box HUD & game-ready diagnostics), image-to-3D sidecars (TRELLIS 2 / Hunyuan3D / TripoSR), headless Blender mesh conversion & LOD decimation, studio preview rendering, direct Unity project inspection, and actionable in-context recovery toasts.
+
+![Dex 3D & Game Studio](docs/screenshots/04_3d_game_studio.png)
+
+### 6. Extensions Hub & Hardware Cookbook (`harness-extensions`, `harness-core`)
+Deferred MCP & local sidecar supervisor (`search_tools` lazy activation + automatic idle RAM auto-unload) and live macOS Unified Memory telemetry (`vm_stat` + `sysctl` host profiling).
+
+| Extensions & Sidecars Hub | Hardware Cookbook & Live Unified RAM |
+| :---: | :---: |
+| ![Dex Extensions Hub](docs/screenshots/06_extensions.png) | ![Dex Hardware Cookbook](docs/screenshots/07_cookbook.png) |
+
+---
+
+## System Architecture
+
+```mermaid
+flowchart TB
+    subgraph UI["User Interfaces"]
+        APP["Dex.app (macOS Tauri v2 + WKWebView + WebGL2)"]
+        CLI["dex CLI / REPL"]
+        TUI["Ratatui Terminal UI & Axum Web Dashboard"]
+    end
+
+    subgraph CORE["harness-core & harness-llm"]
+        AGENT["ReActAgent + ContextCompactor + PreToolUse Security Hooks"]
+        BUS["Real-Time EventBus (tokio::sync::broadcast)"]
+        MANIFEST["Live Host & Capabilities Manifest + Safe Storage Root"]
+        LLM["Multi-Provider LLM Layer (60s First-Token & Stream Timeouts)"]
+    end
+
+    subgraph STUDIOS["Native Rust Multimodal & Engineering Crates"]
+        TOOLS["harness-tools (Surgical File/Search/Git Worktree/PTY)"]
+        COMP["harness-computer (Chrome CDP + Desktop xcap/enigo)"]
+        MODELS["harness-models (HF Hub, Shard Integrity Scanner, 1-Click Runtimes)"]
+        AUDIO["harness-audio (16kHz VAD/Norm Recorder, Whisper/Parakeet STT, mlx-audio TTS & Cloning)"]
+        DOCS["harness-docs (Swift Apple Vision OCR + PDF/Docling Parser)"]
+        MEDIA["harness-media (mflux MLX / ComfyUI Image & Video, Lanczos3, FFmpeg Timeline)"]
+        THREED["harness-3d (Pure-Rust glTF/OBJ Inspector, TRELLIS Sidecar, Headless Blender, Unity Bridge)"]
+        EXT["harness-extensions (ExtensionSupervisor, Deferred Tools, Idle RAM Reaper)"]
+    end
+
+    UI <-->|IPC & Live Events| CORE
+    CORE --> STUDIOS
+    EXT <-->|stdio / SSE / HTTP Healthcheck| MCP["External MCP Servers & Local Sidecars (:8088 MLX / :8089 llama.cpp)"]
+```
+
+---
+
+## Workspace Crates
 
 ```text
 crates/
-├── harness-core/        # EventBus, ReAct Agent, Memory, TaskBoard, Subagents, Skills, Hooks, Cookbook, Scheduler
-├── harness-llm/         # LLM provider adapters (Ollama, OpenAI-compatible, streaming)
-├── harness-tools/       # Native tools (filesystem, surgical edit, search, git worktrees, PTY shell)
-├── harness-computer/    # Browser automation (CDP) and desktop perception/mouse/keyboard control
-├── harness-mcp/         # Bidirectional Model Context Protocol client & stdio server
-├── harness-models/      # Local Model Hub: Hugging Face GGUF client, resumable downloader, Ollama bridge, local importer
-├── harness-extensions/  # Extensions Hub: MCP + Sidecar supervisor with idle RAM auto-unload & deferred tool bridge
-├── harness-audio/       # Native microphone capture (cpal/hound), Whisper STT, TTS (sidecar + macOS say), Music & SFX
-├── harness-docs/        # Native Apple Vision OCR (macOS) / Tesseract fallback & Docling / pure-Rust PDF parser
-├── harness-media/       # Visual Studio: MLX/ComfyUI/HTTP image & video gen, Lanczos3 upscale, pure-Rust image ops, FFmpeg timeline editor
-├── harness-3d/          # 3D & Game Studio: pure-Rust glTF/OBJ inspector, image-to-3D sidecars, headless Blender, Unity project bridge
-├── harness-ui/          # Ratatui TUI dashboard & Axum WebSocket web monitor
-├── harness-cli/         # Unified executable (binary name: `dex`)
-└── harness-desktop/     # Native macOS Desktop Application (`Dex.app`) via Tauri v2
+├── harness-core/        # EventBus, ReActAgent, Safe Storage & Enriched $PATH, TaskBoard, Subagents, Skills, Hooks, Cookbook
+├── harness-llm/         # Streaming OpenAI / MLX / llama.cpp / Ollama adapters with first-token & idle stream timeouts
+├── harness-tools/       # Surgical read/write/edit, gitignore-aware search, Git worktrees, async shell & portable-pty
+├── harness-computer/    # Chrome DevTools Protocol (chromiumoxide) & native desktop screenshots/mouse/keyboard (xcap/enigo)
+├── harness-mcp/         # Bidirectional Model Context Protocol client & stdio server (`dex mcp-serve`)
+├── harness-models/      # Multi-folder GGUF/MLX/PT scanner with shard integrity validation, HF client, 1-click runtime manager
+├── harness-extensions/  # Supervised MCP & sidecar lifecycle, stderr ring buffer, deferred tool discovery & idle RAM reaper
+├── harness-audio/       # CoreAudio cpal capture, VAD silence trim + soft peak norm, multi-engine STT, mlx-audio TTS & voice cloning
+├── harness-docs/        # Native macOS Apple Vision OCR (`dex-vision-ocr`), Tesseract fallback, Docling & pure-Rust PDF parser
+├── harness-media/       # Apple Silicon `mflux` CLI/HTTP image gen, ComfyUI workflows, pure-Rust image ops, FFmpeg declarative video
+├── harness-3d/          # Pure-Rust glTF 2.0 / OBJ geometry inspector, image-to-3D sidecars, headless Blender & Unity exporter
+├── harness-ui/          # Ratatui terminal dashboard (`dex tui`) & Axum WebSocket web monitor (`dex web`)
+├── harness-cli/         # Unified command-line interface (`dex`)
+└── harness-desktop/     # Native macOS Desktop Application (`Dex.app`) with automated E2E QA walkthrough (`DEX_QA_WALKTHROUGH=1`)
 ```
 
 ---
 
-## 🎙️ Audio, Voice & Deep Document OCR (`harness-audio`, `harness-docs`)
+## Key Capabilities & Phase 14 Highlights
 
-- **Native Microphone & Push-to-Talk:** Captures 16kHz mono PCM WAV directly in Rust (`cpal` + `hound`) with live RMS dB telemetry (`VoiceCaptureState`).
-- **Pluggable STT & TTS:** Auto-detects HTTP Whisper (`/v1/audio/transcriptions`), `mlx_whisper`, or `whisper-cli` for transcription, and synthesizes speech via sidecars or automatic native macOS (`say` + `afconvert`) fallback, plus music & SFX generation via `ExtensionSupervisor`.
-- **Apple Vision OCR & PDF Parser:** Compiles a native Swift Apple Vision helper on demand (`.dex/bin/dex-vision-ocr`, multilingual `es-ES`/`en-US`, Tesseract fallback) and extracts PDFs/DOCX/images into clean Markdown via Docling or pure-Rust `lopdf` fallback.
+### 1. Autonomous Local Inference & Model Integrity Protection (`harness-models`, `harness-llm`)
+- **Zero External App Dependency:** Spawns and supervises `mlx_lm.server` (`:8088`) or `llama-server -ngl 99` (`:8089`) directly from `~/.dex/runtimes/mlx-venv` or Homebrew without requiring LM Studio or Ollama to be open.
+- **Weight Shard & Header Integrity Scanner:** Validates `model.safetensors.index.json` shard maps, detects leftover `.part` / `downloading_*` artifacts, checks `.safetensors` JSON headers and `GGUF` magic bytes, badges broken folders as `Incomplete`, and blocks loading before a server can hang.
+- **Bounded Inference & Multimodal Vision Guard:** Enforces 60-second first-token and stream-idle timeouts, surfaces recent sidecar `stderr` logs on failure, and automatically detects when a local text server (`mlx_lm.server`) cannot accept raw `image_url` payloads—advising the user and steering the agent to Apple Vision `ocr_image`.
 
-```bash
-dex audio record --seconds 5
-dex audio transcribe .dex/media/audio/recordings/rec.wav --timestamps
-dex audio speak "Hola desde Dex-Harness" --voice Monica
-dex docs ocr ./screenshot.png
-dex docs parse ./report.pdf
-```
+### 2. Professional Voice Studio, Multilingual STT & Zero-Shot Voice Cloning (`harness-audio`)
+- **Pure-Rust Speech Pre-Processing:** Applies 20ms frame energy VAD silence trimming (with 180ms pre-roll and 220ms post-roll) and gentle soft-knee peak normalization (capped at +18 dB, never amplifying pure silence) prior to transcription.
+- **Explicit Language & Multi-Engine ASR:** Persisted language selector (`Auto`, `Español (es)`, `English (en)`) in both the Agent composer and Voice Studio, routing across `mlx-whisper` (`mlx-community/whisper-large-v3-turbo` with anti-hallucination flags), `parakeet-mlx` (`parakeet-tdt-0.6b-v3`), `faster-whisper`, HTTP Whisper, and native macOS `SFSpeechRecognizer`.
+- **Apple Silicon Neural TTS & Cloning (`mlx-audio`):** 1-click installer for `mlx-audio` supporting **Qwen3-TTS 0.6B Base/CustomVoice**, **Chatterbox TTS**, and **Kokoro 82M**, plus configurable sidecar presets for **Fish Audio S2-Pro**, **Step-Audio EditX**, and **OmniVoice (`k2-fsa`)**. Save reusable cloned voices (3–15s reference `.wav` + optional transcript) in `~/.dex/voices/`.
 
----
+### 3. Real `mflux` Apple Silicon Image Generation (`harness-media`)
+- Aligned with `mflux 0.23+` CLI subcommands (`mflux-generate`, `mflux-generate-z-image-turbo`, `mflux-generate-flux2`, `mflux-generate-qwen`), capturing full `stdout` + `stderr` streams and defaulting to ungated 4-bit community weights (`dhairyashil/FLUX.1-schnell-mflux-4bit --base-model schnell`) that work out-of-the-box without a Hugging Face token.
 
-## 🎨 Visual Studio: Image, Upscaling & Declarative Video Editing (`harness-media`)
-
-- **Multi-Backend Image & Video Generation:** Automatically routes to local Apple Silicon MLX (`mlx-gen` / `mflux-generate`), ComfyUI workflows (`.dex/workflows/*.json` with safe placeholder injection), or OpenAI-compatible HTTP endpoints while broadcasting live `MediaGenerationProgress` and `MediaGenerated` events.
-- **Pure-Rust Fast Image Ops & Lanczos3 Upscaling:** Non-blocking crop, resize, WebP/PNG/JPG conversion, and deterministic 2x–8x Lanczos3 upscaling fallback (`image` crate inside `spawn_blocking`).
-- **Safe Declarative FFmpeg Video Editing:** Typed JSON `TimelineSpec` (clip trims, concat, external audio overlay, SRT subtitles, scaling, FPS, container selection) compiled directly to typed `ffmpeg` CLI arguments with zero shell interpolation, plus `ffprobe` metadata inspection and keyframe extraction.
-- **Native Desktop Studio (`Dex.app`):** Dedicated **🎨 Media Studio** tab with generator form, ComfyUI workflow picker, live progress bar, reactive image/video gallery, 1-click **Upscale 2x**, **Enviar al Agente**, and **Finder** reveal (`open -R`).
-
-```bash
-dex media imagine "Isometric cyberpunk workshop in Tokyo, cinematic lighting" --width 1024 --height 1024 --steps 20 --backend auto
-dex media upscale ./artwork.png --scale 2 --backend auto
-dex media process ./artwork.png --resize 512x512 --format webp --out ./thumb.webp
-dex media inspect-video ./clip.mp4
-dex media extract-frames ./clip.mp4 --fps 1
-dex media render-timeline ./timeline.json --out ./final.mp4
-dex media list
-```
+### 4. Native File/Folder Pickers, Smart Drag & Drop & Actionable Recovery Toasts (`harness-desktop`)
+- Native macOS `Browse` buttons (`pick_file_dialog`, `pick_folder_dialog`) and visual drop zones across **Agent**, **Media Studio**, **Voice Studio & Docs**, **3D & Game Studio** (including instant `.glb` drop loading on the WebGL2 canvas), and **Models Hub**.
+- Global opaque Obsidian toast stack with 1-click in-context remediation buttons (`Install mflux (1-click)`, `Install Voice Engine`, `Load Recommended Local Model`, `Setup TRELLIS / Extension`, `Generate Procedural 3D with Blender`) and zero `window.alert()` calls.
 
 ---
 
-## 🧊 3D & Game Studio (`harness-3d`)
+## Quick Start & Build Instructions
 
-- **Pure-Rust glTF 2.0 / OBJ Geometry Inspector:** Analyzes `.glb`, `.gltf`, and `.obj` files natively inside `spawn_blocking` (vertices, triangles, materials, normals, UVs, animations, bounding box dimensions, and real-time *game-ready* diagnostics) plus built-in binary `.glb` sample cube synthesis (`dex 3d sample`).
-- **Image-to-3D Sidecar Orchestrator:** Lazily wakes `trellis-3d` via `ExtensionSupervisor` (or connects to Hunyuan3D / TripoSR / custom `DEX_3D_ENDPOINT`), saves `.glb` meshes into `.dex/media/3d/`, auto-inspects geometry, and streams `MediaGenerationProgress` & `MediaGenerated`.
-- **Headless Blender Bridge:** Autodetects Blender (`BLENDER_BIN`, `$PATH`, `/Applications/Blender.app`), converts between `.glb`/`.gltf`/`.fbx`/`.obj`/`.blend` with optional LOD polygon decimation (`0.05..=1.0`), and renders auto-framed 3-point studio PNG previews via injection-safe generated Python scripts.
-- **Direct Unity Project Tools:** Inspects Unity projects directly on disk (`ProjectVersion.txt`, `URP`/`HDRP`/`Built-in` pipeline detection, `.unity` scenes, C# script counts) and exports 3D assets + companion textures safely into `Assets/` with anti-path-traversal and overwrite guards.
-- **100% Offline WebGL2 `.glb` Viewer in `Dex.app`:** Zero-CDN pure-JavaScript WebGL2 viewer inside the **🧊 3D & Game Studio** tab with binary glTF 2.0 parsing, orbit/zoom controls, Solid/Wireframe mode, reference grid, live HUD metrics, and 1-click Blender/Unity actions.
+### Prerequisites (macOS Apple Silicon Recommended)
+- **Rust 1.85+** (`rustup`)
+- **Tauri CLI v2** (`cargo install tauri-cli@^2`)
+- Optional creative tools auto-detected in enriched `$PATH`: `uv` / `python3` (for 1-click `mlx-lm`, `mlx-whisper`, `mflux`, `mlx-audio`, `parakeet-mlx`), `ffmpeg`, and `Blender.app`.
+
+### 1. Verify, Test & Build Workspace
 
 ```bash
-dex 3d sample
-dex 3d inspect .dex/media/3d/sample_cube.glb
-dex 3d generate --image .dex/media/images/concept.png --backend auto
-dex 3d convert .dex/media/3d/sample_cube.glb --out ./hero_lod1.fbx --decimate 0.5
-dex 3d preview .dex/media/3d/sample_cube.glb
-dex 3d unity-inspect ~/UnityProjects/MyGame
-dex 3d unity-export .dex/media/3d/sample_cube.glb --project ~/UnityProjects/MyGame --subdir Assets/DexGenerated
-dex 3d list
+cargo check --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 ```
 
----
-
-## 🧩 Extensions Hub, Deferred Tools & Auto-Unload (`harness-extensions`)
-
-Connect dozens of creative and engineering engines (Blender, Unity, Soundbox, ComfyUI, Docling, MLX-Gen, TRELLIS 3D, or custom MCP servers) without saturating local LLM context windows or wasting RAM:
-
-- **Deferred Tool Discovery (`search_tools`):** External MCP tools register as `ToolVisibility::Deferred { category, tags }` and stay hidden until the LLM discovers and activates them on demand via `search_tools`.
-- **Oversized Output Guardrail (`ToolOutputCompactor`):** Automatically spills bulky tool responses (> 8,000 chars) to `.dex/tmp/tool_outputs/<id>.txt`, returning a clean head/tail summary with file path for targeted `read_file` inspection.
-- **Sidecar Supervisor with Idle Auto-Unload:** Lazily wakes extensions on demand, tracks `last_used_at`, and automatically puts idle processes to sleep after `idle_timeout_secs` (default 600s) to reclaim RAM for local LLMs.
+### 2. Build & Launch `Dex.app` (macOS Native Bundle)
 
 ```bash
-# Browse the built-in curated catalog (Audio, Image/Video, 3D, OCR/Docs, GameDev):
-dex ext catalog
-
-# Install a catalog recipe into ~/.dex/extensions/extensions.json:
-dex ext install blender-mcp
-
-# Register any custom MCP server (stdio or SSE):
-dex ext add-mcp --id my-fs --name "Filesystem MCP" --command npx --args "-y @modelcontextprotocol/server-filesystem /tmp"
-
-# Manage lifecycle & view live status:
-dex ext list
-dex ext enable blender-mcp
-dex ext start blender-mcp
-dex ext stop blender-mcp
+cd crates/harness-desktop
+cargo tauri build --bundles app --debug --no-sign
+open ../../target/debug/bundle/macos/Dex.app
 ```
 
----
-
-## 🧠 Local Model Hub (`harness-models`)
-
-Dex-Harness features a native, LM Studio / Ollama-grade **Model Hub** directly in Rust:
-
-- **Hugging Face Hub Search:** Search millions of open-source GGUF models (`https://huggingface.co/api/models`) with automatic extraction of available quantizations (`Q4_K_M`, `Q5_K_M`, `Q8_0`, `BF16`, etc.).
-- **Hardware RAM Compatibility Calculation:** Evaluates model footprint against detected host RAM and Apple Silicon unified memory, grading each quantization with `🟢 Fits`, `🟡 Tight`, or `🔴 Too Large`.
-- **Resumable Async Streaming Downloader:** Supports `HTTP Range` headers to resume interrupted downloads, writes to `.part` files, and renames atomically upon completion.
-- **Ollama Bridge & Local Importer:** Pull models from Ollama library with streaming progress, import arbitrary `.gguf` files into `~/.dex/models/`, and automatically register imported models into local Ollama via `FROM /path/to/model.gguf`.
+### 3. CLI Quick Reference (`dex`)
 
 ```bash
-# Search GGUF models on Hugging Face:
-dex models search "qwen2.5-coder"
+# Autonomous Agent Execution
+dex run "Inspect workspace and run tests" --mode autopilot
+dex tui                                  # Ratatui terminal dashboard
+dex web --port 3000                      # Embedded WebSocket web dashboard
+dex cookbook                             # Host hardware & Apple Silicon RAM profile
 
-# Pull a specific quantization from Hugging Face:
+# Local Models Hub & Integrity Check
+dex models list                          # Scans configured folders & verifies shard/GGUF integrity
+dex models search "qwen3"
 dex models pull Qwen/Qwen2.5-Coder-14B-Instruct-GGUF --quant Q4_K_M
 
-# Pull directly from Ollama library:
-dex models pull ollama:qwen2.5:7b
+# Voice Studio (STT + TTS + Cloning) & Deep Document OCR
+dex audio record --seconds 5
+dex audio speak "Hola mundo probando Dex en español" --language es
+dex audio transcribe ~/.dex/media/audio/recordings/rec.wav --language es --timestamps
+dex docs ocr ./screenshot.png
+dex docs parse ./report.pdf
 
-# Import any local .gguf file (and optionally register into Ollama):
-dex models import ./my-model.gguf --name "custom-qwen" --to-ollama
+# Visual Media Studio (MLX mflux / ComfyUI / Pure-Rust / FFmpeg)
+dex media imagine "Futuristic robotics lab, volumetric lighting" --width 1024 --height 1024 --steps 4 --backend auto
+dex media upscale ./image.png --scale 2
+dex media process ./image.png --resize 512x512 --format webp
 
-# List all local Dex + Ollama models:
-dex models list
+# 3D & Game Studio (glTF 2.0 / Blender / Unity)
+dex 3d sample
+dex 3d inspect ~/.dex/media/3d/sample_cube.glb
+dex 3d convert ~/.dex/media/3d/sample_cube.glb --out ./cube_lod.fbx --decimate 0.5
+dex 3d preview ~/.dex/media/3d/sample_cube.glb
+dex 3d unity-inspect ~/UnityProjects/MyGame
 
-# Remove a model from registry and disk:
-dex models rm local:custom-qwen
-```
-
----
-
-## 🍏 Native macOS Desktop App (`Dex.app`)
-
-**Dex-Harness** includes a first-class native macOS application built with **Tauri v2** and Apple WKWebView:
-
-- **Global Shortcut:** Press `Option + Space` (or `Cmd + Shift + D`) from anywhere to instantly toggle the Dex floating window over your active apps (Raycast / Claude Desktop style).
-- **System Tray (Menu Bar):** High-priority menu bar item with quick actions (*Open/Hide Dex*, *Autopilot Mode*, *Safe Mode*, *Plan Mode*, *Hardware Cookbook*, *Quit*).
-- **Interactive Approval Modal:** In `--mode safe`, when Dex attempts sensitive actions (`execute_shell`, `write_file`, `desktop_mouse`, `git_worktree`), an interactive modal appears allowing one-click authorization (`Allow` or `Deny`).
-- **Hardware Cookbook & Telemetry:** Native inspection of Apple Silicon Unified RAM, CPU cores, active subagents tree, and screenshot gallery.
-- **macOS Permissions:** Preconfigured `Info.plist` and `entitlements.plist` requesting *Screen Recording* (`xcap`) and *Accessibility / Automation* (`enigo`).
-
-### Building and Running `Dex.app`:
-
-```bash
-# Run in desktop development mode:
-cargo run -p harness-desktop
-
-# Or package the standalone macOS .app bundle:
-cargo tauri build --bundles app --debug --no-sign
-# Output: target/debug/bundle/macos/Dex.app
-```
-
----
-
-## 🛠️ Complete Native Tools Catalog
-
-| Tool | Crate | Category | Description |
-| :--- | :--- | :--- | :--- |
-| `read_file` | `harness-tools` | Filesystem | Reads text files with line range slicing and line numbers. |
-| `write_file` | `harness-tools` | Filesystem | Writes or overwrites files with automatic directory creation. |
-| `edit_file` | `harness-tools` | Filesystem | Surgically replaces a unique text block and generates unified diffs. |
-| `find_files` | `harness-tools` | Search | Rapidly discovers file paths respecting `.gitignore`. |
-| `grep_search` | `harness-tools` | Search | Regex search across workspace files respecting `.gitignore`. |
-| `execute_shell`| `harness-tools` | Terminal | Native asynchronous shell command execution with stdout/stderr pipes. |
-| `pty_shell` | `harness-tools` | Terminal | Pseudo-terminal execution (`portable-pty`) with virtual terminal sizing. |
-| `git_worktree` | `harness-tools` | Git | Manages isolated Git worktrees (`list`, `add`, `remove`) for parallel workflows. |
-| `manage_tasks` | `harness-core` | Tasks | Tracks tasks (`pending`, `in_progress`, `completed`, `blocked`) on `.dex/tasks.json`. |
-| `load_skill` | `harness-core` | Skills | Dynamically retrieves full instructions for skills in `.dex/skills/`. |
-| `spawn_subagent`| `harness-core` | Orchestration| Concurrently spawns specialized subagents (`Explorer`, `Coder`, `Reviewer`). |
-| `browser_navigate`| `harness-computer`| Browser | Navigates to a URL via Chrome DevTools Protocol (headless or visible). |
-| `browser_extract_dom`| `harness-computer`| Browser | Extracts clean text/DOM without scripts or styles for token efficiency. |
-| `browser_click`| `harness-computer`| Browser | Clicks web elements using CSS selectors. |
-| `browser_type`| `harness-computer`| Browser | Enters text into input fields using CSS selectors. |
-| `browser_screenshot`| `harness-computer`| Browser | Takes webpage screenshot and saves to `.dex/screenshots/`. |
-| `desktop_screenshot`| `harness-computer`| Desktop | Captures primary desktop monitor and saves to `.dex/screenshots/`. |
-| `desktop_mouse`| `harness-computer`| Desktop | Simulates mouse movement, clicks, and drags with coordinate boundary checks. |
-| `desktop_keyboard`| `harness-computer`| Desktop | Simulates keyboard typing and special keys (Return, Escape, Tab, etc.). |
-| `image_generate` | `harness-media` | ImageVideo (Deferred) | Generates images via MLX (`mlx-gen`/`mflux`), ComfyUI workflows, or HTTP endpoints. |
-| `image_upscale` | `harness-media` | ImageVideo (Deferred) | Upscales images 2x–8x via neural sidecars or deterministic pure-Rust Lanczos3 fallback. |
-| `image_process` | `harness-media` | ImageVideo (Deferred) | Fast native pure-Rust crop, resize, and PNG/JPG/WebP conversion. |
-| `video_generate` | `harness-media` | ImageVideo (Deferred) | Generates short text-to-video / image-to-video clips via MLX or ComfyUI. |
-| `video_inspect` | `harness-media` | ImageVideo (Deferred) | Inspects video duration, resolution, FPS, codecs, and bitrate via `ffprobe`. |
-| `video_extract_frames` | `harness-media` | ImageVideo (Deferred) | Extracts keyframes as PNGs into `.dex/media/frames/` for visual inspection or OCR. |
-| `video_edit` | `harness-media` | ImageVideo (Deferred) | Renders declarative JSON `TimelineSpec` edits safely via `ffmpeg`. |
-| `mesh_inspect` | `harness-3d` | ThreeD (Deferred) | Pure-Rust `.glb`/`.gltf`/`.obj` inspector with bounding box and *game-ready* warnings. |
-| `mesh_generate_3d` | `harness-3d` | ThreeD (Deferred) | Generates `.glb` meshes from images/prompts via TRELLIS 2 / Hunyuan3D / TripoSR / HTTP sidecars. |
-| `blender_convert_mesh` | `harness-3d` | ThreeD (Deferred) | Headless Blender format converter (`.glb`/`.fbx`/`.obj`/`.blend`) with LOD decimation. |
-| `blender_render_preview` | `harness-3d` | ThreeD (Deferred) | Renders an auto-framed studio preview PNG of a 3D mesh in headless Blender. |
-| `unity_inspect_project` | `harness-3d` | GameDev (Deferred) | Detects Unity version, render pipeline (URP/HDRP/Built-in), `.unity` scenes, and C# scripts. |
-| `unity_export_asset` | `harness-3d` | GameDev (Deferred) | Safely copies a 3D model and companion textures into a Unity project's `Assets/` folder. |
-
----
-
-## 💻 CLI Usage (`dex`)
-
-```bash
-# 1. Run an autonomous task in Autopilot mode
-dex run "Inspect crates/ and run tests"
-
-# 2. Run in Safe mode (requires human approval for file writes, shell, or desktop actions)
-dex run "Refactor codebase" --mode safe
-
-# 3. Run in Plan mode (strictly read-only)
-dex run "Design subagent architecture" --mode plan
-
-# 4. Launch interactive REPL mode
-dex repl
-
-# 5. Start as an MCP Server for Claude Desktop or Cursor
+# Supervised Extensions & MCP Server
+dex ext catalog
+dex ext list
 dex mcp-serve
-
-# 6. Launch the live Terminal UI (TUI) Dashboard
-dex tui
-
-# 7. Start the embedded Web Dashboard on http://localhost:3000
-dex web --port 3000
-
-# 8. Check hardware profiling and local model recommendations
-dex cookbook
-
-# 9. Manage scheduled tasks and run daemon
-dex schedule add --name "Lint Task" --goal "Run cargo clippy" --interval 3600
-dex schedule list
-dex daemon
 ```
 
 ---
 
-## 🛡️ Engineering Standards
+## Engineering & End-to-End QA Standards
 
-Dex-Harness strictly follows the invariants established in [AGENTS.md](file:///Users/robii/Documents/GitHub/Dex-Harness/AGENTS.md):
-- **Zero Panics:** No `.unwrap()` or `.expect()` in production crates.
-- **Type Safety:** All tools derive `schemars::JsonSchema`.
-- **Async Concurrency:** Non-blocking Tokio I/O with timeouts and structured task joins.
+All crates and UI components adhere strictly to [`AGENTS.md`](AGENTS.md) and [`.dex/skills/ux-qa-audit/SKILL.md`](.dex/skills/ux-qa-audit/SKILL.md):
+
+1. **Zero Panics in Production:** `0` `.unwrap()` or `.expect()` calls across `crates/harness-*` production code.
+2. **macOS `.app` Read-Only Root (`cwd = /`) Safety:** Centralized storage resolution (`harness_core::storage`) guarantees zero `os error 30` failures when launched from Finder/Dock.
+3. **AppKit Thread Safety:** Always uses `tauri::async_runtime::spawn` inside `harness-desktop` (`0` direct `tokio::spawn` calls).
+4. **Automated Visual E2E Walkthrough (`DEX_QA_WALKTHROUGH=1`):** Launches `Dex.app` with `cwd = /`, traverses all 7 views + drawers, verifies `0` uncaught JS errors (`window.__DEX_QA_ERRORS__`) and `0` horizontal overflows, captures live window screenshots, and writes a structured `qa_report.json`.
 
 ---
 
-## 📄 License
+## License
 
-Dual-licensed under either Apache License, Version 2.0 or MIT License at your option.
+Dual-licensed under either **Apache License, Version 2.0** or **MIT License** at your option.

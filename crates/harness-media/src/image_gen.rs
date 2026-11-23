@@ -307,6 +307,149 @@ pub async fn generate_image(
     Ok(result)
 }
 
+/// Resolved CLI binary and argument vector for an `mflux` generation pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MfluxInvocation {
+    pub binary: &'static str,
+    pub args: Vec<String>,
+    pub display_model: String,
+}
+
+/// Builds an `mflux` CLI invocation aligned with `mflux 0.23+` capabilities:
+/// - Defaults to `dhairyashil/FLUX.1-schnell-mflux-4bit` (`--base-model schnell`, open ungated 4-bit, zero HF token required).
+/// - Never forwards `--negative-prompt` to FLUX / Z-Image Turbo models where `mflux` ignores it.
+/// - Passes `--negative-prompt` only for models whose CLI honors it (e.g. `qwen-image`).
+pub fn resolve_mflux_invocation(
+    req: &ImageGenRequest,
+    prompt: &str,
+    seed: u64,
+    dest: &Path,
+) -> MfluxInvocation {
+    let raw_model = req
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("flux-schnell-4bit");
+    let lower = raw_model.to_lowercase();
+
+    let (binary, model_arg, base_model, quantize, supports_negative, display_model) =
+        match lower.as_str() {
+            "schnell"
+            | "flux-schnell-4bit"
+            | "flux.1-schnell"
+            | "flux1-schnell"
+            | "dhairyashil/flux.1-schnell-mflux-4bit" => (
+                "mflux-generate",
+                "dhairyashil/FLUX.1-schnell-mflux-4bit".to_string(),
+                Some("schnell"),
+                None,
+                false,
+                "FLUX.1-schnell (4-bit)".to_string(),
+            ),
+            "z-image-turbo"
+            | "z-image"
+            | "zimage-turbo"
+            | "filipstrand/z-image-turbo-mflux-4bit" => (
+                "mflux-generate-z-image-turbo",
+                "filipstrand/Z-Image-Turbo-mflux-4bit".to_string(),
+                Some("z-image-turbo"),
+                None,
+                false,
+                "Z-Image Turbo (4-bit)".to_string(),
+            ),
+            "flux2-klein-4b" | "klein-4b" | "flux2" => (
+                "mflux-generate-flux2",
+                "flux2-klein-4b".to_string(),
+                None,
+                Some("4"),
+                false,
+                "FLUX.2 Klein 4B (4-bit)".to_string(),
+            ),
+            "qwen-image" | "qwen" | "qwen-image-4bit" => (
+                "mflux-generate-qwen",
+                "qwen-image".to_string(),
+                None,
+                Some("4"),
+                true,
+                "Qwen-Image (4-bit)".to_string(),
+            ),
+            "dev" | "flux-dev-4bit" | "flux.1-dev" | "flux1-dev" => (
+                "mflux-generate",
+                "dev".to_string(),
+                None,
+                Some("4"),
+                false,
+                "FLUX.1-dev (4-bit)".to_string(),
+            ),
+            _ => {
+                let already_quantized = lower.contains("4bit")
+                    || lower.contains("8bit")
+                    || lower.contains("6bit")
+                    || lower.contains("-q4")
+                    || lower.contains("-q8")
+                    || lower.contains("fp8")
+                    || lower.contains("mflux");
+                let is_qwen = lower.contains("qwen");
+                let is_z_turbo = lower.contains("z-image-turbo");
+                let bin = if is_z_turbo {
+                    "mflux-generate-z-image-turbo"
+                } else if is_qwen {
+                    "mflux-generate-qwen"
+                } else {
+                    "mflux-generate"
+                };
+                (
+                    bin,
+                    raw_model.to_string(),
+                    None,
+                    if already_quantized { None } else { Some("4") },
+                    is_qwen,
+                    raw_model.to_string(),
+                )
+            }
+        };
+
+    let mut args = vec!["--model".to_string(), model_arg];
+    if let Some(bm) = base_model {
+        args.push("--base-model".to_string());
+        args.push(bm.to_string());
+    }
+    if let Some(q) = quantize {
+        args.push("--quantize".to_string());
+        args.push(q.to_string());
+    }
+    args.push("--prompt".to_string());
+    args.push(prompt.to_string());
+    if supports_negative {
+        if let Some(neg) = req
+            .negative_prompt
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            args.push("--negative-prompt".to_string());
+            args.push(neg.to_string());
+        }
+    }
+    args.push("--width".to_string());
+    args.push(req.width.to_string());
+    args.push("--height".to_string());
+    args.push(req.height.to_string());
+    args.push("--steps".to_string());
+    args.push(req.steps.max(1).to_string());
+    args.push("--seed".to_string());
+    args.push(seed.to_string());
+    args.push("--output".to_string());
+    args.push(dest.to_string_lossy().to_string());
+
+    MfluxInvocation {
+        binary,
+        args,
+        display_model,
+    }
+}
+
 async fn generate_via_mlx(
     req: &ImageGenRequest,
     prompt: &str,
@@ -335,84 +478,168 @@ async fn generate_via_mlx(
         .await;
     }
 
-    // Fallback to `mflux-generate` CLI with live progress parsing from stdout/stderr
-    let Some(mflux_bin) = harness_core::find_executable_in_enriched_path("mflux-generate") else {
+    let ts = current_epoch_millis();
+    let dest = out_dir.join(format!("mlx_{ts}.png"));
+    let spec = resolve_mflux_invocation(req, prompt, seed, &dest);
+
+    let Some(mflux_bin) = harness_core::find_executable_in_enriched_path(spec.binary)
+        .or_else(|| harness_core::find_executable_in_enriched_path("mflux-generate"))
+    else {
         return Err(MediaError::BackendNotInstalled {
             kind: "image".to_string(),
             backend: "mflux".to_string(),
             install_hint: format!(
-                "MLX sidecar not reachable at '{base}' and `mflux-generate` CLI is not installed. Install `mflux` with 1 click in Models Hub -> Runtimes."
+                "MLX sidecar not reachable at '{base}' and `mflux-generate` CLI is not installed. Install `mflux` with 1 click right here or in Models Hub -> Runtimes."
             ),
         });
     };
 
-    let ts = current_epoch_millis();
-    let dest = out_dir.join(format!("mlx_{ts}.png"));
-    let model = req
-        .model
-        .as_deref()
-        .unwrap_or("schnell");
-
     let mut cmd = Command::new(&mflux_bin);
     harness_core::apply_enriched_path(&mut cmd);
-    cmd.args([
-        "--model",
-        model,
-        "--prompt",
-        prompt,
-        "--width",
-        &req.width.to_string(),
-        "--height",
-        &req.height.to_string(),
-        "--steps",
-        &req.steps.to_string(),
-        "--seed",
-        &seed.to_string(),
-        "--output",
-    ])
-    .arg(&dest)
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped());
+    cmd.args(&spec.args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
 
-    info!(dest = ?dest, model = %model, "Invoking mflux-generate CLI");
+    info!(
+        bin = ?mflux_bin,
+        dest = ?dest,
+        model = %spec.display_model,
+        "Invoking mflux CLI"
+    );
     let mut child = cmd.spawn().map_err(|e| MediaError::Subprocess {
-        command: "mflux-generate".to_string(),
+        command: spec.binary.to_string(),
         message: e.to_string(),
     })?;
 
-    if let Some(stderr) = child.stderr.take() {
-        let mut reader = BufReader::new(stderr).lines();
-        let total = req.steps.max(1);
-        while let Ok(Some(line)) = reader.next_line().await {
-            if let Some(current_step) = parse_step_progress(&line, total) {
-                if let Some(bus) = event_bus {
-                    bus.publish(DexEvent::MediaGenerationProgress {
-                        task_id: task_id.to_string(),
-                        kind: "image".to_string(),
-                        step: current_step,
-                        total_steps: total,
-                        message: format!("mflux step {current_step}/{total}"),
-                    });
+    let total_steps = req.steps.max(1);
+    let bus_out = event_bus.cloned();
+    let bus_err = event_bus.cloned();
+    let tid_out = task_id.to_string();
+    let tid_err = task_id.to_string();
+
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+
+    let stdout_task = tokio::spawn(async move {
+        let mut lines_buf = Vec::new();
+        if let Some(pipe) = stdout_pipe {
+            let mut reader = BufReader::new(pipe).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                let clean = line.trim().to_string();
+                if clean.is_empty() {
+                    continue;
                 }
+                if let Some(step) = parse_step_progress(&clean, total_steps) {
+                    if let Some(ref bus) = bus_out {
+                        bus.publish(DexEvent::MediaGenerationProgress {
+                            task_id: tid_out.clone(),
+                            kind: "image".to_string(),
+                            step,
+                            total_steps,
+                            message: format!("mflux step {step}/{total_steps}"),
+                        });
+                    }
+                } else if clean.to_lowercase().contains("downloading") {
+                    if let Some(ref bus) = bus_out {
+                        bus.publish(DexEvent::MediaGenerationProgress {
+                            task_id: tid_out.clone(),
+                            kind: "image".to_string(),
+                            step: 0,
+                            total_steps,
+                            message: clean.clone(),
+                        });
+                    }
+                }
+                if lines_buf.len() >= 60 {
+                    lines_buf.remove(0);
+                }
+                lines_buf.push(clean);
             }
         }
-    }
+        lines_buf
+    });
 
-    let status = tokio::time::timeout(Duration::from_secs(GEN_TIMEOUT_SECS), child.wait())
-        .await
-        .map_err(|_| MediaError::Timeout {
-            operation: "mflux-generate".to_string(),
-            timeout_secs: GEN_TIMEOUT_SECS,
-        })?
-        .map_err(|e| MediaError::Subprocess {
-            command: "mflux-generate".to_string(),
-            message: e.to_string(),
-        })?;
+    let stderr_task = tokio::spawn(async move {
+        let mut lines_buf = Vec::new();
+        if let Some(pipe) = stderr_pipe {
+            let mut reader = BufReader::new(pipe).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                let clean = line.trim().to_string();
+                if clean.is_empty() {
+                    continue;
+                }
+                if let Some(step) = parse_step_progress(&clean, total_steps) {
+                    if let Some(ref bus) = bus_err {
+                        bus.publish(DexEvent::MediaGenerationProgress {
+                            task_id: tid_err.clone(),
+                            kind: "image".to_string(),
+                            step,
+                            total_steps,
+                            message: format!("mflux step {step}/{total_steps}"),
+                        });
+                    }
+                }
+                if lines_buf.len() >= 60 {
+                    lines_buf.remove(0);
+                }
+                lines_buf.push(clean);
+            }
+        }
+        lines_buf
+    });
+
+    let wait_res =
+        tokio::time::timeout(Duration::from_secs(GEN_TIMEOUT_SECS), child.wait()).await;
+    let status = match wait_res {
+        Ok(Ok(st)) => st,
+        Ok(Err(e)) => {
+            return Err(MediaError::Subprocess {
+                command: spec.binary.to_string(),
+                message: e.to_string(),
+            });
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(MediaError::Timeout {
+                operation: spec.binary.to_string(),
+                timeout_secs: GEN_TIMEOUT_SECS,
+            });
+        }
+    };
+
+    let stdout_lines = stdout_task.await.unwrap_or_default();
+    let stderr_lines = stderr_task.await.unwrap_or_default();
 
     if !status.success() {
+        let mut combined = String::new();
+        if !stderr_lines.is_empty() {
+            combined.push_str("stderr:\n");
+            combined.push_str(&stderr_lines.join("\n"));
+        }
+        if !stdout_lines.is_empty() {
+            if !combined.is_empty() {
+                combined.push('\n');
+            }
+            combined.push_str("stdout:\n");
+            combined.push_str(&stdout_lines.join("\n"));
+        }
+        let lower_err = combined.to_lowercase();
+        let auth_note = if lower_err.contains("401 unauthorized") || lower_err.contains("gated") {
+            "Hugging Face 401 Unauthorized (gated repo). Use an open 4-bit model like 'FLUX.1-schnell (4-bit · No Token)' or 'Z-Image Turbo (4-bit)', or run `hf auth login`.\n"
+        } else {
+            ""
+        };
+        let detail = if combined.is_empty() {
+            format!("Exited with status {status}")
+        } else {
+            format!("{auth_note}Exited with status {status}:\n{combined}")
+        };
         return Err(MediaError::Subprocess {
-            command: "mflux-generate".to_string(),
-            message: format!("Exited with status {status}"),
+            command: spec.binary.to_string(),
+            message: detail,
         });
     }
 
@@ -421,7 +648,7 @@ async fn generate_via_mlx(
         path: dest,
         width: info.as_ref().map(|i| i.width).unwrap_or(req.width),
         height: info.as_ref().map(|i| i.height).unwrap_or(req.height),
-        backend: "mlx-mflux".to_string(),
+        backend: format!("mlx-mflux ({})", spec.display_model),
         prompt: prompt.to_string(),
         seed,
     })
@@ -853,5 +1080,56 @@ mod tests {
             decode_base64("RGV4IE1lZGlh").expect("valid base64"),
             b"Dex Media"
         );
+    }
+
+    #[test]
+    fn test_resolve_mflux_invocation_presets_and_negative_prompt_gating() {
+        let dest = Path::new("/tmp/out.png");
+
+        // 1. Default FLUX.1-schnell (4-bit, open ungated, MUST NOT pass --negative-prompt)
+        let req_schnell = ImageGenRequest {
+            prompt: "a futuristic studio".to_string(),
+            negative_prompt: Some("blurry".to_string()),
+            width: 512,
+            height: 512,
+            steps: 4,
+            model: Some("flux-schnell-4bit".to_string()),
+            ..ImageGenRequest::default()
+        };
+        let inv = resolve_mflux_invocation(&req_schnell, &req_schnell.prompt, 42, dest);
+        assert_eq!(inv.binary, "mflux-generate");
+        assert!(inv.args.contains(&"dhairyashil/FLUX.1-schnell-mflux-4bit".to_string()));
+        assert!(inv.args.contains(&"--base-model".to_string()));
+        assert!(inv.args.contains(&"schnell".to_string()));
+        assert!(!inv.args.contains(&"--negative-prompt".to_string()));
+        assert!(!inv.args.contains(&"--quantize".to_string()));
+
+        // 2. Qwen-Image (4-bit quantized, DOES pass --negative-prompt)
+        let req_qwen = ImageGenRequest {
+            prompt: "cyberpunk street".to_string(),
+            negative_prompt: Some("watermark".to_string()),
+            steps: 20,
+            model: Some("qwen-image".to_string()),
+            ..ImageGenRequest::default()
+        };
+        let inv_q = resolve_mflux_invocation(&req_qwen, &req_qwen.prompt, 7, dest);
+        assert_eq!(inv_q.binary, "mflux-generate-qwen");
+        assert!(inv_q.args.contains(&"--quantize".to_string()));
+        assert!(inv_q.args.contains(&"4".to_string()));
+        assert!(inv_q.args.contains(&"--negative-prompt".to_string()));
+        assert!(inv_q.args.contains(&"watermark".to_string()));
+
+        // 3. Z-Image Turbo (open 4-bit, dedicated binary, no --negative-prompt)
+        let req_z = ImageGenRequest {
+            prompt: "neon owl".to_string(),
+            negative_prompt: Some("blurry".to_string()),
+            steps: 9,
+            model: Some("z-image-turbo".to_string()),
+            ..ImageGenRequest::default()
+        };
+        let inv_z = resolve_mflux_invocation(&req_z, &req_z.prompt, 11, dest);
+        assert_eq!(inv_z.binary, "mflux-generate-z-image-turbo");
+        assert!(inv_z.args.contains(&"filipstrand/Z-Image-Turbo-mflux-4bit".to_string()));
+        assert!(!inv_z.args.contains(&"--negative-prompt".to_string()));
     }
 }

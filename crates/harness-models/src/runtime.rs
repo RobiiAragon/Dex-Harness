@@ -23,6 +23,9 @@ pub enum RuntimeKind {
     LlamaCpp,
     MlxWhisper,
     Mflux,
+    MlxAudio,
+    ParakeetMlx,
+    FasterWhisper,
 }
 
 impl RuntimeKind {
@@ -32,6 +35,9 @@ impl RuntimeKind {
             Self::LlamaCpp => "llamacpp",
             Self::MlxWhisper => "mlx-whisper",
             Self::Mflux => "mflux",
+            Self::MlxAudio => "mlx-audio",
+            Self::ParakeetMlx => "parakeet-mlx",
+            Self::FasterWhisper => "faster-whisper",
         }
     }
 
@@ -41,6 +47,9 @@ impl RuntimeKind {
             Self::LlamaCpp => "llama.cpp Server (Metal GGUF)",
             Self::MlxWhisper => "Voice STT (mlx-whisper)",
             Self::Mflux => "Image Gen (mflux / FLUX MLX)",
+            Self::MlxAudio => "Voice Studio Engine (mlx-audio)",
+            Self::ParakeetMlx => "Parakeet TDT v3 ASR (MLX)",
+            Self::FasterWhisper => "Faster-Whisper (CPU Fallback)",
         }
     }
 
@@ -50,6 +59,9 @@ impl RuntimeKind {
             "llamacpp" | "llama.cpp" | "llama-cpp" | "llama" | "gguf" => Some(Self::LlamaCpp),
             "mlx-whisper" | "mlx_whisper" | "whisper" | "stt" => Some(Self::MlxWhisper),
             "mflux" | "mflux-generate" | "flux" | "image" => Some(Self::Mflux),
+            "mlx-audio" | "mlx_audio" | "audio" | "tts" | "voice-engine" => Some(Self::MlxAudio),
+            "parakeet-mlx" | "parakeet_mlx" | "parakeet" => Some(Self::ParakeetMlx),
+            "faster-whisper" | "faster_whisper" => Some(Self::FasterWhisper),
             _ => None,
         }
     }
@@ -67,6 +79,15 @@ impl RuntimeKind {
             }
             Self::Mflux => {
                 "Click 'Install Image Gen (1-click)' to install `mflux` into ~/.dex/runtimes/mlx-venv."
+            }
+            Self::MlxAudio => {
+                "Click 'Install Voice Studio Engine (1-click)' to install `mlx-audio` (Qwen3-TTS, Chatterbox, Kokoro, Parakeet) into ~/.dex/runtimes/mlx-venv."
+            }
+            Self::ParakeetMlx => {
+                "Click 'Install Parakeet MLX (1-click)' to install `parakeet-mlx` (ultra-fast 25-language Apple Silicon ASR)."
+            }
+            Self::FasterWhisper => {
+                "Click 'Install Faster-Whisper (1-click)' for cross-platform CPU/CTranslate2 Whisper transcription."
             }
         }
     }
@@ -216,7 +237,26 @@ fn find_binary_in_candidates(name: &str, extra: &[PathBuf]) -> Option<PathBuf> {
     find_first_existing(&dedup_paths(list))
 }
 
-/// Detects available local inference and multimodal runtimes (`mlx_lm.server`, `llama-server`, `mlx_whisper`, `mflux-generate`).
+fn check_mlx_venv_python_module(module_dir: &str) -> Option<PathBuf> {
+    let venv_dir = mlx_venv_dir();
+    let py = venv_dir.join("bin").join("python");
+    if !py.is_file() {
+        return None;
+    }
+    let lib_dir = venv_dir.join("lib");
+    let Ok(rd) = std::fs::read_dir(&lib_dir) else {
+        return None;
+    };
+    for entry in rd.flatten() {
+        let p = entry.path().join("site-packages").join(module_dir);
+        if p.exists() {
+            return Some(py);
+        }
+    }
+    None
+}
+
+/// Detects available local inference and multimodal runtimes.
 pub fn detect_runtimes() -> Vec<RuntimeStatus> {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let path_env = std::env::var("PATH").unwrap_or_default();
@@ -225,6 +265,11 @@ pub fn detect_runtimes() -> Vec<RuntimeStatus> {
     let llama_bin = find_first_existing(&llama_candidate_paths(&home, &path_env));
     let whisper_bin = harness_core::find_executable_in_enriched_path("mlx_whisper");
     let mflux_bin = harness_core::find_executable_in_enriched_path("mflux-generate");
+    let mlx_audio_bin = harness_core::find_executable_in_enriched_path("mlx_audio.tts.generate")
+        .or_else(|| check_mlx_venv_python_module("mlx_audio"));
+    let parakeet_bin = harness_core::find_executable_in_enriched_path("parakeet-mlx")
+        .or_else(|| check_mlx_venv_python_module("parakeet_mlx"));
+    let faster_whisper_bin = check_mlx_venv_python_module("faster_whisper");
 
     vec![
         RuntimeStatus {
@@ -263,6 +308,33 @@ pub fn detect_runtimes() -> Vec<RuntimeStatus> {
             install_hint: RuntimeKind::Mflux.install_hint().to_string(),
             managed_dir: mlx_venv_dir().to_string_lossy().to_string(),
         },
+        RuntimeStatus {
+            id: RuntimeKind::MlxAudio.as_id().to_string(),
+            name: RuntimeKind::MlxAudio.display_name().to_string(),
+            kind: RuntimeKind::MlxAudio,
+            available: mlx_audio_bin.is_some(),
+            binary_path: mlx_audio_bin.map(|p| p.to_string_lossy().to_string()),
+            install_hint: RuntimeKind::MlxAudio.install_hint().to_string(),
+            managed_dir: mlx_venv_dir().to_string_lossy().to_string(),
+        },
+        RuntimeStatus {
+            id: RuntimeKind::ParakeetMlx.as_id().to_string(),
+            name: RuntimeKind::ParakeetMlx.display_name().to_string(),
+            kind: RuntimeKind::ParakeetMlx,
+            available: parakeet_bin.is_some(),
+            binary_path: parakeet_bin.map(|p| p.to_string_lossy().to_string()),
+            install_hint: RuntimeKind::ParakeetMlx.install_hint().to_string(),
+            managed_dir: mlx_venv_dir().to_string_lossy().to_string(),
+        },
+        RuntimeStatus {
+            id: RuntimeKind::FasterWhisper.as_id().to_string(),
+            name: RuntimeKind::FasterWhisper.display_name().to_string(),
+            kind: RuntimeKind::FasterWhisper,
+            available: faster_whisper_bin.is_some(),
+            binary_path: faster_whisper_bin.map(|p| p.to_string_lossy().to_string()),
+            install_hint: RuntimeKind::FasterWhisper.install_hint().to_string(),
+            managed_dir: mlx_venv_dir().to_string_lossy().to_string(),
+        },
     ]
 }
 
@@ -275,6 +347,11 @@ pub fn detect_runtime_binary(kind: RuntimeKind) -> Option<PathBuf> {
         RuntimeKind::LlamaCpp => find_first_existing(&llama_candidate_paths(&home, &path_env)),
         RuntimeKind::MlxWhisper => harness_core::find_executable_in_enriched_path("mlx_whisper"),
         RuntimeKind::Mflux => harness_core::find_executable_in_enriched_path("mflux-generate"),
+        RuntimeKind::MlxAudio => harness_core::find_executable_in_enriched_path("mlx_audio.tts.generate")
+            .or_else(|| check_mlx_venv_python_module("mlx_audio")),
+        RuntimeKind::ParakeetMlx => harness_core::find_executable_in_enriched_path("parakeet-mlx")
+            .or_else(|| check_mlx_venv_python_module("parakeet_mlx")),
+        RuntimeKind::FasterWhisper => check_mlx_venv_python_module("faster_whisper"),
     }
 }
 
@@ -509,11 +586,19 @@ pub async fn install_runtime(
         })?;
 
     match kind {
-        RuntimeKind::Mlx | RuntimeKind::MlxWhisper | RuntimeKind::Mflux => {
+        RuntimeKind::Mlx
+        | RuntimeKind::MlxWhisper
+        | RuntimeKind::Mflux
+        | RuntimeKind::MlxAudio
+        | RuntimeKind::ParakeetMlx
+        | RuntimeKind::FasterWhisper => {
             let (pkg_name, expected_bin) = match kind {
                 RuntimeKind::Mlx => ("mlx-lm", "mlx_lm.server"),
                 RuntimeKind::MlxWhisper => ("mlx-whisper", "mlx_whisper"),
                 RuntimeKind::Mflux => ("mflux", "mflux-generate"),
+                RuntimeKind::MlxAudio => ("mlx-audio", "mlx_audio"),
+                RuntimeKind::ParakeetMlx => ("parakeet-mlx", "parakeet-mlx"),
+                RuntimeKind::FasterWhisper => ("faster-whisper", "faster_whisper"),
                 RuntimeKind::LlamaCpp => unreachable!(),
             };
             let venv_dir = mlx_venv_dir();
