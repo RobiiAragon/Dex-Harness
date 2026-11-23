@@ -24,3 +24,11 @@ Cargo.lock
 # Logs
 logs/
 *.log
+
+# Local Dex workspace runtime outputs (keep .dex/skills/ tracked)
+.dex/media/
+.dex/sessions/
+.dex/workflows/
+.dex/tasks.json
+.dex/docs/
+.dex/screenshots/
