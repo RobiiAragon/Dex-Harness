@@ -38,9 +38,55 @@ crates/
 ├── harness-computer/    # Browser automation (CDP) and desktop perception/mouse/keyboard control
 ├── harness-mcp/         # Bidirectional Model Context Protocol client & stdio server
 ├── harness-models/      # Local Model Hub: Hugging Face GGUF client, resumable downloader, Ollama bridge, local importer
+├── harness-extensions/  # Extensions Hub: MCP + Sidecar supervisor with idle RAM auto-unload & deferred tool bridge
+├── harness-audio/       # Native microphone capture (cpal/hound), Whisper STT, TTS (sidecar + macOS say), Music & SFX
+├── harness-docs/        # Native Apple Vision OCR (macOS) / Tesseract fallback & Docling / pure-Rust PDF parser
 ├── harness-ui/          # Ratatui TUI dashboard & Axum WebSocket web monitor
 ├── harness-cli/         # Unified executable (binary name: `dex`)
 └── harness-desktop/     # Native macOS Desktop Application (`Dex.app`) via Tauri v2
+```
+
+---
+
+## 🎙️ Audio, Voice & Deep Document OCR (`harness-audio`, `harness-docs`)
+
+- **Native Microphone & Push-to-Talk:** Captures 16kHz mono PCM WAV directly in Rust (`cpal` + `hound`) with live RMS dB telemetry (`VoiceCaptureState`).
+- **Pluggable STT & TTS:** Auto-detects HTTP Whisper (`/v1/audio/transcriptions`), `mlx_whisper`, or `whisper-cli` for transcription, and synthesizes speech via sidecars or automatic native macOS (`say` + `afconvert`) fallback, plus music & SFX generation via `ExtensionSupervisor`.
+- **Apple Vision OCR & PDF Parser:** Compiles a native Swift Apple Vision helper on demand (`.dex/bin/dex-vision-ocr`, multilingual `es-ES`/`en-US`, Tesseract fallback) and extracts PDFs/DOCX/images into clean Markdown via Docling or pure-Rust `lopdf` fallback.
+
+```bash
+dex audio record --seconds 5
+dex audio transcribe .dex/media/audio/recordings/rec.wav --timestamps
+dex audio speak "Hola desde Dex-Harness" --voice Monica
+dex docs ocr ./screenshot.png
+dex docs parse ./report.pdf
+```
+
+---
+
+## 🧩 Extensions Hub, Deferred Tools & Auto-Unload (`harness-extensions`)
+
+Connect dozens of creative and engineering engines (Blender, Unity, Soundbox, ComfyUI, Docling, MLX-Gen, TRELLIS 3D, or custom MCP servers) without saturating local LLM context windows or wasting RAM:
+
+- **Deferred Tool Discovery (`search_tools`):** External MCP tools register as `ToolVisibility::Deferred { category, tags }` and stay hidden until the LLM discovers and activates them on demand via `search_tools`.
+- **Oversized Output Guardrail (`ToolOutputCompactor`):** Automatically spills bulky tool responses (> 8,000 chars) to `.dex/tmp/tool_outputs/<id>.txt`, returning a clean head/tail summary with file path for targeted `read_file` inspection.
+- **Sidecar Supervisor with Idle Auto-Unload:** Lazily wakes extensions on demand, tracks `last_used_at`, and automatically puts idle processes to sleep after `idle_timeout_secs` (default 600s) to reclaim RAM for local LLMs.
+
+```bash
+# Browse the built-in curated catalog (Audio, Image/Video, 3D, OCR/Docs, GameDev):
+dex ext catalog
+
+# Install a catalog recipe into ~/.dex/extensions/extensions.json:
+dex ext install blender-mcp
+
+# Register any custom MCP server (stdio or SSE):
+dex ext add-mcp --id my-fs --name "Filesystem MCP" --command npx --args "-y @modelcontextprotocol/server-filesystem /tmp"
+
+# Manage lifecycle & view live status:
+dex ext list
+dex ext enable blender-mcp
+dex ext start blender-mcp
+dex ext stop blender-mcp
 ```
 
 ---

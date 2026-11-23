@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use async_trait::async_trait;
+use harness_audio::VoiceRecorderHandle;
 use harness_core::{AgentEvent, CoreError, EventBus, ExecutionMode, Hook, HookAction};
+use harness_extensions::ExtensionSupervisor;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{oneshot, Mutex, RwLock};
@@ -19,10 +21,14 @@ pub struct DesktopState {
     pub approval_sender: Arc<Mutex<Option<oneshot::Sender<bool>>>>,
     pub active_goal: Arc<RwLock<Option<String>>>,
     pub download_cancel: Arc<Mutex<Option<CancellationToken>>>,
+    pub extension_supervisor: Arc<ExtensionSupervisor>,
+    pub reaper_cancel: CancellationToken,
+    pub active_recorder: Arc<Mutex<Option<VoiceRecorderHandle>>>,
 }
 
 impl DesktopState {
     pub fn new(event_bus: EventBus) -> Self {
+        let extension_supervisor = Arc::new(ExtensionSupervisor::new(event_bus.clone()));
         Self {
             event_bus,
             mode: Arc::new(RwLock::new(ExecutionMode::Autopilot)),
@@ -30,6 +36,9 @@ impl DesktopState {
             approval_sender: Arc::new(Mutex::new(None)),
             active_goal: Arc::new(RwLock::new(None)),
             download_cancel: Arc::new(Mutex::new(None)),
+            extension_supervisor,
+            reaper_cancel: CancellationToken::new(),
+            active_recorder: Arc::new(Mutex::new(None)),
         }
     }
 }

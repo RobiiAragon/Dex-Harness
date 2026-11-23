@@ -17,6 +17,9 @@ harness-llm = { workspace = true }
 harness-tools = { workspace = true }
 harness-computer = { workspace = true }
 harness-models = { workspace = true }
+harness-extensions = { workspace = true }
+harness-audio = { workspace = true }
+harness-docs = { workspace = true }
 
 image = { workspace = true }
 tauri = { workspace = true }

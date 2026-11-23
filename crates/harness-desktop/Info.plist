@@ -7,7 +7,7 @@
     <key>NSAppleEventsUsageDescription</key>
     <string>Dex requires automation permissions to control mouse and keyboard actions autonomously when requested.</string>
     <key>NSMicrophoneUsageDescription</key>
-    <string>Dex may use microphone access for voice-guided autonomous tasks.</string>
+    <string>Dex requires microphone access for Push-to-Talk voice dictation and local speech transcription.</string>
     <key>LSUIElement</key>
     <false/>
 </dict>

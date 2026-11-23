@@ -1,6 +1,19 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use harness_audio::{
+    register_audio_tools, synthesize_speech, AutoSttEngine, TtsResult, VoiceRecorderHandle,
+    DEFAULT_MUSIC_DIR, DEFAULT_RECORDINGS_DIR, DEFAULT_SFX_DIR, DEFAULT_TTS_DIR,
+};
+use harness_docs::{
+    parse_document as parse_doc_impl, register_docs_tools, run_ocr_on_image, DocumentParseResult,
+    OcrResult, DEFAULT_MAX_INLINE_CHARS,
+};
+use harness_extensions::{
+    builtin_catalog, register_enabled_mcp_extensions, ExtensionCategory, ExtensionKind,
+    ExtensionManifest, ExtensionRuntimeInfo, ExtensionSupervisor, DEFAULT_IDLE_TIMEOUT_SECS,
+};
 use harness_models::{
     import_local_gguf as import_gguf_impl, parse_quantization, HfClient, HfGgufFile,
     HfModelSummary, ModelDownloader, ModelMetadata, ModelRegistry, ModelSource, OllamaBridge,
@@ -96,6 +109,7 @@ fn build_provider(
 fn build_tools(
     provider: Arc<dyn LlmProvider>,
     skill_loader: ProgressiveSkillLoader,
+    ext_supervisor: Arc<ExtensionSupervisor>,
     event_bus: EventBus,
 ) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
@@ -137,11 +151,22 @@ fn build_tools(
     registry.register(Arc::new(DesktopMouseTool::new()));
     registry.register(Arc::new(DesktopKeyboardTool::new()));
 
-    // Subagents Orchestrator
-    let master_copy = registry.clone();
+    // Subagents Orchestrator (using isolated snapshot to prevent Arc cycles)
+    let master_copy = registry.snapshot();
     registry.register(Arc::new(
-        SpawnSubagentTool::new(provider, master_copy).with_event_bus(event_bus),
+        SpawnSubagentTool::new(provider, master_copy).with_event_bus(event_bus.clone()),
     ));
+
+    // Deferred Audio (STT, TTS, Music, SFX) and Docs/OCR tools
+    register_audio_tools(
+        &mut registry,
+        Some(ext_supervisor.clone()),
+        Some(event_bus.clone()),
+    );
+    register_docs_tools(&mut registry, Some(ext_supervisor), Some(event_bus.clone()));
+
+    // Dynamic deferred tool discovery (`search_tools`)
+    registry.register_search_tools(Some(event_bus));
 
     registry
 }
@@ -179,11 +204,15 @@ pub async fn run_goal(
     skill_loader.scan_standard_locations().await;
     let skills_summary = skill_loader.generate_prompt_index();
 
-    let tools = build_tools(
+    let mut tools = build_tools(
         provider_instance.clone(),
         skill_loader,
+        state.extension_supervisor.clone(),
         state.event_bus.clone(),
     );
+
+    // Connect enabled external MCP extensions as Deferred tools (discoverable via `search_tools`)
+    let _ = register_enabled_mcp_extensions(state.extension_supervisor.clone(), &mut tools).await;
 
     // Setup Hooks with Desktop Security Hook
     let mut hooks = HookRegistry::new();
@@ -201,7 +230,7 @@ pub async fn run_goal(
 
     if !skills_summary.is_empty() {
         let prompt = format!(
-            "You are Dex, a high-performance autonomous AI agent harness in Rust with native macOS, terminal, and browser capabilities.\n\nAvailable Skills:\n{}\nUse `load_skill` when relevant.",
+            "You are Dex, a high-performance autonomous AI agent harness in Rust with native macOS, terminal, browser, and external MCP extension capabilities.\nUse `search_tools` to discover and activate specialized external extension tools.\n\nAvailable Skills:\n{}\nUse `load_skill` when relevant.",
             skills_summary
         );
         agent = agent.with_system_prompt(prompt);
@@ -223,7 +252,7 @@ pub async fn run_goal(
     let app_handle_for_task = app.clone();
     let goal_cloned = goal.clone();
 
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         tracing::info!(goal = %goal_cloned, "Starting autonomous execution in Dex Desktop");
 
         let run_future = agent.run(&goal_cloned);
@@ -407,7 +436,7 @@ pub async fn download_model(
     let event_bus = state.event_bus.clone();
     let filename_for_task = filename.clone();
 
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         let downloader = ModelDownloader::new(None);
         match downloader.download(&download_url, &dest_path, &repo_id, &filename_for_task, Some(&event_bus), cancel).await {
             Ok(saved_path) => {
@@ -526,7 +555,7 @@ pub async fn pull_ollama_model(
     let event_bus = state.event_bus.clone();
     let name = model_name.clone();
 
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         let bridge = OllamaBridge::default();
         match bridge.pull_model(&name, Some(&event_bus), cancel).await {
             Ok(()) => {
@@ -551,6 +580,334 @@ pub async fn pull_ollama_model(
     });
 
     Ok(format!("Pull started for Ollama model {}", model_name))
+}
+
+#[tauri::command]
+pub async fn list_extension_catalog() -> Result<Vec<ExtensionManifest>, String> {
+    Ok(builtin_catalog())
+}
+
+#[tauri::command]
+pub async fn list_installed_extensions(
+    state: State<'_, DesktopState>,
+) -> Result<Vec<ExtensionRuntimeInfo>, String> {
+    Ok(state.extension_supervisor.list_with_status().await)
+}
+
+#[tauri::command]
+pub async fn install_catalog_extension(
+    state: State<'_, DesktopState>,
+    catalog_id: String,
+) -> Result<ExtensionManifest, String> {
+    state
+        .extension_supervisor
+        .install_from_catalog(&catalog_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn add_custom_mcp_extension(
+    state: State<'_, DesktopState>,
+    id: String,
+    name: String,
+    category: Option<String>,
+    description: Option<String>,
+    transport: String,
+    command: Option<String>,
+    args: Option<String>,
+    url: Option<String>,
+    estimated_ram_mb: Option<u64>,
+    idle_timeout_secs: Option<u64>,
+) -> Result<ExtensionManifest, String> {
+    let kind = match transport.to_lowercase().as_str() {
+        "sse" | "mcp_sse" => {
+            let sse_url = url
+                .filter(|u| !u.trim().is_empty())
+                .ok_or_else(|| "SSE URL is required for SSE transport".to_string())?;
+            ExtensionKind::McpSse { url: sse_url }
+        }
+        _ => {
+            let cmd = command
+                .filter(|c| !c.trim().is_empty())
+                .ok_or_else(|| "Command is required for stdio transport".to_string())?;
+            let parsed_args: Vec<String> = args
+                .map(|a| a.split_whitespace().map(|s| s.to_string()).collect())
+                .unwrap_or_default();
+            ExtensionKind::McpStdio {
+                command: cmd,
+                args: parsed_args,
+                env: HashMap::new(),
+            }
+        }
+    };
+
+    let cat = category
+        .as_deref()
+        .map(ExtensionCategory::from_str_loose)
+        .unwrap_or(ExtensionCategory::Custom);
+
+    let manifest = ExtensionManifest {
+        id: id.trim().to_string(),
+        name: name.trim().to_string(),
+        category: cat,
+        description: description
+            .filter(|d| !d.trim().is_empty())
+            .unwrap_or_else(|| format!("Custom MCP server '{}'", name.trim())),
+        kind,
+        estimated_ram_mb: estimated_ram_mb.unwrap_or(512),
+        idle_timeout_secs: idle_timeout_secs.unwrap_or(DEFAULT_IDLE_TIMEOUT_SECS),
+        install_hint: "Custom MCP extension registered via Dex.app".to_string(),
+        enabled: true,
+        tags: vec![id.trim().to_string(), cat.as_str().to_string(), "mcp".to_string()],
+    };
+
+    state
+        .extension_supervisor
+        .add_custom_extension(manifest)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn toggle_extension(
+    state: State<'_, DesktopState>,
+    id: String,
+    enabled: bool,
+) -> Result<ExtensionManifest, String> {
+    state
+        .extension_supervisor
+        .set_enabled(&id, enabled)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn start_extension(
+    state: State<'_, DesktopState>,
+    id: String,
+) -> Result<ExtensionRuntimeInfo, String> {
+    state
+        .extension_supervisor
+        .start_extension(&id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn stop_extension(
+    state: State<'_, DesktopState>,
+    id: String,
+) -> Result<ExtensionRuntimeInfo, String> {
+    state
+        .extension_supervisor
+        .stop_extension(&id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn remove_extension(
+    state: State<'_, DesktopState>,
+    id: String,
+) -> Result<String, String> {
+    let removed = state
+        .extension_supervisor
+        .remove_extension(&id)
+        .await
+        .map_err(|e| e.to_string())?;
+    match removed {
+        Some(m) => Ok(format!("Removed extension '{}'", m.name)),
+        None => Ok(format!("Extension '{}' not found", id)),
+    }
+}
+
+#[tauri::command]
+pub async fn update_extension_timeout(
+    state: State<'_, DesktopState>,
+    id: String,
+    idle_timeout_secs: u64,
+) -> Result<ExtensionManifest, String> {
+    state
+        .extension_supervisor
+        .set_idle_timeout(&id, idle_timeout_secs)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VoiceTranscribeResponse {
+    pub audio_path: String,
+    pub duration_secs: f64,
+    pub transcript: Option<String>,
+    pub backend: Option<String>,
+    pub stt_warning: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioMediaEntry {
+    pub kind: String,
+    pub filename: String,
+    pub path: String,
+    pub data_url: String,
+    pub size_bytes: u64,
+}
+
+#[tauri::command]
+pub async fn start_voice_recording(state: State<'_, DesktopState>) -> Result<String, String> {
+    let mut lock = state.active_recorder.lock().await;
+    if lock.is_some() {
+        return Err("Voice recording is already in progress".to_string());
+    }
+
+    let handle = VoiceRecorderHandle::start(DEFAULT_RECORDINGS_DIR, Some(state.event_bus.clone()))
+        .await
+        .map_err(|e| e.to_string())?;
+    *lock = Some(handle);
+    Ok("Recording started".to_string())
+}
+
+#[tauri::command]
+pub async fn stop_and_transcribe(
+    state: State<'_, DesktopState>,
+) -> Result<VoiceTranscribeResponse, String> {
+    let handle = {
+        let mut lock = state.active_recorder.lock().await;
+        lock.take()
+            .ok_or_else(|| "No active voice recording to stop".to_string())?
+    };
+
+    let rec = handle.stop().await.map_err(|e| e.to_string())?;
+    let path_str = rec.path.to_string_lossy().to_string();
+
+    match AutoSttEngine::transcribe(&rec.path, false).await {
+        Ok(stt) => {
+            let preview: String = stt.text.chars().take(120).collect();
+            state.event_bus.publish(DexEvent::MediaGenerated {
+                kind: "transcript".to_string(),
+                path: path_str.clone(),
+                prompt: preview,
+                duration_secs: Some(rec.duration_secs),
+            });
+            Ok(VoiceTranscribeResponse {
+                audio_path: path_str,
+                duration_secs: rec.duration_secs,
+                transcript: Some(stt.text),
+                backend: Some(stt.backend),
+                stt_warning: None,
+            })
+        }
+        Err(err) => Ok(VoiceTranscribeResponse {
+            audio_path: path_str,
+            duration_secs: rec.duration_secs,
+            transcript: None,
+            backend: None,
+            stt_warning: Some(err.to_string()),
+        }),
+    }
+}
+
+#[tauri::command]
+pub async fn speak_text(
+    state: State<'_, DesktopState>,
+    text: String,
+    voice: Option<String>,
+) -> Result<TtsResult, String> {
+    synthesize_speech(
+        &text,
+        voice.as_deref(),
+        None,
+        Some(state.extension_supervisor.clone()),
+        Some(&state.event_bus),
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_audio_media() -> Result<Vec<AudioMediaEntry>, String> {
+    let dirs_to_scan = [
+        ("tts", DEFAULT_TTS_DIR),
+        ("music", DEFAULT_MUSIC_DIR),
+        ("sfx", DEFAULT_SFX_DIR),
+        ("recording", DEFAULT_RECORDINGS_DIR),
+    ];
+
+    let mut entries = Vec::new();
+    const MAX_INLINE_AUDIO_BYTES: u64 = 25 * 1024 * 1024;
+
+    for (kind, dir_str) in dirs_to_scan {
+        let dir = Path::new(dir_str);
+        if !tokio::fs::try_exists(dir).await.unwrap_or(false) {
+            continue;
+        }
+        let mut rd = match tokio::fs::read_dir(dir).await {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            let path = entry.path();
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            let mime = match ext.as_str() {
+                "wav" => "audio/wav",
+                "mp3" => "audio/mpeg",
+                "m4a" => "audio/mp4",
+                "ogg" => "audio/ogg",
+                _ => continue,
+            };
+
+            let filename = entry.file_name().to_string_lossy().to_string();
+            let size_bytes = entry.metadata().await.map(|m| m.len()).unwrap_or(0);
+            if size_bytes == 0 || size_bytes > MAX_INLINE_AUDIO_BYTES {
+                continue;
+            }
+
+            if let Ok(bytes) = tokio::fs::read(&path).await {
+                let data_url = format!("data:{mime};base64,{}", to_base64(&bytes));
+                entries.push(AudioMediaEntry {
+                    kind: kind.to_string(),
+                    filename,
+                    path: path.to_string_lossy().to_string(),
+                    data_url,
+                    size_bytes,
+                });
+            }
+        }
+    }
+
+    entries.sort_by(|a, b| b.filename.cmp(&a.filename));
+    Ok(entries)
+}
+
+#[tauri::command]
+pub async fn run_ocr_image(
+    state: State<'_, DesktopState>,
+    path: String,
+) -> Result<OcrResult, String> {
+    run_ocr_on_image(Path::new(&path), Some(&state.event_bus))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn parse_document(
+    state: State<'_, DesktopState>,
+    path: String,
+) -> Result<DocumentParseResult, String> {
+    parse_doc_impl(
+        Path::new(&path),
+        DEFAULT_MAX_INLINE_CHARS,
+        Some(state.extension_supervisor.clone()),
+        Some(&state.event_bus),
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

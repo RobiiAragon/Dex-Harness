@@ -10,6 +10,9 @@ members = [
     "crates/harness-cli",
     "crates/harness-desktop",
     "crates/harness-models",
+    "crates/harness-extensions",
+    "crates/harness-audio",
+    "crates/harness-docs",
 ]
 
 [workspace.package]
@@ -28,8 +31,13 @@ futures = "0.3"
 async-trait = "0.1"
 
 # Networking & HTTP Client
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "stream", "rustls-tls"] }
 axum = { version = "0.8", features = ["ws"] }
+
+# Audio & Document Parsing
+cpal = "0.15"
+hound = "3.5"
+lopdf = "0.35"
 
 # Browser & Desktop Automation
 chromiumoxide = { version = "0.8", default-features = false, features = ["tokio-runtime"] }
@@ -80,3 +88,6 @@ harness-mcp = { path = "crates/harness-mcp" }
 harness-computer = { path = "crates/harness-computer" }
 harness-ui = { path = "crates/harness-ui" }
 harness-models = { path = "crates/harness-models" }
+harness-extensions = { path = "crates/harness-extensions" }
+harness-audio = { path = "crates/harness-audio" }
+harness-docs = { path = "crates/harness-docs" }

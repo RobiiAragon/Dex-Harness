@@ -48,6 +48,30 @@ pub enum DexEvent {
         file_name: String,
         error: String,
     },
+    /// An external extension or local sidecar changed its runtime status.
+    ExtensionStatusChanged {
+        extension_id: String,
+        status: String,
+        pid: Option<u32>,
+        estimated_ram_mb: u64,
+    },
+    /// Deferred tools were dynamically discovered and activated for the LLM.
+    ToolsActivated {
+        source: String,
+        tool_names: Vec<String>,
+    },
+    /// Audio, transcript, or OCR/document media asset was generated or captured.
+    MediaGenerated {
+        kind: String,
+        path: String,
+        prompt: String,
+        duration_secs: Option<f64>,
+    },
+    /// Real-time microphone recording state and RMS volume level in dB.
+    VoiceCaptureState {
+        recording: bool,
+        level_db: f32,
+    },
 }
 
 /// Central publish-subscribe asynchronous event bus based on `tokio::sync::broadcast`.

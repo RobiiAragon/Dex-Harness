@@ -22,8 +22,14 @@ use harness_tools::{
     EditFileTool, ExecuteShellTool, FindFilesTool, GitWorktreeTool, GrepSearchTool, PtyShellTool,
     ReadFileTool, WriteFileTool,
 };
+use harness_audio::register_audio_tools;
+use harness_docs::register_docs_tools;
+use harness_extensions::{register_enabled_mcp_extensions, ExtensionSupervisor};
 use harness_ui::{run_tui, start_web_dashboard};
 
+mod audio_cli;
+mod docs_cli;
+mod ext_cli;
 mod models_cli;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -103,6 +109,127 @@ enum Commands {
     Models {
         #[command(subcommand)]
         action: ModelCommands,
+    },
+    /// Extensions Hub: Manage external MCP servers and local creative/engineering sidecars
+    Ext {
+        #[command(subcommand)]
+        action: ExtCommands,
+    },
+    /// Audio & Voice tools: Record microphone, transcribe speech (STT), and synthesize voice (TTS)
+    Audio {
+        #[command(subcommand)]
+        action: AudioCommands,
+    },
+    /// Documents & OCR tools: Native Apple Vision OCR and deep PDF/document Markdown extraction
+    Docs {
+        #[command(subcommand)]
+        action: DocsCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum AudioCommands {
+    /// Record audio from the default microphone to a 16kHz mono PCM WAV file
+    Record {
+        /// Recording duration in seconds
+        #[arg(short, long, default_value_t = 5)]
+        seconds: u64,
+    },
+    /// Transcribe an audio/video file (.wav, .mp3, .m4a) to text
+    Transcribe {
+        /// Path to the audio file
+        path: String,
+        /// Include segment start/end timestamps
+        #[arg(short, long, default_value_t = false)]
+        timestamps: bool,
+    },
+    /// Synthesize speech audio from text (sidecar or native macOS fallback)
+    Speak {
+        /// Text to speak
+        text: String,
+        /// Optional voice name (e.g. Monica, Samantha, alloy)
+        #[arg(long)]
+        voice: Option<String>,
+        /// Optional output file path (.wav or .m4a)
+        #[arg(short, long)]
+        out: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum DocsCommands {
+    /// Run native OCR (Apple Vision on macOS / Tesseract fallback) on an image
+    Ocr {
+        /// Path to the image file (.png, .jpg, .webp)
+        path: String,
+    },
+    /// Extract a PDF, DOCX, PPTX, or image document into clean Markdown
+    Parse {
+        /// Path to the document file
+        path: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ExtCommands {
+    /// Display the built-in catalog of MCP servers and local sidecars grouped by category
+    Catalog,
+    /// List installed extensions with their enabled state and runtime status
+    List,
+    /// Install a built-in extension recipe into ~/.dex/extensions/extensions.json
+    Install {
+        /// Catalog recipe ID (e.g. blender-mcp, docling-mcp, trellis-3d)
+        catalog_id: String,
+    },
+    /// Register a custom MCP server (stdio command or SSE URL)
+    AddMcp {
+        /// Unique extension identifier
+        #[arg(long)]
+        id: String,
+        /// Human-readable display name
+        #[arg(long)]
+        name: String,
+        /// Command executable for MCP stdio transport (e.g. uvx, npx, python3)
+        #[arg(long)]
+        command: Option<String>,
+        /// Whitespace-separated command arguments for MCP stdio transport
+        #[arg(long)]
+        args: Option<String>,
+        /// SSE endpoint URL for MCP SSE transport
+        #[arg(long)]
+        url: Option<String>,
+        /// Extension category (audio, image_video, three_d, ocr_docs, game_dev, custom)
+        #[arg(long)]
+        category: Option<String>,
+        /// Short description of the extension
+        #[arg(long)]
+        description: Option<String>,
+        /// Estimated RAM footprint in MB
+        #[arg(long, default_value_t = 512)]
+        ram_mb: u64,
+        /// Idle auto-unload timeout in seconds (default 600)
+        #[arg(long)]
+        idle_timeout: Option<u64>,
+    },
+    /// Enable an installed extension
+    Enable {
+        /// Extension ID
+        id: String,
+    },
+    /// Disable an installed extension
+    Disable {
+        /// Extension ID
+        id: String,
+    },
+    /// Start an extension or sidecar process
+    Start {
+        /// Extension ID
+        id: String,
+    },
+    /// Stop a running extension or sidecar process
+    Stop {
+        /// Extension ID
+        id: String,
     },
 }
 
@@ -260,6 +387,7 @@ fn build_provider(provider_type: &str, model: &str, api_base: Option<&str>) -> R
 fn build_tools(
     provider: Arc<dyn LlmProvider>,
     skill_loader: ProgressiveSkillLoader,
+    ext_supervisor: Arc<ExtensionSupervisor>,
     event_bus: EventBus,
 ) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
@@ -301,11 +429,22 @@ fn build_tools(
     registry.register(Arc::new(DesktopMouseTool::new()));
     registry.register(Arc::new(DesktopKeyboardTool::new()));
 
-    // Subagents orchestrator (inheriting master tools and event bus)
-    let master_copy = registry.clone();
+    // Subagents orchestrator (using an isolated snapshot to prevent Arc cycles)
+    let master_copy = registry.snapshot();
     registry.register(Arc::new(
-        SpawnSubagentTool::new(provider, master_copy).with_event_bus(event_bus),
+        SpawnSubagentTool::new(provider, master_copy).with_event_bus(event_bus.clone()),
     ));
+
+    // Deferred Audio (STT, TTS, Music, SFX) and Docs/OCR tools
+    register_audio_tools(
+        &mut registry,
+        Some(ext_supervisor.clone()),
+        Some(event_bus.clone()),
+    );
+    register_docs_tools(&mut registry, Some(ext_supervisor), Some(event_bus.clone()));
+
+    // Dynamic deferred tool discovery (`search_tools`)
+    registry.register_search_tools(Some(event_bus));
 
     registry
 }
@@ -417,12 +556,90 @@ async fn main() -> Result<()> {
             }
             return Ok(());
         }
+        Some(Commands::Ext { action }) => {
+            match action {
+                ExtCommands::Catalog => {
+                    ext_cli::show_catalog();
+                }
+                ExtCommands::List => {
+                    ext_cli::list_extensions(event_bus).await?;
+                }
+                ExtCommands::Install { catalog_id } => {
+                    ext_cli::install_extension(event_bus, &catalog_id).await?;
+                }
+                ExtCommands::AddMcp {
+                    id,
+                    name,
+                    command,
+                    args,
+                    url,
+                    category,
+                    description,
+                    ram_mb,
+                    idle_timeout,
+                } => {
+                    ext_cli::add_custom_mcp(
+                        event_bus,
+                        id,
+                        name,
+                        command,
+                        args,
+                        url,
+                        category,
+                        description,
+                        ram_mb,
+                        idle_timeout,
+                    )
+                    .await?;
+                }
+                ExtCommands::Enable { id } => {
+                    ext_cli::set_extension_enabled(event_bus, &id, true).await?;
+                }
+                ExtCommands::Disable { id } => {
+                    ext_cli::set_extension_enabled(event_bus, &id, false).await?;
+                }
+                ExtCommands::Start { id } => {
+                    ext_cli::start_extension(event_bus, &id).await?;
+                }
+                ExtCommands::Stop { id } => {
+                    ext_cli::stop_extension(event_bus, &id).await?;
+                }
+            }
+            return Ok(());
+        }
+        Some(Commands::Audio { action }) => {
+            match action {
+                AudioCommands::Record { seconds } => {
+                    audio_cli::record_audio(seconds, event_bus).await?;
+                }
+                AudioCommands::Transcribe { path, timestamps } => {
+                    audio_cli::transcribe_audio(&path, timestamps).await?;
+                }
+                AudioCommands::Speak { text, voice, out } => {
+                    audio_cli::speak_text(&text, voice.as_deref(), out.as_deref(), event_bus)
+                        .await?;
+                }
+            }
+            return Ok(());
+        }
+        Some(Commands::Docs { action }) => {
+            match action {
+                DocsCommands::Ocr { path } => {
+                    docs_cli::run_ocr(&path, event_bus).await?;
+                }
+                DocsCommands::Parse { path } => {
+                    docs_cli::run_parse(&path, event_bus).await?;
+                }
+            }
+            return Ok(());
+        }
         Some(Commands::McpServe) => {
             let mut skill_loader = ProgressiveSkillLoader::new();
             skill_loader.scan_standard_locations().await;
 
             let provider = build_provider(&cli.provider, &cli.model, cli.api_base.as_deref())?;
-            let tools = build_tools(provider, skill_loader, event_bus);
+            let ext_supervisor = Arc::new(ExtensionSupervisor::new(event_bus.clone()));
+            let tools = build_tools(provider, skill_loader, ext_supervisor, event_bus);
 
             let server = McpServer::new(tools);
             server.run_stdio().await.context("MCP stdio server terminated with error")?;
@@ -437,7 +654,19 @@ async fn main() -> Result<()> {
 
     let provider = build_provider(&cli.provider, &cli.model, cli.api_base.as_deref())
         .context("Failed to configure LLM provider")?;
-    let tools = build_tools(provider.clone(), skill_loader.clone(), event_bus.clone());
+    let ext_supervisor = Arc::new(ExtensionSupervisor::new(event_bus.clone()));
+    let mut tools = build_tools(
+        provider.clone(),
+        skill_loader.clone(),
+        ext_supervisor.clone(),
+        event_bus.clone(),
+    );
+
+    // Dynamically discover enabled external MCP extensions as Deferred tools
+    let deferred_loaded = register_enabled_mcp_extensions(ext_supervisor, &mut tools).await;
+    if !deferred_loaded.is_empty() {
+        info!(count = deferred_loaded.len(), "Loaded deferred MCP extension tools");
+    }
 
     let mut hooks = HookRegistry::new();
     hooks.register(Arc::new(SecurityHook { mode: cli.mode }));
@@ -586,4 +815,15 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn test_cli_command_structure_valid() {
+        Cli::command().debug_assert();
+    }
 }

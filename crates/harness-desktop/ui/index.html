@@ -282,6 +282,62 @@
     .btn-use:hover { background: #71b4ff; }
     .btn-del { background: rgba(248, 81, 73, 0.2); color: var(--danger); }
     .btn-del:hover { background: var(--danger); color: #fff; }
+    .btn-ghost { background: #090d13; border: 1px solid var(--card-border); color: var(--text); }
+    .btn-ghost:hover { border-color: var(--primary); color: #fff; }
+    .filter-bar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+    .filter-pill {
+      background: #090d13;
+      border: 1px solid var(--card-border);
+      color: var(--text-muted);
+      font-size: 11px;
+      font-weight: 600;
+      padding: 4px 10px;
+      border-radius: 14px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .filter-pill.active {
+      background: var(--primary);
+      border-color: var(--primary);
+      color: #fff;
+    }
+    .badge-running { background: rgba(63, 185, 80, 0.2); color: var(--success); }
+    .badge-sleeping { background: rgba(188, 140, 255, 0.2); color: var(--purple); }
+    .badge-stopped { background: rgba(139, 148, 158, 0.2); color: var(--text-muted); }
+    .badge-error { background: rgba(248, 81, 73, 0.2); color: var(--danger); }
+    .form-field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
+    .form-field label { font-size: 11px; color: var(--text-muted); font-weight: 600; }
+    .btn-mic {
+      background: #090d13;
+      border: 1px solid var(--card-border);
+      color: var(--text);
+      padding: 0 12px;
+      min-width: 44px;
+      justify-content: center;
+    }
+    .btn-mic:hover { border-color: var(--cyan); color: var(--cyan); }
+    .btn-mic.recording {
+      background: rgba(248, 81, 73, 0.25);
+      border-color: var(--danger);
+      color: var(--danger);
+      animation: micPulse 1.1s infinite;
+    }
+    @keyframes micPulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(248, 81, 73, 0.45); }
+      50% { box-shadow: 0 0 0 6px rgba(248, 81, 73, 0); }
+    }
+    .audio-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-bottom: 10px;
+    }
+    .audio-card audio {
+      width: 100%;
+      height: 32px;
+      margin-top: 6px;
+    }
     /* Screenshot Gallery */
     .gallery-grid {
       display: grid;
@@ -423,8 +479,13 @@
         </div>
         <div class="input-row">
           <textarea id="input-goal" class="goal-input" placeholder="Enter objective for Dex (e.g., 'Inspect repo structure, build tests, and fix clippy warnings')..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();runGoal();}"></textarea>
+          <button id="btn-mic" class="btn btn-mic" title="Push-to-Talk: click to record voice objective" onclick="toggleVoiceRecording()">🎤</button>
           <button id="btn-run" class="btn btn-run" onclick="runGoal()">▶ Run</button>
           <button id="btn-stop" class="btn btn-stop" onclick="stopGoal()">⏹ Stop</button>
+        </div>
+        <div id="voice-status-bar" style="display: none; font-size: 11px; color: var(--danger); align-items: center; gap: 8px;">
+          <span>🔴 Recording voice...</span>
+          <span id="voice-db-badge" style="color: var(--text-muted);">-60.0 dB</span>
         </div>
       </div>
 
@@ -441,9 +502,11 @@
       <nav class="tabs-bar">
         <button class="tab-btn active" onclick="openTab('tab-tasks')">📋 TaskBoard</button>
         <button class="tab-btn" onclick="openTab('tab-subagents')">🤖 Subagents</button>
-        <button class="tab-btn" onclick="openTab('tab-vision')">👁️ Vision & Screenshots</button>
+        <button class="tab-btn" onclick="openTab('tab-vision')">👁️ Vision</button>
+        <button class="tab-btn" onclick="openTab('tab-audio-docs')">🎙️ Audio &amp; Docs</button>
+        <button class="tab-btn" onclick="openTab('tab-models')">🧠 Models</button>
+        <button class="tab-btn" onclick="openTab('tab-extensions')">🧩 Extensions</button>
         <button class="tab-btn" onclick="openTab('tab-cookbook')">🖥️ Cookbook</button>
-        <button class="tab-btn" onclick="openTab('tab-models')">🧠 Models Hub</button>
       </nav>
 
       <!-- Tab: Tasks -->
@@ -548,8 +611,166 @@
           </div>
         </div>
       </div>
+
+      <!-- Tab: Extensions Hub (MCP Servers & Local Sidecars) -->
+      <div id="tab-extensions" class="tab-content">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+          <div>
+            <h4 style="font-size: 13px; color: var(--primary);">🧩 Extensions &amp; Local Sidecars</h4>
+            <p style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">Deferred MCP tools (`search_tools`) &amp; automatic RAM unload when idle</p>
+          </div>
+          <div style="display: flex; gap: 6px;">
+            <button class="btn-sm btn-ghost" onclick="refreshExtensions()">🔄 Refresh</button>
+            <button class="btn-sm btn-use" onclick="openCustomMcpModal()">+ Add Custom MCP</button>
+          </div>
+        </div>
+
+        <!-- Category Filters -->
+        <div class="filter-bar" id="ext-filter-bar">
+          <button class="filter-pill active" onclick="setExtCategory('all', this)">Todos</button>
+          <button class="filter-pill" onclick="setExtCategory('audio', this)">Audio</button>
+          <button class="filter-pill" onclick="setExtCategory('image_video', this)">Imagen/Video</button>
+          <button class="filter-pill" onclick="setExtCategory('three_d', this)">3D</button>
+          <button class="filter-pill" onclick="setExtCategory('ocr_docs', this)">OCR/Docs</button>
+          <button class="filter-pill" onclick="setExtCategory('game_dev', this)">GameDev</button>
+          <button class="filter-pill" onclick="setExtCategory('custom', this)">Custom</button>
+        </div>
+
+        <!-- Installed Extensions -->
+        <div style="margin-bottom: 18px;">
+          <h4 style="font-size: 12px; color: var(--cyan); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.4px;">Installed Extensions</h4>
+          <div id="ext-installed-list">
+            <p style="color: var(--text-muted); font-size: 12px;">Loading installed extensions...</p>
+          </div>
+        </div>
+
+        <!-- Built-in Catalog -->
+        <div>
+          <h4 style="font-size: 12px; color: var(--purple); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.4px;">Curated Catalog (1-Click Install)</h4>
+          <div id="ext-catalog-list">
+            <p style="color: var(--text-muted); font-size: 12px;">Loading extension catalog...</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab: Audio & Docs (TTS, Audio Player Gallery, Apple Vision OCR & Document Parser) -->
+      <div id="tab-audio-docs" class="tab-content">
+        <!-- Quick TTS Synthesis -->
+        <div style="background: #0f141c; border: 1px solid var(--card-border); border-radius: 8px; padding: 12px; margin-bottom: 16px;">
+          <h4 style="font-size: 13px; color: var(--cyan); margin-bottom: 8px;">🗣️ Text-to-Speech (Sidecar / Native macOS)</h4>
+          <div style="display: flex; flex-direction: column; gap: 8px;">
+            <input id="tts-text-input" class="config-input" type="text" placeholder="Type text for Dex to synthesize into speech..." onkeydown="if(event.key==='Enter')speakTextFromUi();" />
+            <div style="display: flex; gap: 8px;">
+              <input id="tts-voice-input" class="config-input" type="text" placeholder="Voice (optional: Monica, Samantha, alloy)" style="flex: 1;" />
+              <button class="btn btn-run" style="padding: 6px 14px;" onclick="speakTextFromUi()">🔊 Speak</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Audio Media Gallery & Player -->
+        <div style="margin-bottom: 18px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+            <h4 style="font-size: 13px; color: var(--primary);">🎵 Generated Audio &amp; Recordings (.dex/media/audio/)</h4>
+            <button class="btn-sm btn-ghost" onclick="refreshAudioMedia()">🔄 Refresh</button>
+          </div>
+          <div id="audio-gallery-list">
+            <p style="color: var(--text-muted); font-size: 12px;">No audio files yet. Use Push-to-Talk (🎤), TTS above, or `audio_generate_music` / `audio_generate_sfx`.</p>
+          </div>
+        </div>
+
+        <!-- OCR & Deep Document Reader -->
+        <div style="background: #0f141c; border: 1px solid var(--card-border); border-radius: 8px; padding: 12px;">
+          <h4 style="font-size: 13px; color: var(--purple); margin-bottom: 8px;">📄 OCR &amp; Deep Document Reader (Apple Vision / Docling / PDF)</h4>
+          <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+            <input id="doc-path-input" class="config-input" type="text" placeholder="/path/to/screenshot.png or /path/to/report.pdf" style="flex: 1;" />
+          </div>
+          <div style="display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap;">
+            <button class="btn-sm btn-use" style="padding: 6px 12px;" onclick="runOcrFromUi()">👁️ Run OCR (Image)</button>
+            <button class="btn-sm btn-use" style="padding: 6px 12px; background: var(--purple);" onclick="parseDocFromUi()">📄 Parse Document (PDF/MD/DOCX)</button>
+            <button id="btn-send-doc-agent" class="btn-sm btn-ghost" style="padding: 6px 12px; display: none;" onclick="sendDocToAgent()">⚡ Enviar al Agente</button>
+          </div>
+          <div id="doc-result-meta" style="font-size: 11px; color: var(--text-muted); margin-bottom: 6px;"></div>
+          <div id="doc-result-box" class="report-box" style="max-height: 240px; overflow-y: auto; display: none;"></div>
+        </div>
+      </div>
     </section>
   </main>
+
+  <!-- Add Custom MCP Extension Modal -->
+  <div id="custom-mcp-modal" class="modal-overlay">
+    <div class="modal-card" style="border-color: var(--primary);">
+      <div class="modal-title" style="color: var(--primary);">
+        <span>🧩</span>
+        <span>Add Custom MCP Extension</span>
+      </div>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+        <div class="form-field">
+          <label>Extension ID *</label>
+          <input id="mcp-id" class="config-input" type="text" placeholder="e.g. my-blender-mcp" />
+        </div>
+        <div class="form-field">
+          <label>Display Name *</label>
+          <input id="mcp-name" class="config-input" type="text" placeholder="e.g. My Custom MCP" />
+        </div>
+      </div>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+        <div class="form-field">
+          <label>Transport</label>
+          <select id="mcp-transport" class="config-select" onchange="toggleMcpTransportFields()">
+            <option value="stdio">MCP Stdio (Local Command)</option>
+            <option value="sse">MCP SSE (Remote / Local URL)</option>
+          </select>
+        </div>
+        <div class="form-field">
+          <label>Category</label>
+          <select id="mcp-category" class="config-select">
+            <option value="custom">Custom</option>
+            <option value="audio">Audio</option>
+            <option value="image_video">Imagen/Video</option>
+            <option value="three_d">3D</option>
+            <option value="ocr_docs">OCR/Docs</option>
+            <option value="game_dev">GameDev</option>
+          </select>
+        </div>
+      </div>
+      <div id="mcp-stdio-fields">
+        <div style="display: grid; grid-template-columns: 1fr 2fr; gap: 10px;">
+          <div class="form-field">
+            <label>Command *</label>
+            <input id="mcp-command" class="config-input" type="text" placeholder="uvx / npx / python3" />
+          </div>
+          <div class="form-field">
+            <label>Arguments</label>
+            <input id="mcp-args" class="config-input" type="text" placeholder="e.g. -y @modelcontextprotocol/server-filesystem /tmp" />
+          </div>
+        </div>
+      </div>
+      <div id="mcp-sse-fields" style="display: none;">
+        <div class="form-field">
+          <label>SSE Endpoint URL *</label>
+          <input id="mcp-url" class="config-input" type="text" placeholder="http://127.0.0.1:8080/sse" />
+        </div>
+      </div>
+      <div class="form-field">
+        <label>Description</label>
+        <input id="mcp-desc" class="config-input" type="text" placeholder="What tools does this MCP server provide?" />
+      </div>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+        <div class="form-field">
+          <label>Estimated RAM (MB)</label>
+          <input id="mcp-ram" class="config-input" type="number" value="512" min="64" />
+        </div>
+        <div class="form-field">
+          <label>Idle Auto-Unload (secs)</label>
+          <input id="mcp-timeout" class="config-input" type="number" value="600" min="0" />
+        </div>
+      </div>
+      <div class="modal-actions" style="margin-top: 12px;">
+        <button class="btn btn-ghost" style="padding: 8px 16px;" onclick="closeCustomMcpModal()">Cancel</button>
+        <button class="btn btn-run" style="padding: 8px 18px;" onclick="submitCustomMcp()">Save Extension</button>
+      </div>
+    </div>
+  </div>
 
   <!-- Interactive Safe Mode Approval Modal -->
   <div id="approval-modal" class="modal-overlay">
@@ -669,6 +890,8 @@
       if (tabId === 'tab-vision') refreshScreenshots();
       if (tabId === 'tab-cookbook') refreshCookbook();
       if (tabId === 'tab-models') refreshInstalledModels();
+      if (tabId === 'tab-extensions') refreshExtensions();
+      if (tabId === 'tab-audio-docs') refreshAudioMedia();
     }
 
     // Modal Approval Handling
@@ -957,6 +1180,417 @@
       }
     }
 
+    // Extensions Hub Logic
+    let activeExtCategory = 'all';
+    let cachedExtCatalog = [];
+    let cachedInstalledExts = [];
+
+    function escapeHtml(str) {
+      return String(str ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function formatCategoryLabel(cat) {
+      const map = {
+        audio: 'Audio',
+        image_video: 'Imagen/Video',
+        three_d: '3D',
+        ocr_docs: 'OCR/Docs',
+        game_dev: 'GameDev',
+        custom: 'Custom',
+      };
+      return map[cat] || cat;
+    }
+
+    function formatExtStatusBadge(status) {
+      if (status === 'running') return '<span class="task-badge badge-running">🟢 Running</span>';
+      if (status === 'sleeping') return '<span class="task-badge badge-sleeping">💤 Sleeping</span>';
+      if (status === 'error') return '<span class="task-badge badge-error">🔴 Error</span>';
+      return '<span class="task-badge badge-stopped">⚪ Stopped</span>';
+    }
+
+    function setExtCategory(cat, btnEl) {
+      activeExtCategory = cat;
+      document.querySelectorAll('#ext-filter-bar .filter-pill').forEach(b => b.classList.remove('active'));
+      if (btnEl) btnEl.classList.add('active');
+      renderExtensions();
+    }
+
+    async function refreshExtensions() {
+      try {
+        const [catalog, installed] = await Promise.all([
+          invoke('list_extension_catalog'),
+          invoke('list_installed_extensions'),
+        ]);
+        cachedExtCatalog = catalog || [];
+        cachedInstalledExts = installed || [];
+        renderExtensions();
+      } catch (err) {
+        console.error('Failed to refresh extensions:', err);
+      }
+    }
+
+    function renderExtensions() {
+      const installedContainer = document.getElementById('ext-installed-list');
+      const catalogContainer = document.getElementById('ext-catalog-list');
+      if (!installedContainer || !catalogContainer) return;
+
+      const filteredInstalled = cachedInstalledExts.filter(item =>
+        activeExtCategory === 'all' || item.manifest.category === activeExtCategory
+      );
+
+      if (filteredInstalled.length === 0) {
+        installedContainer.innerHTML = '<p style="color: var(--text-muted); font-size: 12px;">No installed extensions in this category yet. Install one from the curated catalog or add a custom MCP server.</p>';
+      } else {
+        let html = '';
+        for (const item of filteredInstalled) {
+          const m = item.manifest;
+          const isRunning = item.status === 'running';
+          const pidNote = item.pid ? ` · PID ${item.pid}` : '';
+          const timeoutOpts = [60, 300, 600, 1800, 0]
+            .map(sec => `<option value="${sec}" ${m.idle_timeout_secs === sec ? 'selected' : ''}>${sec === 0 ? 'No unload' : sec + 's idle'}</option>`)
+            .join('');
+
+          html += `
+            <div class="task-card">
+              <div class="task-head">
+                <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+                  <span style="color: #fff;">${escapeHtml(m.name)}</span>
+                  <span class="task-badge" style="background: rgba(88, 166, 255, 0.18); color: var(--primary);">${formatCategoryLabel(m.category)}</span>
+                  ${formatExtStatusBadge(item.status)}
+                </div>
+                <span style="font-size: 11px; color: var(--text-muted);">~${m.estimated_ram_mb} MB RAM${pidNote}</span>
+              </div>
+              <p style="font-size: 12px; color: var(--text-muted); margin: 4px 0 8px 0;">${escapeHtml(m.description)}</p>
+              ${item.last_error ? `<p style="font-size: 11px; color: var(--danger); margin-bottom: 8px;">Error: ${escapeHtml(item.last_error)}</p>` : ''}
+              <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;">
+                <div style="display: flex; align-items: center; gap: 6px;">
+                  <label style="font-size: 11px; color: var(--text-muted); display: flex; align-items: center; gap: 4px; cursor: pointer;">
+                    <input type="checkbox" ${m.enabled ? 'checked' : ''} onchange="toggleExt('${escapeHtml(m.id)}', this.checked)" />
+                    Enabled
+                  </label>
+                  <select class="config-select" style="font-size: 11px; padding: 2px 6px;" onchange="updateExtTimeout('${escapeHtml(m.id)}', Number(this.value))">
+                    ${timeoutOpts}
+                  </select>
+                </div>
+                <div style="display: flex; gap: 6px;">
+                  ${isRunning
+                    ? `<button class="btn-sm btn-del" onclick="stopExt('${escapeHtml(m.id)}')">⏹ Stop</button>`
+                    : `<button class="btn-sm btn-use" onclick="startExt('${escapeHtml(m.id)}')">▶ Start</button>`}
+                  <button class="btn-sm btn-ghost" onclick="removeExt('${escapeHtml(m.id)}')">🗑️</button>
+                </div>
+              </div>
+            </div>
+          `;
+        }
+        installedContainer.innerHTML = html;
+      }
+
+      const installedIds = new Set(cachedInstalledExts.map(i => i.manifest.id));
+      const filteredCatalog = cachedExtCatalog.filter(m =>
+        activeExtCategory === 'all' || m.category === activeExtCategory
+      );
+
+      if (filteredCatalog.length === 0) {
+        catalogContainer.innerHTML = '<p style="color: var(--text-muted); font-size: 12px;">No built-in recipes in this category. Use "+ Add Custom MCP" to connect your own server.</p>';
+      } else {
+        let html = '';
+        for (const m of filteredCatalog) {
+          const isInstalled = installedIds.has(m.id);
+          html += `
+            <div class="task-card">
+              <div class="task-head">
+                <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+                  <span style="color: #fff;">${escapeHtml(m.name)}</span>
+                  <span class="task-badge" style="background: rgba(188, 140, 255, 0.18); color: var(--purple);">${formatCategoryLabel(m.category)}</span>
+                  <span style="font-size: 11px; color: var(--text-muted);">~${m.estimated_ram_mb} MB RAM</span>
+                </div>
+                ${isInstalled
+                  ? '<span class="task-badge badge-completed">Installed ✓</span>'
+                  : `<button class="btn-sm btn-use" onclick="installCatalogExt('${escapeHtml(m.id)}')">+ Install</button>`}
+              </div>
+              <p style="font-size: 12px; color: var(--text-muted); margin-top: 4px;">${escapeHtml(m.description)}</p>
+              <p style="font-size: 11px; color: var(--cyan); margin-top: 4px;">💡 ${escapeHtml(m.install_hint)}</p>
+            </div>
+          `;
+        }
+        catalogContainer.innerHTML = html;
+      }
+    }
+
+    async function installCatalogExt(catalogId) {
+      try {
+        await invoke('install_catalog_extension', { catalogId });
+        appendStream(`\n🧩 [Extension Installed] Added '${catalogId}' from catalog.\n`);
+        refreshExtensions();
+      } catch (err) {
+        alert('Failed to install extension: ' + err);
+      }
+    }
+
+    async function toggleExt(id, enabled) {
+      try {
+        await invoke('toggle_extension', { id, enabled });
+        refreshExtensions();
+      } catch (err) {
+        alert('Failed to toggle extension: ' + err);
+      }
+    }
+
+    async function startExt(id) {
+      try {
+        await invoke('start_extension', { id });
+        refreshExtensions();
+      } catch (err) {
+        alert('Failed to start extension: ' + err);
+        refreshExtensions();
+      }
+    }
+
+    async function stopExt(id) {
+      try {
+        await invoke('stop_extension', { id });
+        refreshExtensions();
+      } catch (err) {
+        alert('Failed to stop extension: ' + err);
+      }
+    }
+
+    async function removeExt(id) {
+      if (!confirm(`Remove extension '${id}'?`)) return;
+      try {
+        await invoke('remove_extension', { id });
+        appendStream(`\n🗑️ [Extension Removed] Removed '${id}'.\n`);
+        refreshExtensions();
+      } catch (err) {
+        alert('Failed to remove extension: ' + err);
+      }
+    }
+
+    async function updateExtTimeout(id, idleTimeoutSecs) {
+      try {
+        await invoke('update_extension_timeout', { id, idleTimeoutSecs });
+        appendStream(`\n⏱️ [Extension Config] Set idle auto-unload for '${id}' to ${idleTimeoutSecs}s.\n`);
+      } catch (err) {
+        alert('Failed to update timeout: ' + err);
+      }
+    }
+
+    function openCustomMcpModal() {
+      document.getElementById('custom-mcp-modal').style.display = 'flex';
+    }
+
+    function closeCustomMcpModal() {
+      document.getElementById('custom-mcp-modal').style.display = 'none';
+    }
+
+    function toggleMcpTransportFields() {
+      const transport = document.getElementById('mcp-transport').value;
+      document.getElementById('mcp-stdio-fields').style.display = transport === 'stdio' ? 'block' : 'none';
+      document.getElementById('mcp-sse-fields').style.display = transport === 'sse' ? 'block' : 'none';
+    }
+
+    async function submitCustomMcp() {
+      const id = document.getElementById('mcp-id').value.trim();
+      const name = document.getElementById('mcp-name').value.trim();
+      const transport = document.getElementById('mcp-transport').value;
+      const category = document.getElementById('mcp-category').value;
+      const command = document.getElementById('mcp-command').value.trim() || null;
+      const args = document.getElementById('mcp-args').value.trim() || null;
+      const url = document.getElementById('mcp-url').value.trim() || null;
+      const description = document.getElementById('mcp-desc').value.trim() || null;
+      const estimatedRamMb = Number(document.getElementById('mcp-ram').value) || 512;
+      const idleTimeoutSecs = Number(document.getElementById('mcp-timeout').value);
+
+      if (!id || !name) {
+        alert('Extension ID and Display Name are required.');
+        return;
+      }
+
+      try {
+        await invoke('add_custom_mcp_extension', {
+          id,
+          name,
+          category,
+          description,
+          transport,
+          command,
+          args,
+          url,
+          estimatedRamMb,
+          idleTimeoutSecs: Number.isNaN(idleTimeoutSecs) ? 600 : idleTimeoutSecs,
+        });
+        closeCustomMcpModal();
+        document.getElementById('mcp-id').value = '';
+        document.getElementById('mcp-name').value = '';
+        document.getElementById('mcp-command').value = '';
+        document.getElementById('mcp-args').value = '';
+        document.getElementById('mcp-url').value = '';
+        document.getElementById('mcp-desc').value = '';
+        appendStream(`\n🧩 [Custom MCP Added] Registered '${name}' (${id}).\n`);
+        refreshExtensions();
+      } catch (err) {
+        alert('Failed to add custom MCP extension: ' + err);
+      }
+    }
+
+    // Audio, Voice Push-to-Talk, OCR & Document Reader Logic
+    let isRecordingVoice = false;
+    let lastParsedDoc = null;
+
+    async function toggleVoiceRecording() {
+      const micBtn = document.getElementById('btn-mic');
+      const statusBar = document.getElementById('voice-status-bar');
+
+      if (!isRecordingVoice) {
+        try {
+          await invoke('start_voice_recording');
+          isRecordingVoice = true;
+          micBtn.classList.add('recording');
+          micBtn.textContent = '⏹';
+          statusBar.style.display = 'flex';
+          appendStream('\n🎙️ [Voice] Listening via microphone (click ⏹ to transcribe)...\n');
+        } catch (err) {
+          alert('Failed to start microphone capture: ' + err);
+        }
+      } else {
+        isRecordingVoice = false;
+        micBtn.classList.remove('recording');
+        micBtn.textContent = '⏳';
+        statusBar.style.display = 'none';
+        try {
+          const res = await invoke('stop_and_transcribe');
+          micBtn.textContent = '🎤';
+          refreshAudioMedia();
+          if (res.transcript) {
+            const current = goalInput.value.trim();
+            goalInput.value = current ? `${current} ${res.transcript}` : res.transcript;
+            goalInput.focus();
+            appendStream(`\n📝 [Transcript (${res.backend || 'stt'})] ${res.transcript}\n`);
+          } else {
+            appendStream(`\n🎙️ [Voice Saved] ${res.audio_path} (${res.duration_secs}s). STT note: ${res.stt_warning || 'no backend'}\n`);
+          }
+        } catch (err) {
+          micBtn.textContent = '🎤';
+          alert('Failed to stop/transcribe recording: ' + err);
+        }
+      }
+    }
+
+    async function speakTextFromUi() {
+      const text = document.getElementById('tts-text-input').value.trim();
+      const voice = document.getElementById('tts-voice-input').value.trim() || null;
+      if (!text) return;
+
+      try {
+        const res = await invoke('speak_text', { text, voice });
+        appendStream(`\n🗣️ [TTS (${res.backend})] Synthesized -> ${res.path}\n`);
+        document.getElementById('tts-text-input').value = '';
+        refreshAudioMedia();
+      } catch (err) {
+        alert('TTS failed: ' + err);
+      }
+    }
+
+    async function refreshAudioMedia() {
+      const container = document.getElementById('audio-gallery-list');
+      if (!container) return;
+      try {
+        const items = await invoke('list_audio_media');
+        if (!items || items.length === 0) {
+          container.innerHTML = '<p style="color: var(--text-muted); font-size: 12px;">No audio files yet. Use Push-to-Talk (🎤), TTS above, or `audio_generate_music` / `audio_generate_sfx`.</p>';
+          return;
+        }
+        let html = '';
+        for (const item of items) {
+          const kb = Math.max(1, Math.round(item.size_bytes / 1024));
+          html += `
+            <div class="audio-card">
+              <div style="display: flex; justify-content: space-between; align-items: center;">
+                <div style="display: flex; align-items: center; gap: 6px;">
+                  <span class="task-badge" style="background: rgba(57, 197, 207, 0.2); color: var(--cyan);">${escapeHtml(item.kind)}</span>
+                  <span style="font-size: 12px; font-weight: 600; color: #fff;">${escapeHtml(item.filename)}</span>
+                </div>
+                <span style="font-size: 11px; color: var(--text-muted);">${kb} KB</span>
+              </div>
+              <audio controls preload="metadata" src="${item.data_url}"></audio>
+            </div>
+          `;
+        }
+        container.innerHTML = html;
+      } catch (err) {
+        console.error('Failed to list audio media:', err);
+      }
+    }
+
+    async function runOcrFromUi() {
+      const path = document.getElementById('doc-path-input').value.trim();
+      if (!path) {
+        alert('Please enter an image path (.png, .jpg, .webp)');
+        return;
+      }
+      const metaEl = document.getElementById('doc-result-meta');
+      const boxEl = document.getElementById('doc-result-box');
+      const sendBtn = document.getElementById('btn-send-doc-agent');
+      metaEl.textContent = 'Running Apple Vision OCR...';
+      boxEl.style.display = 'none';
+      sendBtn.style.display = 'none';
+
+      try {
+        const res = await invoke('run_ocr_image', { path });
+        metaEl.textContent = `Engine: ${res.engine} · Blocks: ${res.blocks.length} · Source: ${path}`;
+        boxEl.textContent = res.text || '(No text detected)';
+        boxEl.style.display = 'block';
+        sendBtn.style.display = 'inline-block';
+        lastParsedDoc = { path, engine: res.engine, text: res.text || '' };
+      } catch (err) {
+        metaEl.textContent = `OCR failed: ${err}`;
+      }
+    }
+
+    async function parseDocFromUi() {
+      const path = document.getElementById('doc-path-input').value.trim();
+      if (!path) {
+        alert('Please enter a document path (.pdf, .docx, .md, .png)');
+        return;
+      }
+      const metaEl = document.getElementById('doc-result-meta');
+      const boxEl = document.getElementById('doc-result-box');
+      const sendBtn = document.getElementById('btn-send-doc-agent');
+      metaEl.textContent = 'Extracting document to Markdown...';
+      boxEl.style.display = 'none';
+      sendBtn.style.display = 'none';
+
+      try {
+        const res = await invoke('parse_document', { path });
+        const pages = res.page_count ? ` · Pages: ${res.page_count}` : '';
+        const saved = res.saved_full_path ? ` · Full saved: ${res.saved_full_path}` : '';
+        metaEl.textContent = `Engine: ${res.engine}${pages}${saved}`;
+        boxEl.textContent = res.markdown;
+        boxEl.style.display = 'block';
+        sendBtn.style.display = 'inline-block';
+        lastParsedDoc = {
+          path: res.saved_full_path || res.source_path,
+          engine: res.engine,
+          text: res.markdown,
+        };
+      } catch (err) {
+        metaEl.textContent = `Document parse failed: ${err}`;
+      }
+    }
+
+    function sendDocToAgent() {
+      if (!lastParsedDoc) return;
+      const snippet = lastParsedDoc.text.slice(0, 600);
+      goalInput.value = `Analiza el documento extraído (${lastParsedDoc.path}, motor: ${lastParsedDoc.engine}):\n\n${snippet}${lastParsedDoc.text.length > 600 ? '\n...[usa read_file o doc_parse para ver el resto]' : ''}`;
+      goalInput.focus();
+      appendStream(`\n📄 [Doc -> Agent] Loaded '${lastParsedDoc.path}' into objective input.\n`);
+    }
+
     // Register Tauri Event Listeners
     if (window.__TAURI__) {
       listen('dex-event', (event) => {
@@ -1013,6 +1647,27 @@
           setTimeout(() => {
             document.getElementById('download-progress-box').style.display = 'none';
           }, 4000);
+        } else if (ev.type === 'ExtensionStatusChanged') {
+          const d = ev.data;
+          const pidText = d.pid ? ` (PID ${d.pid})` : '';
+          appendStream(`\n🧩 [Extension Status] ${d.extension_id} -> ${d.status.toUpperCase()}${pidText} (~${d.estimated_ram_mb} MB)\n`);
+          refreshExtensions();
+        } else if (ev.type === 'ToolsActivated') {
+          const d = ev.data;
+          appendStream(`\n🔎 [Tools Activated] (${d.source}): ${d.tool_names.join(', ')}\n`);
+        } else if (ev.type === 'MediaGenerated') {
+          const d = ev.data;
+          const dur = d.duration_secs ? ` (${d.duration_secs.toFixed(1)}s)` : '';
+          appendStream(`\n🎵 [Media ${d.kind}]${dur} ${d.path} — ${d.prompt}\n`);
+          if (['tts', 'music', 'sfx', 'recording'].includes(d.kind)) {
+            refreshAudioMedia();
+          }
+        } else if (ev.type === 'VoiceCaptureState') {
+          const d = ev.data;
+          const badge = document.getElementById('voice-db-badge');
+          if (badge) {
+            badge.textContent = `${d.level_db.toFixed(1)} dB`;
+          }
         }
       });
 

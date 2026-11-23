@@ -6,6 +6,7 @@ mod state;
 mod tray;
 
 use std::error::Error;
+use std::time::Duration;
 use harness_core::EventBus;
 use state::DesktopState;
 use tauri::Emitter;
@@ -16,7 +17,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,harness_desktop=debug".into()),
+                .unwrap_or_else(|_| "info,harness_desktop=debug,harness_extensions=debug".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
@@ -28,6 +29,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let desktop_state = DesktopState::new(event_bus.clone());
     let mode_for_tray = desktop_state.mode.clone();
+    let supervisor_for_reaper = desktop_state.extension_supervisor.clone();
+    let reaper_cancel = desktop_state.reaper_cancel.clone();
 
     let builder = tauri::Builder::default()
         .plugin(
@@ -57,6 +60,21 @@ fn main() -> Result<(), Box<dyn Error>> {
             commands::list_installed_models,
             commands::delete_model,
             commands::pull_ollama_model,
+            commands::list_extension_catalog,
+            commands::list_installed_extensions,
+            commands::install_catalog_extension,
+            commands::add_custom_mcp_extension,
+            commands::toggle_extension,
+            commands::start_extension,
+            commands::stop_extension,
+            commands::remove_extension,
+            commands::update_extension_timeout,
+            commands::start_voice_recording,
+            commands::stop_and_transcribe,
+            commands::speak_text,
+            commands::list_audio_media,
+            commands::run_ocr_image,
+            commands::parse_document,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -72,11 +90,31 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
 
             // Forward EventBus events in real time to the Apple WKWebView frontend
+            // IMPORTANT: Use `tauri::async_runtime::spawn` because `setup` runs on AppKit's main thread.
             let handle_for_events = handle.clone();
-            tokio::spawn(async move {
+            tauri::async_runtime::spawn(async move {
                 while let Ok(event) = rx.recv().await {
                     if let Err(e) = handle_for_events.emit("dex-event", &event) {
                         tracing::trace!("Failed to emit dex-event to webview: {}", e);
+                    }
+                }
+            });
+
+            // Background supervisor reaper: auto-unloads idle sidecars/MCPs to free RAM for local LLMs
+            tauri::async_runtime::spawn(async move {
+                let interval = Duration::from_secs(30);
+                loop {
+                    tokio::select! {
+                        _ = reaper_cancel.cancelled() => {
+                            tracing::info!("Extension idle reaper stopped");
+                            break;
+                        }
+                        _ = tokio::time::sleep(interval) => {
+                            let unloaded = supervisor_for_reaper.reap_idle_extensions().await;
+                            if !unloaded.is_empty() {
+                                tracing::info!(extensions = ?unloaded, "Reclaimed RAM from idle extensions");
+                            }
+                        }
                     }
                 }
             });

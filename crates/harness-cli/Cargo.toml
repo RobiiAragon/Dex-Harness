@@ -19,6 +19,9 @@ harness-mcp = { workspace = true }
 harness-computer = { workspace = true }
 harness-ui = { workspace = true }
 harness-models = { workspace = true }
+harness-extensions = { workspace = true }
+harness-audio = { workspace = true }
+harness-docs = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 async-trait = { workspace = true }

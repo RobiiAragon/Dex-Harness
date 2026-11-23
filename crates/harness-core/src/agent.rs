@@ -2,7 +2,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tracing::{debug, info, warn};
 
-use crate::compaction::ContextCompactor;
+use crate::compaction::{ContextCompactor, ToolOutputCompactor};
 use crate::error::CoreError;
 use crate::event::{DexEvent, EventBus};
 use crate::hook::{AgentEvent, HookAction, HookRegistry};
@@ -41,6 +41,7 @@ pub struct ReActAgent {
     context: ConversationContext,
     hooks: HookRegistry,
     compactor: ContextCompactor,
+    output_compactor: ToolOutputCompactor,
     max_steps: usize,
     current_step: usize,
     observer: Option<StepObserver>,
@@ -68,6 +69,7 @@ Solve the user's objective thoroughly:
             context: ConversationContext::new().with_system_prompt(system_prompt),
             hooks: HookRegistry::new(),
             compactor: ContextCompactor::default(),
+            output_compactor: ToolOutputCompactor::default(),
             max_steps: Self::DEFAULT_MAX_STEPS,
             current_step: 0,
             observer: None,
@@ -108,6 +110,11 @@ Solve the user's objective thoroughly:
 
     pub fn with_compactor(mut self, compactor: ContextCompactor) -> Self {
         self.compactor = compactor;
+        self
+    }
+
+    pub fn with_output_compactor(mut self, output_compactor: ToolOutputCompactor) -> Self {
+        self.output_compactor = output_compactor;
         self
     }
 
@@ -158,7 +165,7 @@ impl Agent for ReActAgent {
 
         let request = CompletionRequest {
             messages: self.context.assemble_messages(),
-            tools: self.tools.definitions(),
+            tools: self.tools.active_definitions(),
             temperature: Some(0.2),
             max_tokens: None,
             token_callback: effective_token_cb,
@@ -237,7 +244,14 @@ impl Agent for ReActAgent {
                 });
             }
 
-            let result = self.tools.execute(&call).await;
+            let mut result = self.tools.execute(&call).await;
+
+            // Guardrail: spill oversized tool outputs (e.g. bulky MCP responses) to disk
+            let (effective_output, _spilled_path) = self
+                .output_compactor
+                .compact_if_needed(&result.tool_name, &result.call_id, &result.output)
+                .await;
+            result.output = effective_output;
 
             if let Some(ref bus) = self.event_bus {
                 bus.publish(DexEvent::ToolFinished {

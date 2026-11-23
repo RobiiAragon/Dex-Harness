@@ -7,13 +7,17 @@
     "frontendDist": "ui"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
+        "label": "main",
         "title": "Dex - Autonomous Agent Harness",
-        "width": 1100,
-        "height": 800,
+        "width": 1150,
+        "height": 820,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
       }
     ],
     "security": {
@@ -29,6 +33,10 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "macOS": {
+      "minimumSystemVersion": "10.15",
+      "entitlements": "./entitlements.plist"
+    }
   }
 }

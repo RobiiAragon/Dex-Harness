@@ -1,0 +1,21 @@
+[package]
+name = "harness-docs"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Dex-Harness Native Apple Vision OCR & Deep Document/PDF Markdown Parser"
+
+[dependencies]
+harness-core = { workspace = true }
+harness-extensions = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+lopdf = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

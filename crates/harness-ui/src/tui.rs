@@ -115,6 +115,29 @@ pub async fn run_tui(event_bus: EventBus, mode: &str) -> Result<(), io::Error> {
                 DexEvent::ModelDownloadFailed { file_name, error, .. } => {
                     state.logs.push(format!("❌ [DOWNLOAD FAILED] {file_name}: {error}"));
                 }
+                DexEvent::ExtensionStatusChanged { extension_id, status, pid, estimated_ram_mb } => {
+                    let pid_str = pid.map(|p| format!(" pid={p}")).unwrap_or_default();
+                    state.logs.push(format!(
+                        "🧩 [EXTENSION] {extension_id} -> {status}{pid_str} (~{estimated_ram_mb} MB)"
+                    ));
+                }
+                DexEvent::ToolsActivated { source, tool_names } => {
+                    state.logs.push(format!(
+                        "🔎 [TOOLS ACTIVATED] ({source}): {}",
+                        tool_names.join(", ")
+                    ));
+                }
+                DexEvent::MediaGenerated { kind, path, prompt, duration_secs } => {
+                    let dur = duration_secs.map(|d| format!(" ({d:.1}s)")).unwrap_or_default();
+                    state.logs.push(format!(
+                        "🎵 [MEDIA:{kind}]{dur} {path} — {prompt}"
+                    ));
+                }
+                DexEvent::VoiceCaptureState { recording, level_db } => {
+                    if recording {
+                        state.logs.push(format!("🎙️ [MIC] Recording ({level_db:.1} dB)"));
+                    }
+                }
             }
         }
 

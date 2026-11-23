@@ -56,21 +56,21 @@ pub fn setup_tray(
                     toggle_main_window(&app_h);
                 }
                 "mode_autopilot" => {
-                    tokio::spawn(async move {
+                    tauri::async_runtime::spawn(async move {
                         let mut m = mode_h.write().await;
                         *m = ExecutionMode::Autopilot;
                         let _ = app_h.emit("dex-mode-changed", serde_json::json!({ "mode": "Autopilot" }));
                     });
                 }
                 "mode_safe" => {
-                    tokio::spawn(async move {
+                    tauri::async_runtime::spawn(async move {
                         let mut m = mode_h.write().await;
                         *m = ExecutionMode::Safe;
                         let _ = app_h.emit("dex-mode-changed", serde_json::json!({ "mode": "Safe" }));
                     });
                 }
                 "mode_plan" => {
-                    tokio::spawn(async move {
+                    tauri::async_runtime::spawn(async move {
                         let mut m = mode_h.write().await;
                         *m = ExecutionMode::Plan;
                         let _ = app_h.emit("dex-mode-changed", serde_json::json!({ "mode": "Plan" }));

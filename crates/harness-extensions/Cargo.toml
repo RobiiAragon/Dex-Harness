@@ -1,0 +1,21 @@
+[package]
+name = "harness-extensions"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Dex-Harness Extension Manager, Local Sidecar Supervisor with Auto-Unload, and Dynamic MCP Bridge"
+
+[dependencies]
+harness-core = { workspace = true }
+harness-mcp = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+dirs = { workspace = true }

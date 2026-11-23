@@ -195,6 +195,17 @@
         appendLog(`\n🏁 [Subagent Completed] Role: ${ev.data.role}`);
       } else if (ev.type === 'TaskUpdated') {
         appendLog(`\n📋 [TaskBoard Update] ${ev.data.task_id} -> ${ev.data.status}`);
+      } else if (ev.type === 'ExtensionStatusChanged') {
+        appendLog(`\n🧩 [Extension] ${ev.data.extension_id} -> ${ev.data.status} (~${ev.data.estimated_ram_mb} MB)`);
+      } else if (ev.type === 'ToolsActivated') {
+        appendLog(`\n🔎 [Tools Activated] (${ev.data.source}): ${ev.data.tool_names.join(', ')}`);
+      } else if (ev.type === 'MediaGenerated') {
+        const dur = ev.data.duration_secs ? ` (${ev.data.duration_secs.toFixed(1)}s)` : '';
+        appendLog(`\n🎵 [Media ${ev.data.kind}]${dur} ${ev.data.path} — ${ev.data.prompt}`);
+      } else if (ev.type === 'VoiceCaptureState') {
+        if (ev.data.recording) {
+          appendLog(`\n🎙️ [Voice Capture] Active (${ev.data.level_db.toFixed(1)} dB)`);
+        }
       }
     }
 
