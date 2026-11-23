@@ -12,10 +12,12 @@ Projects & workspaces (`~/.dex/projects.json`), persistent sessions with inline 
 
 ![Dex Agent Workspace](docs/screenshots/01_agent.png)
 
-### 2. Local Models Hub (Autonomous MLX & GGUF Runtime + Weight Integrity Scanner)
-Multi-folder recursive model scanner (`~/.dex/models`, `~/.lmstudio/models`, custom SSDs), 1-click isolated runtime installer (`~/.dex/runtimes/mlx-venv` for `mlx-lm`, `mlx-whisper`, `mflux`, `mlx-audio`, `parakeet-mlx`, `faster-whisper` + Homebrew `llama.cpp`), shard & header integrity verification (`Valid` vs. `Incomplete` download detection), and 2-column Hugging Face Hub Explorer.
+### 2. Local Models Hub (Autonomous MLX & GGUF Runtime + Weight Integrity Scanner + Hugging Face Explore)
+Multi-folder recursive model scanner (`~/.dex/models`, `~/.lmstudio/models`, custom SSDs), 1-click isolated runtime installer (`~/.dex/runtimes/mlx-venv` for `mlx-lm`, `mlx-whisper`, `mflux`, `mlx-audio`, `parakeet-mlx`, `faster-whisper` + Homebrew `llama.cpp`), shard & header integrity verification (`Valid` vs. `Incomplete` download detection), and 2-column Master-Detail Hugging Face Hub Explorer with quantization RAM fit calculation (`Fits fully in Memory`).
 
-![Dex Models Hub](docs/screenshots/05_models_hub.png)
+![Dex Models Hub — My Models & Autonomous Runtimes](docs/screenshots/05_models_hub.png)
+
+![Dex Models Hub — Hugging Face Explore & RAM Compatibility](docs/screenshots/05b_models_explore.png)
 
 ### 3. Voice Studio & Deep Document Reader (`harness-audio`, `harness-docs`)
 Energy-based VAD silence trimming + soft peak normalization in pure Rust, multilingual ASR (`mlx-whisper` `whisper-large-v3-turbo`, `parakeet-mlx` TDT v3, `faster-whisper`, native macOS `SFSpeechRecognizer`), neural Apple Silicon TTS & zero-shot voice cloning (`mlx-audio` Qwen3-TTS, Chatterbox, Kokoro 82M, plus Fish Audio S2-Pro / Step-Audio EditX / OmniVoice sidecar presets), persistent voice profiles (`~/.dex/voices/`), 3-second Mic & STT tester, Apple Vision native OCR, and PDF/Office Markdown extraction.

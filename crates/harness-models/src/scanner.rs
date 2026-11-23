@@ -115,10 +115,13 @@ fn scan_model_dirs_blocking(dirs: &[PathBuf]) -> Vec<DiscoveredModel> {
         );
     }
 
-    // Sort newest modified first
+    // Sort Valid models first, then newest modified first
     results.sort_by(|a, b| {
-        b.modified_at
-            .cmp(&a.modified_at)
+        let a_inc = a.integrity_status != IntegrityStatus::Valid;
+        let b_inc = b.integrity_status != IntegrityStatus::Valid;
+        a_inc
+            .cmp(&b_inc)
+            .then_with(|| b.modified_at.cmp(&a.modified_at))
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
 

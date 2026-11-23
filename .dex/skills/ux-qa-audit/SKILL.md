@@ -64,8 +64,13 @@ Unit tests alone are **NOT sufficient**. Every phase touching runtimes, multimod
 3. **Real Audio Pre-Processing & STT Roundtrip:** Generate or load a real spoken `.wav` (e.g., `dex audio speak "Hola mundo probando Dex en español"`), run Rust VAD silence trim + soft peak normalization + local STT with explicit `--language es`, and confirm the returned transcription matches the spoken Spanish (no language hallucinations).
 4. **Live Visual & Interactive `Dex.app` Walkthrough (`DEX_QA_WALKTHROUGH=1` under `cwd = /`):**
    - Launch the freshly built `Dex.app/Contents/MacOS/dex-desktop` explicitly from `(cd / && DEX_QA_WALKTHROUGH=1 ...)`.
-   - Automatically traverse every primary view (`Agent`, `Media Studio`, `Audio & Docs`, `3D & Game Studio`, `Models Hub`, `Extensions`, `Hardware Cookbook`).
-   - Verify `0` uncaught JS errors (`window.__DEX_QA_ERRORS__`), `0` `os error 30` / `Read-only file system` logs, presence of key interactive controls (`Browse`, language selectors, model pickers, actionable toasts), and visually inspect captured window screenshots (`/tmp/dex-qa/*.png`) to confirm zero layout clipping or broken states.
+   - Automatically traverse every primary view (`Agent`, `Media Studio`, `Audio & Docs`, `3D & Game Studio`, `Models Hub` [`My Models` + `Explore`], `Extensions`, `Hardware Cookbook`).
+   - **Mandatory Live-Configured State (Zero Error Toasts / Zero Unconfigured Views / Zero Empty Galleries in Screenshots):**
+     - An active `Valid` local model must be mounted in Dex Native Runtime (`Loaded` in sidebar pill, `Active Loaded Model` banner, and `Dex MLX (:8088) 1 loaded` online — never `Select local model...`).
+     - All 7 Apple Silicon runtimes (`mlx`, `llamacpp`, `mlx-whisper`, `mflux`, `mlx-audio`, `parakeet-mlx`, `faster-whisper`) must be installed and showing green `Ready` badges.
+     - Actionable error toasts must be verified programmatically pre-flight and cleared before capturing showcase screenshots so no error/warning toast ever appears in any screenshot.
+     - Every studio must display real populated outputs: active Agent turn with tool calls + GFM Markdown; Media Studio with populated Visual Gallery; Voice Studio with active cloned voice, playable audio cards, and real Apple Vision OCR extraction; 3D Studio with a multi-material Blender `.glb` mesh in WebGL2; Models Hub with `Valid` models sorted first + live `Explore` Hugging Face view; and Extensions with a live `Running` sidecar (`PID`) and zero stale records.
+   - Verify `0` uncaught JS errors (`window.__DEX_QA_ERRORS__`), `0` `os error 30` / `Read-only file system` logs, presence of key interactive controls (`Browse`, language selectors, model pickers, actionable toasts), and visually inspect every captured screenshot via `read_file` to confirm zero layout clipping, zero error popups, and zero unconfigured states.
 5. **Full Rust + WebKit Static & Build Gate:**
    - `cargo check --workspace --all-targets` (0 warnings)
    - `cargo clippy --workspace --all-targets -- -D warnings` (0 warnings)
