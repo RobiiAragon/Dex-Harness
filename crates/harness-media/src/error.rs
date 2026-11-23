@@ -35,6 +35,13 @@ pub enum MediaError {
     #[error("No visual generation backend available ({kind}): {reason}")]
     BackendUnavailable { kind: String, reason: String },
 
+    #[error("BackendNotInstalled ({kind}): required backend '{backend}' is not installed. {install_hint}")]
+    BackendNotInstalled {
+        kind: String,
+        backend: String,
+        install_hint: String,
+    },
+
     #[error("Invalid media parameters: {reason}")]
     InvalidInput { reason: String },
 

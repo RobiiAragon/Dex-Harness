@@ -36,7 +36,7 @@ impl VoiceRecorderHandle {
         output_dir: impl AsRef<Path>,
         event_bus: Option<EventBus>,
     ) -> Result<Self, AudioError> {
-        let dir = output_dir.as_ref().to_path_buf();
+        let dir = harness_core::resolve_safe_path(output_dir);
         tokio::fs::create_dir_all(&dir)
             .await
             .map_err(|e| AudioError::Io {

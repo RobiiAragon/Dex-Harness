@@ -183,16 +183,29 @@ pub async fn generate_3d_mesh(
         });
     }
 
-    let out_dir = PathBuf::from(DEFAULT_3D_DIR);
+    let ts = current_epoch_millis();
+    let task_id = format!("mesh3d_{ts}");
+
+    let (base_url, resolved_label) =
+        resolve_endpoint_and_wake(req.backend, supervisor.as_ref()).await;
+
+    if !is_endpoint_reachable(&base_url).await {
+        return Err(ThreeDError::BackendNotInstalled {
+            kind: "3d".to_string(),
+            backend: format!("{resolved_label} / trellis-3d / hunyuan3d"),
+            install_hint: format!(
+                "No 3D reconstruction sidecar is reachable at '{base_url}'. Install/start `trellis-3d` in Extensions (or Hunyuan3D/TripoSR), or offer procedural 3D modeling with Blender + `mesh_inspect`. Do NOT retry `mesh_generate_3d`."
+            ),
+        });
+    }
+
+    let out_dir = harness_core::resolve_dex_subpath(DEFAULT_3D_DIR);
     tokio::fs::create_dir_all(&out_dir)
         .await
         .map_err(|e| ThreeDError::Io {
             path: out_dir.to_string_lossy().to_string(),
             source: e,
         })?;
-
-    let ts = current_epoch_millis();
-    let task_id = format!("mesh3d_{ts}");
 
     if let Some(bus) = event_bus {
         bus.publish(DexEvent::MediaGenerationProgress {
@@ -201,18 +214,6 @@ pub async fn generate_3d_mesh(
             step: 0,
             total_steps: 3,
             message: format!("Connecting to 3D backend ({})...", req.backend.label()),
-        });
-    }
-
-    let (base_url, resolved_label) =
-        resolve_endpoint_and_wake(req.backend, supervisor.as_ref()).await;
-
-    if !is_endpoint_reachable(&base_url).await {
-        return Err(ThreeDError::BackendUnavailable {
-            kind: "3d".to_string(),
-            reason: format!(
-                "3D sidecar backend '{resolved_label}' is not reachable at '{base_url}'. Start `trellis-3d` (`dex ext install trellis-3d && dex ext start trellis-3d`), launch Hunyuan3D/TripoSR locally, or set `DEX_3D_ENDPOINT`."
-            ),
         });
     }
 

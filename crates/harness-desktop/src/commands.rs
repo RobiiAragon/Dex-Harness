@@ -20,7 +20,8 @@ use harness_docs::{
 };
 use harness_extensions::{
     builtin_catalog, register_enabled_mcp_extensions, ExtensionCategory, ExtensionKind,
-    ExtensionManifest, ExtensionRuntimeInfo, ExtensionSupervisor, DEFAULT_IDLE_TIMEOUT_SECS,
+    ExtensionManifest, ExtensionRuntimeInfo, ExtensionStatus, ExtensionSupervisor,
+    DEFAULT_IDLE_TIMEOUT_SECS,
 };
 use harness_media::{
     generate_image as generate_image_impl, inspect_video as inspect_video_impl,
@@ -29,17 +30,20 @@ use harness_media::{
     ImageGenResult, ImageProcessOptions, ImageProcessResult, VideoMetadata, DEFAULT_WORKFLOWS_DIR,
 };
 use harness_models::{
-    compute_group_key, detect_local_servers as detect_servers_impl, import_local_model,
-    infer_capabilities, parse_quantization, scan_model_dirs, DiscoveredModel, HfClient, HfGgufFile,
-    HfModelSummary, LocalServerInfo, ModelDirsConfig, ModelDownloader, ModelFormat, ModelMetadata,
-    ModelRegistry, ModelSource, OllamaBridge, LM_STUDIO_DEFAULT_URL, MLX_LM_DEFAULT_PORT,
+    build_launch_spec, compute_group_key, detect_local_servers as detect_servers_impl,
+    detect_runtime_binary, detect_runtimes as detect_runtimes_impl, import_local_model,
+    infer_capabilities, install_runtime as install_runtime_impl, parse_quantization,
+    scan_model_dirs, ActiveLoadedModel, DiscoveredModel, HfClient, HfGgufFile, HfModelSummary,
+    LoadModelOutcome, LocalServerInfo, ModelDirsConfig, ModelDownloader, ModelFormat,
+    ModelMetadata, ModelRegistry, ModelSource, OllamaBridge, RuntimeKind, RuntimeStatus,
+    DEX_RUNTIME_SIDECAR_ID, LM_STUDIO_DEFAULT_URL, LOCAL_MODEL_STARTUP_TIMEOUT_SECS,
 };
 use tokio_util::sync::CancellationToken;
 use harness_computer::{
     BrowserClickTool, BrowserExtractDomTool, BrowserNavigateTool, BrowserScreenshotTool,
     BrowserSession, BrowserTypeTool, DesktopKeyboardTool, DesktopMouseTool, DesktopScreenshotTool,
 };
-use harness_core::cookbook::{HardwareProfile, ModelRecommendation};
+use harness_core::cookbook::{HardwareProfile, MemorySnapshot, ModelRecommendation};
 use harness_core::task::{ManageTasksTool, TaskBoard, TaskItem};
 use harness_core::{
     Agent, ContextCompactor, DexEvent, EventBus, ExecutionMode, HookRegistry, LlmProvider,
@@ -54,6 +58,13 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::oneshot;
 
+use crate::projects::{
+    classify_attachment_kind, create_project_on_disk, ensure_project_dex_dirs,
+    inspect_attachment_file, list_project_sessions as list_sessions_impl,
+    load_project_session as load_session_impl, pick_attachment_files_native, pick_folder_native,
+    save_project_session as save_session_impl, AttachmentMeta, ChatSession, ChatSessionSummary,
+    ProjectsResponse, ProjectsStore,
+};
 use crate::state::{DesktopSecurityHook, DesktopState};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,29 +112,38 @@ fn build_provider(
     api_base: Option<&str>,
 ) -> Result<Arc<dyn LlmProvider>, String> {
     match provider_type.to_lowercase().as_str() {
+        "dex-local" | "dex_local" | "dex" | "mlx" | "llamacpp" => {
+            let mut p = OpenAiProvider::lm_studio(model);
+            if let Some(base) = api_base.filter(|s| !s.trim().is_empty()) {
+                p = p.with_base_url(base);
+            } else {
+                p = p.with_base_url("http://127.0.0.1:8088/v1");
+            }
+            Ok(Arc::new(p))
+        }
         "ollama" => {
             let mut p = OllamaProvider::new(model);
-            if let Some(base) = api_base {
+            if let Some(base) = api_base.filter(|s| !s.trim().is_empty()) {
                 p = p.with_base_url(base);
             }
             Ok(Arc::new(p))
         }
         "openai" => {
             let mut p = OpenAiProvider::new(model);
-            if let Some(base) = api_base {
+            if let Some(base) = api_base.filter(|s| !s.trim().is_empty()) {
                 p = p.with_base_url(base);
             }
             Ok(Arc::new(p))
         }
-        "lmstudio" | "lm_studio" | "bionic" | "mlx" => {
+        "lmstudio" | "lm_studio" | "bionic" => {
             let mut p = OpenAiProvider::lm_studio(model);
-            if let Some(base) = api_base {
+            if let Some(base) = api_base.filter(|s| !s.trim().is_empty()) {
                 p = p.with_base_url(base);
             }
             Ok(Arc::new(p))
         }
         other => Err(format!(
-            "Unsupported provider '{}'. Supported: ollama, openai, lmstudio",
+            "Unsupported provider '{}'. Supported: dex-local, ollama, lmstudio, openai",
             other
         )),
     }
@@ -134,28 +154,31 @@ fn build_tools(
     skill_loader: ProgressiveSkillLoader,
     ext_supervisor: Arc<ExtensionSupervisor>,
     event_bus: EventBus,
+    workspace_dir: &Path,
 ) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
 
-    // Surgical Code & File Tools
-    registry.register(Arc::new(ReadFileTool::new()));
-    registry.register(Arc::new(WriteFileTool::new()));
-    registry.register(Arc::new(EditFileTool::new()));
+    // Surgical Code & File Tools (rooted at active project workspace)
+    registry.register(Arc::new(ReadFileTool::new().with_workspace_root(workspace_dir)));
+    registry.register(Arc::new(WriteFileTool::new().with_workspace_root(workspace_dir)));
+    registry.register(Arc::new(EditFileTool::new().with_workspace_root(workspace_dir)));
 
     // Search & Repository Navigation
-    registry.register(Arc::new(FindFilesTool::new()));
-    registry.register(Arc::new(GrepSearchTool::new()));
+    registry.register(Arc::new(FindFilesTool::new().with_workspace_root(workspace_dir)));
+    registry.register(Arc::new(GrepSearchTool::new().with_workspace_root(workspace_dir)));
 
     // Terminal Execution & PTY
-    registry.register(Arc::new(ExecuteShellTool::new()));
-    registry.register(Arc::new(PtyShellTool::new()));
+    registry.register(Arc::new(ExecuteShellTool::new().with_workspace_root(workspace_dir)));
+    registry.register(Arc::new(PtyShellTool::new().with_workspace_root(workspace_dir)));
 
     // Git Branch & Worktree Management
-    registry.register(Arc::new(GitWorktreeTool::new()));
+    registry.register(Arc::new(GitWorktreeTool::new().with_workspace_root(workspace_dir)));
 
     // Project & Task Graph Management
+    let tasks_path = workspace_dir.join(".dex").join("tasks.json");
     registry.register(Arc::new(
-        ManageTasksTool::new(".dex/tasks.json").with_event_bus(event_bus.clone()),
+        ManageTasksTool::new(tasks_path.to_string_lossy().to_string())
+            .with_event_bus(event_bus.clone()),
     ));
 
     // Progressive Skills
@@ -204,7 +227,86 @@ fn build_tools(
     registry
 }
 
+fn model_supports_vision(provider: &str, model: &str) -> bool {
+    let caps = infer_capabilities(model, None, false);
+    if caps.iter().any(|c| c == "Vision") {
+        return true;
+    }
+    let lower = model.to_lowercase();
+    provider.eq_ignore_ascii_case("openai")
+        || lower.contains("gpt-4o")
+        || lower.contains("gpt-4.1")
+        || lower.contains("claude-3")
+        || lower.contains("claude-4")
+        || lower.contains("gemini")
+        || lower.contains("vision")
+        || lower.contains("-vl")
+        || lower.contains("vl-")
+        || lower.contains("llava")
+        || lower.contains("pixtral")
+        || lower.contains("gemma-3")
+        || lower.contains("gemma-4")
+        || lower.contains("qwen3.5")
+}
+
+fn image_mime_for_path(path: &Path) -> Option<&'static str> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "webp" => Some("image/webp"),
+        "gif" => Some("image/gif"),
+        _ => None,
+    }
+}
+
+async fn prepare_attachments_context(
+    attachments: &[String],
+    include_vision_payload: bool,
+) -> (String, Vec<String>) {
+    if attachments.is_empty() {
+        return (String::new(), Vec::new());
+    }
+
+    const MAX_INLINE_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
+    let mut lines = vec!["\n\n[Attached Files]".to_string()];
+    let mut image_urls = Vec::new();
+
+    for raw in attachments {
+        let p = PathBuf::from(raw);
+        let meta = tokio::fs::metadata(&p).await.ok();
+        let size_bytes = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        let size_str = if size_bytes >= 1024 * 1024 {
+            format!("{:.2} MB", size_bytes as f64 / (1024.0 * 1024.0))
+        } else {
+            format!("{:.1} KB", (size_bytes as f64 / 1024.0).max(0.1))
+        };
+        let kind = classify_attachment_kind(&p);
+        let hint = match kind {
+            "image" => "use vision input directly or call `ocr_image` for text extraction",
+            "document" => "call `doc_parse` (activate via `search_tools`) to extract structured Markdown",
+            "mesh_3d" => "call `mesh_inspect` (activate via `search_tools`) to analyze 3D geometry",
+            "audio" => "call `audio_transcribe` (activate via `search_tools`) to transcribe",
+            "video" => "call `video_inspect` (activate via `search_tools`) to inspect streams",
+            _ => "call `read_file` to inspect contents",
+        };
+        lines.push(format!("- `{}` ({}, {}) — {}", p.display(), kind, size_str, hint));
+
+        if include_vision_payload && kind == "image" && size_bytes > 0 && size_bytes <= MAX_INLINE_IMAGE_BYTES {
+            if let Some(mime) = image_mime_for_path(&p) {
+                if let Ok(bytes) = tokio::fs::read(&p).await {
+                    let b64 = to_base64(&bytes);
+                    image_urls.push(format!("data:{mime};base64,{b64}"));
+                }
+            }
+        }
+    }
+
+    (lines.join("\n"), image_urls)
+}
+
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn run_goal(
     app: AppHandle,
     state: State<'_, DesktopState>,
@@ -213,8 +315,10 @@ pub async fn run_goal(
     provider: Option<String>,
     model: Option<String>,
     api_base: Option<String>,
+    attachments: Option<Vec<String>>,
 ) -> Result<String, String> {
-    if goal.trim().is_empty() {
+    let attachment_list = attachments.unwrap_or_default();
+    if goal.trim().is_empty() && attachment_list.is_empty() {
         return Err("Goal cannot be empty".to_string());
     }
 
@@ -228,9 +332,51 @@ pub async fn run_goal(
         *mode_lock = m;
     }
 
-    let provider_name = provider.unwrap_or_else(|| "ollama".to_string());
-    let model_name = model.unwrap_or_else(|| "qwen2.5:7b".to_string());
-    let provider_instance = build_provider(&provider_name, &model_name, api_base.as_deref())?;
+    let mut provider_name = provider.unwrap_or_else(|| "dex-local".to_string());
+    let mut model_name = model.unwrap_or_default();
+    let mut effective_api_base = api_base.filter(|s| !s.trim().is_empty());
+
+    // If using Dex Native Runtime (`dex-local`), resolve live mounted model endpoint & refresh idle timer
+    if provider_name.eq_ignore_ascii_case("dex-local") || provider_name.eq_ignore_ascii_case("dex_local") {
+        let active_opt = state.active_loaded_model.read().await.clone();
+        if let Some(active) = active_opt {
+            state
+                .extension_supervisor
+                .touch_last_used(&active.sidecar_id)
+                .await;
+            if effective_api_base.is_none() {
+                effective_api_base = Some(active.base_url.clone());
+            }
+            if model_name.trim().is_empty() || model_name == active.name || model_name == active.model_id {
+                model_name = if active.runtime == "mlx" {
+                    active.path.clone()
+                } else {
+                    Path::new(&active.path)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or(&active.name)
+                        .to_string()
+                };
+            }
+        } else if effective_api_base.is_none() {
+            return Err(
+                "No local model is loaded in Dex Native Runtime yet. Select a local MLX or GGUF model from the Model Selector or Models Hub."
+                    .to_string(),
+            );
+        }
+    } else if model_name.trim().is_empty() {
+        if provider_name.eq_ignore_ascii_case("ollama") {
+            model_name = "qwen2.5:7b".to_string();
+        } else {
+            provider_name = "openai".to_string();
+            model_name = "gpt-4o".to_string();
+        }
+    }
+
+    let provider_instance =
+        build_provider(&provider_name, &model_name, effective_api_base.as_deref())?;
+
+    let workspace_dir = state.active_workspace_dir.read().await.clone();
 
     // Load progressive skills
     let mut skill_loader = ProgressiveSkillLoader::new();
@@ -242,6 +388,7 @@ pub async fn run_goal(
         skill_loader,
         state.extension_supervisor.clone(),
         state.event_bus.clone(),
+        &workspace_dir,
     );
 
     // Connect enabled external MCP extensions as Deferred tools (discoverable via `search_tools`)
@@ -261,13 +408,28 @@ pub async fn run_goal(
         .with_hooks(hooks)
         .with_compactor(ContextCompactor::new(8000, 10));
 
+    let mut sys_prompt = format!(
+        "You are Dex, a high-performance autonomous AI agent harness in Rust with native macOS, terminal, browser, multimodal, and external MCP extension capabilities.\nActive Project Workspace Root: `{}`\nAll relative file paths, searches, shell commands, git operations, and TaskBoard actions execute rooted inside this workspace.\nUse `search_tools` to discover and activate specialized deferred tools (OCR, document parsing, image/video studio, 3D/Blender/Unity, audio, MCP).",
+        workspace_dir.display()
+    );
     if !skills_summary.is_empty() {
-        let prompt = format!(
-            "You are Dex, a high-performance autonomous AI agent harness in Rust with native macOS, terminal, browser, and external MCP extension capabilities.\nUse `search_tools` to discover and activate specialized external extension tools.\n\nAvailable Skills:\n{}\nUse `load_skill` when relevant.",
+        sys_prompt.push_str(&format!(
+            "\n\nAvailable Skills:\n{}\nUse `load_skill` when relevant.",
             skills_summary
-        );
-        agent = agent.with_system_prompt(prompt);
+        ));
     }
+    agent = agent.with_system_prompt(sys_prompt);
+
+    let vision_enabled = model_supports_vision(&provider_name, &model_name);
+    let (att_block, image_data_urls) =
+        prepare_attachments_context(&attachment_list, vision_enabled).await;
+    let effective_goal = if att_block.is_empty() {
+        goal.clone()
+    } else if goal.trim().is_empty() {
+        format!("Please inspect and analyze the attached files.{}", att_block)
+    } else {
+        format!("{}{}", goal, att_block)
+    };
 
     // Cancellation channel
     let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
@@ -283,12 +445,22 @@ pub async fn run_goal(
 
     let event_bus = state.event_bus.clone();
     let app_handle_for_task = app.clone();
-    let goal_cloned = goal.clone();
 
     tauri::async_runtime::spawn(async move {
-        tracing::info!(goal = %goal_cloned, "Starting autonomous execution in Dex Desktop");
+        tracing::info!(
+            workspace = %workspace_dir.display(),
+            attachments = attachment_list.len(),
+            images = image_data_urls.len(),
+            "Starting autonomous execution in Dex Desktop"
+        );
 
-        let run_future = agent.run(&goal_cloned);
+        let run_future = async {
+            if image_data_urls.is_empty() {
+                agent.run(&effective_goal).await
+            } else {
+                agent.run_with_images(&effective_goal, image_data_urls).await
+            }
+        };
         tokio::pin!(run_future);
 
         tokio::select! {
@@ -384,7 +556,9 @@ pub async fn resolve_approval(
 
 #[tauri::command]
 pub async fn get_cookbook() -> Result<CookbookResponse, String> {
-    let profile = HardwareProfile::detect();
+    let profile = tokio::task::spawn_blocking(HardwareProfile::detect)
+        .await
+        .map_err(|e| format!("Hardware detection task failed: {e}"))?;
     let recommendations = profile.recommend_models();
     let report = profile.generate_report();
 
@@ -396,20 +570,32 @@ pub async fn get_cookbook() -> Result<CookbookResponse, String> {
 }
 
 #[tauri::command]
-pub async fn get_tasks() -> Result<Vec<TaskItem>, String> {
-    let board = TaskBoard::load_or_default(TaskBoard::DEFAULT_PATH).await;
+pub async fn get_live_memory() -> Result<MemorySnapshot, String> {
+    tokio::task::spawn_blocking(HardwareProfile::detect_live_memory)
+        .await
+        .map_err(|e| format!("Live memory probe failed: {e}"))
+}
+
+#[tauri::command]
+pub async fn get_tasks(state: State<'_, DesktopState>) -> Result<Vec<TaskItem>, String> {
+    let ws = state.active_workspace_dir.read().await.clone();
+    let tasks_path = ws.join(".dex").join("tasks.json");
+    let board = TaskBoard::load_or_default(&tasks_path).await;
     Ok(board.tasks)
 }
 
 #[tauri::command]
-pub async fn get_screenshots() -> Result<Vec<ScreenshotEntry>, String> {
-    let dir = Path::new(".dex/screenshots");
-    if !dir.exists() {
+pub async fn get_screenshots(
+    state: State<'_, DesktopState>,
+) -> Result<Vec<ScreenshotEntry>, String> {
+    let ws = state.active_workspace_dir.read().await.clone();
+    let dir = ws.join(".dex").join("screenshots");
+    if !tokio::fs::try_exists(&dir).await.unwrap_or(false) {
         return Ok(Vec::new());
     }
 
     let mut entries = Vec::new();
-    let mut read_dir = tokio::fs::read_dir(dir)
+    let mut read_dir = tokio::fs::read_dir(&dir)
         .await
         .map_err(|e| format!("Failed to read screenshots directory: {}", e))?;
 
@@ -717,75 +903,167 @@ pub async fn detect_local_servers() -> Result<Vec<LocalServerInfo>, String> {
 }
 
 #[tauri::command]
-pub async fn activate_mlx_model(
+pub async fn detect_runtimes() -> Result<Vec<RuntimeStatus>, String> {
+    tokio::task::spawn_blocking(detect_runtimes_impl)
+        .await
+        .map_err(|e| format!("Runtime detection task failed: {e}"))
+}
+
+#[tauri::command]
+pub async fn install_runtime(
     state: State<'_, DesktopState>,
-    model_path: String,
+    runtime: String,
+) -> Result<RuntimeStatus, String> {
+    let kind = RuntimeKind::from_str_loose(&runtime).ok_or_else(|| {
+        format!("Unknown runtime '{runtime}'. Supported: 'mlx', 'llamacpp'.")
+    })?;
+    install_runtime_impl(kind, Some(&state.event_bus))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_active_loaded_model(
+    state: State<'_, DesktopState>,
+) -> Result<Option<ActiveLoadedModel>, String> {
+    let current = state.active_loaded_model.read().await.clone();
+    if let Some(ref model) = current {
+        let status = state
+            .extension_supervisor
+            .status_of(&model.sidecar_id)
+            .await;
+        if status != ExtensionStatus::Running {
+            let mut lock = state.active_loaded_model.write().await;
+            *lock = None;
+            return Ok(None);
+        }
+    }
+    Ok(current)
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn load_local_model(
+    state: State<'_, DesktopState>,
+    model_id: String,
     model_name: String,
-) -> Result<ActivatedModelResponse, String> {
-    // 1. If LM Studio / Bionic (:1234) is already serving a matching model, attach directly!
-    let servers = detect_servers_impl().await;
-    if let Some(lm) = servers.iter().find(|s| s.id == "lmstudio" && s.reachable) {
-        let needle = model_name.to_lowercase();
-        let path_leaf = Path::new(&model_path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_lowercase();
-        if let Some(matched) = lm.loaded_models.iter().find(|loaded| {
-            let l = loaded.to_lowercase();
-            l.contains(&needle) || (!path_leaf.is_empty() && l.contains(&path_leaf))
-        }) {
-            return Ok(ActivatedModelResponse {
-                provider: "lmstudio".to_string(),
-                model: matched.clone(),
-                api_base: Some(LM_STUDIO_DEFAULT_URL.to_string()),
-                status_message: format!(
-                    "Connected to LM Studio ({LM_STUDIO_DEFAULT_URL}) serving '{matched}'"
-                ),
-                sidecar_id: None,
-            });
+    format: String,
+    model_path: String,
+    quantization: Option<String>,
+    size_bytes: Option<u64>,
+) -> Result<LoadModelOutcome, String> {
+    let fmt_lower = format.trim().to_lowercase();
+    let kind = match fmt_lower.as_str() {
+        "mlx" => RuntimeKind::Mlx,
+        "gguf" => RuntimeKind::LlamaCpp,
+        other => {
+            return Err(format!(
+                "Format '{other}' cannot be launched directly by Dex Native Runtime. Supported: mlx, gguf."
+            ));
+        }
+    };
+
+    // Fast path: if exact same local model is already loaded and running, reuse immediately
+    {
+        let current = state.active_loaded_model.read().await.clone();
+        if let Some(active) = current {
+            if active.path == model_path
+                && state
+                    .extension_supervisor
+                    .status_of(&active.sidecar_id)
+                    .await
+                    == ExtensionStatus::Running
+            {
+                state
+                    .extension_supervisor
+                    .touch_last_used(&active.sidecar_id)
+                    .await;
+                return Ok(LoadModelOutcome::Loaded {
+                    message: format!(
+                        "Model '{}' is already loaded in Dex Native Runtime ({})",
+                        active.name, active.base_url
+                    ),
+                    model: active,
+                });
+            }
         }
     }
 
-    // 2. Otherwise register & launch on-demand `mlx_lm.server` via ExtensionSupervisor (with idle auto-unload)
+    // 1. Detect autonomous runtime binary (without touching system Python or requiring external apps)
+    let bin_opt = tokio::task::spawn_blocking(move || detect_runtime_binary(kind))
+        .await
+        .map_err(|e| format!("Runtime lookup failed: {e}"))?;
+
+    let bin_path = match bin_opt {
+        Some(p) => p,
+        None => {
+            return Ok(LoadModelOutcome::RuntimeMissing {
+                runtime: kind.as_id().to_string(),
+                install_hint: kind.install_hint().to_string(),
+                message: format!(
+                    "{} is not installed yet. Click 'Install {} (1-click)' to set it up automatically.",
+                    kind.display_name(),
+                    if kind == RuntimeKind::Mlx {
+                        "MLX Runtime"
+                    } else {
+                        "llama.cpp"
+                    }
+                ),
+            });
+        }
+    };
+
+    // 2. Verify model path exists on disk
     if !tokio::fs::try_exists(Path::new(&model_path))
         .await
         .unwrap_or(false)
     {
-        return Err(format!("MLX model folder does not exist: '{model_path}'"));
+        return Err(format!("Local model path does not exist: '{model_path}'"));
     }
 
-    let port = MLX_LM_DEFAULT_PORT;
-    let sidecar_id = "mlx-lm-active".to_string();
-    let base_url = format!("http://127.0.0.1:{port}/v1");
+    let spec = build_launch_spec(&fmt_lower, &model_path, &bin_path).map_err(|e| e.to_string())?;
+    let sidecar_id = DEX_RUNTIME_SIDECAR_ID.to_string();
 
-    // Stop previous MLX-LM server if another model was mounted
+    // 3. Unload any previous local model first to free Unified RAM cleanly
     let _ = state.extension_supervisor.stop_extension(&sidecar_id).await;
+    let _ = state.extension_supervisor.stop_extension("mlx-lm-active").await;
+    {
+        let mut lock = state.active_loaded_model.write().await;
+        *lock = None;
+    }
+
+    let bytes = size_bytes.unwrap_or(0);
+    let est_ram_mb = if bytes > 0 {
+        ((bytes as f64 / (1024.0 * 1024.0)) * 1.15).round() as u64
+    } else {
+        8192
+    };
 
     let manifest = ExtensionManifest {
         id: sidecar_id.clone(),
-        name: format!("MLX-LM ({model_name})"),
+        name: format!("Dex Native Runtime ({model_name})"),
         category: ExtensionCategory::Custom,
-        description: format!("On-demand Apple Silicon MLX inference server for {model_name}"),
+        description: format!(
+            "Autonomous local {} inference server for {}",
+            fmt_lower.to_uppercase(),
+            model_name
+        ),
         kind: ExtensionKind::LocalSidecar {
-            command: "python3".to_string(),
-            args: vec![
-                "-m".to_string(),
-                "mlx_lm.server".to_string(),
-                "--model".to_string(),
-                model_path.clone(),
-                "--port".to_string(),
-                port.to_string(),
-            ],
-            port,
-            healthcheck_url: format!("{base_url}/models"),
+            command: spec.command.clone(),
+            args: spec.args.clone(),
+            port: spec.port,
+            healthcheck_url: spec.healthcheck_url.clone(),
             env: HashMap::new(),
         },
-        estimated_ram_mb: 8192,
+        estimated_ram_mb: est_ram_mb,
         idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
-        install_hint: "Install Apple MLX LM server: `pip install mlx-lm` or serve the model in LM Studio on port 1234.".to_string(),
+        install_hint: kind.install_hint().to_string(),
         enabled: true,
-        tags: vec!["mlx".to_string(), "llm".to_string(), "apple-silicon".to_string()],
+        tags: vec![
+            "dex-local".to_string(),
+            fmt_lower.clone(),
+            "llm".to_string(),
+        ],
     };
 
     state
@@ -794,20 +1072,136 @@ pub async fn activate_mlx_model(
         .await
         .map_err(|e| e.to_string())?;
 
-    match state.extension_supervisor.start_extension(&sidecar_id).await {
-        Ok(_) => Ok(ActivatedModelResponse {
-            provider: "openai".to_string(),
-            model: model_path,
-            api_base: Some(base_url.clone()),
-            status_message: format!(
-                "Started on-demand mlx_lm.server on {base_url} (auto-unloads after {}s idle)",
-                DEFAULT_IDLE_TIMEOUT_SECS
-            ),
-            sidecar_id: Some(sidecar_id),
+    let _ = state.event_bus.publish(DexEvent::RuntimeProgress {
+        runtime: sidecar_id.clone(),
+        stage: "loading".to_string(),
+        message: format!(
+            "Loading {} ({}) into Unified Memory (timeout {}s)...",
+            model_name,
+            fmt_lower.to_uppercase(),
+            LOCAL_MODEL_STARTUP_TIMEOUT_SECS
+        ),
+        done: false,
+        is_error: false,
+    });
+
+    let rt_info = state
+        .extension_supervisor
+        .start_extension_wait_ready(
+            &sidecar_id,
+            Duration::from_secs(LOCAL_MODEL_STARTUP_TIMEOUT_SECS),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let active = ActiveLoadedModel {
+        model_id,
+        name: model_name.clone(),
+        format: fmt_lower,
+        quantization,
+        path: model_path,
+        runtime: kind.as_id().to_string(),
+        base_url: spec.base_url.clone(),
+        port: spec.port,
+        sidecar_id,
+        size_bytes: bytes,
+        pid: rt_info.pid,
+    };
+
+    {
+        let mut lock = state.active_loaded_model.write().await;
+        *lock = Some(active.clone());
+    }
+
+    Ok(LoadModelOutcome::Loaded {
+        message: format!(
+            "Loaded '{}' via {} on {} (auto-unloads after {}s idle)",
+            model_name,
+            kind.display_name(),
+            spec.base_url,
+            DEFAULT_IDLE_TIMEOUT_SECS
+        ),
+        model: active,
+    })
+}
+
+#[tauri::command]
+pub async fn unload_local_model(state: State<'_, DesktopState>) -> Result<String, String> {
+    let prev = {
+        let mut lock = state.active_loaded_model.write().await;
+        lock.take()
+    };
+    let _ = state
+        .extension_supervisor
+        .stop_extension(DEX_RUNTIME_SIDECAR_ID)
+        .await;
+    let _ = state
+        .extension_supervisor
+        .stop_extension("mlx-lm-active")
+        .await;
+
+    if let Some(model) = prev {
+        Ok(format!(
+            "Unloaded '{}' and reclaimed Unified Memory",
+            model.name
+        ))
+    } else {
+        Ok("No local model was loaded in Dex Native Runtime".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn activate_mlx_model(
+    state: State<'_, DesktopState>,
+    model_path: String,
+    model_name: String,
+) -> Result<ActivatedModelResponse, String> {
+    // Prefer autonomous Dex Native MLX Runtime first; fall back to LM Studio (:1234) only if already serving it
+    match load_local_model(
+        state,
+        format!("mlx:{model_name}"),
+        model_name.clone(),
+        "mlx".to_string(),
+        model_path.clone(),
+        Some(parse_quantization(&model_path)).filter(|q| q != "UNKNOWN"),
+        None,
+    )
+    .await?
+    {
+        LoadModelOutcome::Loaded { model, message } => Ok(ActivatedModelResponse {
+            provider: "dex-local".to_string(),
+            model: model.path,
+            api_base: Some(model.base_url),
+            status_message: message,
+            sidecar_id: Some(model.sidecar_id),
         }),
-        Err(e) => Err(format!(
-            "Could not launch `python3 -m mlx_lm.server` ({e}). Install `mlx-lm` (`pip install mlx-lm`) or load '{model_name}' in LM Studio (:1234)."
-        )),
+        LoadModelOutcome::RuntimeMissing {
+            install_hint,
+            message,
+            ..
+        } => {
+            // Check if LM Studio (:1234) already happens to be serving this exact model
+            let servers = detect_servers_impl().await;
+            if let Some(lm) = servers.iter().find(|s| s.id == "lmstudio" && s.reachable) {
+                let needle = model_name.to_lowercase();
+                if let Some(matched) = lm
+                    .loaded_models
+                    .iter()
+                    .find(|loaded| loaded.to_lowercase().contains(&needle))
+                {
+                    return Ok(ActivatedModelResponse {
+                        provider: "lmstudio".to_string(),
+                        model: matched.clone(),
+                        api_base: Some(LM_STUDIO_DEFAULT_URL.to_string()),
+                        status_message: format!(
+                            "Connected to LM Studio ({LM_STUDIO_DEFAULT_URL}) serving '{matched}'"
+                        ),
+                        sidecar_id: None,
+                    });
+                }
+            }
+            Err(format!("{message} {install_hint}"))
+        }
     }
 }
 
@@ -1605,6 +1999,163 @@ pub async fn export_model_to_unity(
 #[tauri::command]
 pub async fn check_blender_status() -> Result<BlenderStatus, String> {
     Ok(check_blender_impl().await)
+}
+
+// =========================================================================
+// Phase 12: Projects / Workspaces, Sessions & File Attachments
+// =========================================================================
+
+async fn build_projects_response(state: &DesktopState, store: &ProjectsStore) -> ProjectsResponse {
+    let active_ws = state.active_workspace_dir.read().await.clone();
+    ProjectsResponse {
+        active_project_id: store.active_project_id.clone(),
+        active_workspace_dir: active_ws.to_string_lossy().to_string(),
+        projects: store.projects.clone(),
+    }
+}
+
+#[tauri::command]
+pub async fn list_projects(state: State<'_, DesktopState>) -> Result<ProjectsResponse, String> {
+    let store = ProjectsStore::load_or_default().await;
+    if let Some(active) = store.active_project() {
+        let active_path = PathBuf::from(&active.path);
+        if tokio::fs::try_exists(&active_path).await.unwrap_or(false) {
+            let mut ws = state.active_workspace_dir.write().await;
+            *ws = active_path;
+        }
+    }
+    Ok(build_projects_response(&state, &store).await)
+}
+
+#[tauri::command]
+pub async fn create_project(
+    state: State<'_, DesktopState>,
+    name: String,
+    parent_dir: Option<String>,
+    init_git: Option<bool>,
+) -> Result<ProjectsResponse, String> {
+    let (clean_name, project_path) =
+        create_project_on_disk(&name, parent_dir.as_deref(), init_git.unwrap_or(true)).await?;
+    let mut store = ProjectsStore::load_or_default().await;
+    store.upsert_and_activate(clean_name, project_path.clone());
+    store.save().await?;
+
+    {
+        let mut ws = state.active_workspace_dir.write().await;
+        *ws = project_path;
+    }
+
+    Ok(build_projects_response(&state, &store).await)
+}
+
+#[tauri::command]
+pub async fn open_project_dialog(
+    state: State<'_, DesktopState>,
+) -> Result<Option<ProjectsResponse>, String> {
+    let picked = match pick_folder_native().await? {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+    ensure_project_dex_dirs(&picked).await?;
+    let name = picked
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("Workspace")
+        .to_string();
+
+    let mut store = ProjectsStore::load_or_default().await;
+    store.upsert_and_activate(name, picked.clone());
+    store.save().await?;
+
+    {
+        let mut ws = state.active_workspace_dir.write().await;
+        *ws = picked;
+    }
+
+    Ok(Some(build_projects_response(&state, &store).await))
+}
+
+#[tauri::command]
+pub async fn select_project(
+    state: State<'_, DesktopState>,
+    id: String,
+) -> Result<ProjectsResponse, String> {
+    let mut store = ProjectsStore::load_or_default().await;
+    let entry = store
+        .select_by_id(&id)
+        .ok_or_else(|| format!("Project '{id}' not found"))?;
+    let proj_path = PathBuf::from(&entry.path);
+    ensure_project_dex_dirs(&proj_path).await?;
+    store.save().await?;
+
+    {
+        let mut ws = state.active_workspace_dir.write().await;
+        *ws = proj_path;
+    }
+
+    Ok(build_projects_response(&state, &store).await)
+}
+
+#[tauri::command]
+pub async fn remove_project(
+    state: State<'_, DesktopState>,
+    id: String,
+) -> Result<ProjectsResponse, String> {
+    let mut store = ProjectsStore::load_or_default().await;
+    store.remove_by_id(&id);
+    store.save().await?;
+
+    if let Some(active) = store.active_project() {
+        let p = PathBuf::from(&active.path);
+        if tokio::fs::try_exists(&p).await.unwrap_or(false) {
+            let mut ws = state.active_workspace_dir.write().await;
+            *ws = p;
+        }
+    }
+
+    Ok(build_projects_response(&state, &store).await)
+}
+
+#[tauri::command]
+pub async fn pick_attachment_files() -> Result<Vec<AttachmentMeta>, String> {
+    pick_attachment_files_native().await
+}
+
+#[tauri::command]
+pub async fn inspect_attachment_paths(paths: Vec<String>) -> Result<Vec<AttachmentMeta>, String> {
+    let mut results = Vec::new();
+    for raw in paths {
+        if let Ok(meta) = inspect_attachment_file(&raw).await {
+            results.push(meta);
+        }
+    }
+    Ok(results)
+}
+
+#[tauri::command]
+pub async fn list_project_sessions(
+    state: State<'_, DesktopState>,
+) -> Result<Vec<ChatSessionSummary>, String> {
+    let ws = state.active_workspace_dir.read().await.clone();
+    list_sessions_impl(&ws).await
+}
+
+#[tauri::command]
+pub async fn save_project_session(
+    state: State<'_, DesktopState>,
+    session: ChatSession,
+) -> Result<ChatSession, String> {
+    let ws = state.active_workspace_dir.read().await.clone();
+    save_session_impl(&ws, session).await
+}
+
+#[tauri::command]
+pub async fn load_project_session(
+    state: State<'_, DesktopState>,
+    session_id: String,
+) -> Result<ChatSession, String> {
+    let ws = state.active_workspace_dir.read().await.clone();
+    load_session_impl(&ws, &session_id).await
 }
 
 #[cfg(test)]

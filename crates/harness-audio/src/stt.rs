@@ -1,5 +1,5 @@
-use std::path::Path;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use reqwest::multipart::{Form, Part};
 use serde::{Deserialize, Serialize};
@@ -9,6 +9,80 @@ use tracing::{debug, info};
 use crate::error::AudioError;
 
 const STT_TIMEOUT_SECS: u64 = 180;
+const SWIFT_STT_COMPILE_TIMEOUT_SECS: u64 = 60;
+
+#[cfg(target_os = "macos")]
+const APPLE_SPEECH_SWIFT_SOURCE: &str = r#"
+import Foundation
+import Speech
+
+guard CommandLine.arguments.count >= 2 else {
+    fputs("Usage: dex-macos-stt <audio-file>\n", stderr)
+    exit(2)
+}
+
+let audioURL = URL(fileURLWithPath: CommandLine.arguments[1])
+let sem = DispatchSemaphore(value: 0)
+var authStatus: SFSpeechRecognizerAuthorizationStatus = SFSpeechRecognizer.authorizationStatus()
+
+if authStatus == .notDetermined {
+    SFSpeechRecognizer.requestAuthorization { status in
+        authStatus = status
+        sem.signal()
+    }
+    _ = sem.wait(timeout: .now() + 15)
+}
+
+guard authStatus == .authorized else {
+    fputs("PERMISSION_DENIED: Grant Speech Recognition access in System Settings -> Privacy & Security -> Speech Recognition, or install mlx-whisper (1-click in Dex).\n", stderr)
+    exit(3)
+}
+
+let locale = Locale.current
+guard let recognizer = SFSpeechRecognizer(locale: locale) ?? SFSpeechRecognizer(locale: Locale(identifier: "en-US")), recognizer.isAvailable else {
+    fputs("RECOGNIZER_UNAVAILABLE: Apple Speech Recognizer is not available for current locale. Install mlx-whisper (1-click in Dex).\n", stderr)
+    exit(4)
+}
+
+let request = SFSpeechURLRecognitionRequest(url: audioURL)
+request.shouldReportPartialResults = false
+if recognizer.supportsOnDeviceRecognition {
+    request.requiresOnDeviceRecognition = true
+}
+
+let doneSem = DispatchSemaphore(value: 0)
+var finalText = ""
+var errMessage: String? = nil
+
+let task = recognizer.recognitionTask(with: request) { result, error in
+    if let r = result {
+        finalText = r.bestTranscription.formattedString
+        if r.isFinal {
+            doneSem.signal()
+        }
+    }
+    if let e = error {
+        if finalText.isEmpty {
+            errMessage = e.localizedDescription
+        }
+        doneSem.signal()
+    }
+}
+
+let waitResult = doneSem.wait(timeout: .now() + 45)
+task.cancel()
+
+if waitResult == .timedOut {
+    fputs("TIMEOUT: Apple Speech recognition timed out.\n", stderr)
+    exit(5)
+}
+if let err = errMessage, finalText.isEmpty {
+    fputs("SPEECH_ERROR: \(err)\n", stderr)
+    exit(6)
+}
+
+print(finalText)
+"#;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TranscriptSegment {
@@ -231,17 +305,23 @@ pub struct CliWhisperBackend {
 
 impl CliWhisperBackend {
     pub fn mlx_whisper() -> Self {
+        let resolved = harness_core::find_executable_in_enriched_path("mlx_whisper")
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| "mlx_whisper".to_string());
         Self {
             kind: WhisperCliKind::MlxWhisper,
-            binary: "mlx_whisper".to_string(),
+            binary: resolved,
             model_path: std::env::var("DEX_MLX_WHISPER_MODEL").ok(),
         }
     }
 
     pub fn whisper_cpp() -> Self {
+        let resolved = harness_core::find_executable_in_enriched_path("whisper-cli")
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| "whisper-cli".to_string());
         Self {
             kind: WhisperCliKind::WhisperCpp,
-            binary: "whisper-cli".to_string(),
+            binary: resolved,
             model_path: std::env::var("DEX_WHISPER_MODEL").ok(),
         }
     }
@@ -262,14 +342,25 @@ impl SttBackend for CliWhisperBackend {
         include_timestamps: bool,
     ) -> Result<TranscriptionResult, AudioError> {
         let mut cmd = Command::new(&self.binary);
+        harness_core::apply_enriched_path(&mut cmd);
+
+        let mut mlx_tmp_out: Option<PathBuf> = None;
 
         match self.kind {
             WhisperCliKind::MlxWhisper => {
+                let ts = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0);
+                let out_dir = harness_core::resolve_dex_subpath("tmp/stt").join(format!("mlx_{ts}"));
+                let _ = tokio::fs::create_dir_all(&out_dir).await;
                 cmd.arg(audio_path);
                 if let Some(ref model) = self.model_path {
                     cmd.args(["--model", model]);
                 }
-                cmd.args(["--output-format", "txt"]);
+                cmd.args(["--output-format", "txt", "--output-dir"]);
+                cmd.arg(&out_dir);
+                mlx_tmp_out = Some(out_dir);
             }
             WhisperCliKind::WhisperCpp => {
                 if let Some(ref model) = self.model_path {
@@ -297,6 +388,9 @@ impl SttBackend for CliWhisperBackend {
             })?;
 
         if !output.status.success() {
+            if let Some(ref dir) = mlx_tmp_out {
+                let _ = tokio::fs::remove_dir_all(dir).await;
+            }
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
             return Err(AudioError::Subprocess {
                 command: self.binary.clone(),
@@ -304,9 +398,136 @@ impl SttBackend for CliWhisperBackend {
             });
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let mut text = String::new();
+        if let Some(ref dir) = mlx_tmp_out {
+            if let Some(stem) = audio_path.file_stem().and_then(|s| s.to_str()) {
+                let txt_file = dir.join(format!("{stem}.txt"));
+                if let Ok(content) = tokio::fs::read_to_string(&txt_file).await {
+                    text = content.trim().to_string();
+                }
+            }
+            let _ = tokio::fs::remove_dir_all(dir).await;
+        }
+        if text.is_empty() {
+            text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        }
+
         Ok(TranscriptionResult {
-            text: stdout,
+            text,
+            language: None,
+            duration_secs: None,
+            segments: Vec::new(),
+            backend: self.name().to_string(),
+        })
+    }
+}
+
+/// Native macOS Speech-to-Text fallback built on Apple's `Speech` (`SFSpeechRecognizer`) framework.
+#[cfg(target_os = "macos")]
+pub struct AppleSpeechSttBackend;
+
+#[cfg(target_os = "macos")]
+async fn ensure_apple_stt_binary() -> Result<PathBuf, AudioError> {
+    let bin_dir = harness_core::home_dex_dir().join("bin");
+    let bin_path = bin_dir.join("dex-macos-stt");
+    if tokio::fs::try_exists(&bin_path).await.unwrap_or(false) {
+        return Ok(bin_path);
+    }
+
+    tokio::fs::create_dir_all(&bin_dir)
+        .await
+        .map_err(|e| AudioError::Io {
+            path: bin_dir.to_string_lossy().to_string(),
+            source: e,
+        })?;
+
+    let src_path = bin_dir.join("dex_macos_stt.swift");
+    tokio::fs::write(&src_path, APPLE_SPEECH_SWIFT_SOURCE)
+        .await
+        .map_err(|e| AudioError::Io {
+            path: src_path.to_string_lossy().to_string(),
+            source: e,
+        })?;
+
+    info!(dest = ?bin_path, "Compiling native Apple Speech STT helper binary once via swiftc");
+    let mut cmd = Command::new("swiftc");
+    harness_core::apply_enriched_path(&mut cmd);
+    let output = tokio::time::timeout(
+        Duration::from_secs(SWIFT_STT_COMPILE_TIMEOUT_SECS),
+        cmd.arg("-O")
+            .arg(&src_path)
+            .arg("-o")
+            .arg(&bin_path)
+            .output(),
+    )
+    .await
+    .map_err(|_| AudioError::Timeout {
+        operation: "swiftc apple speech compilation".to_string(),
+        timeout_secs: SWIFT_STT_COMPILE_TIMEOUT_SECS,
+    })?
+    .map_err(|e| AudioError::SttUnavailable {
+        reason: format!(
+            "Could not compile native Apple Speech helper (`swiftc`: {e}). Install `mlx-whisper` (1-click in Dex -> Models Hub)."
+        ),
+    })?;
+
+    let _ = tokio::fs::remove_file(&src_path).await;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(AudioError::SttUnavailable {
+            reason: format!(
+                "Native Apple Speech helper compilation failed ({stderr}). Install `mlx-whisper` (1-click in Dex)."
+            ),
+        });
+    }
+
+    Ok(bin_path)
+}
+
+#[cfg(target_os = "macos")]
+#[async_trait]
+impl SttBackend for AppleSpeechSttBackend {
+    fn name(&self) -> &str {
+        "apple-speech"
+    }
+
+    async fn transcribe(
+        &self,
+        audio_path: &Path,
+        _include_timestamps: bool,
+    ) -> Result<TranscriptionResult, AudioError> {
+        let bin = ensure_apple_stt_binary().await?;
+        let mut cmd = Command::new(&bin);
+        harness_core::apply_enriched_path(&mut cmd);
+        let output = tokio::time::timeout(
+            Duration::from_secs(60),
+            cmd.arg(audio_path).output(),
+        )
+        .await
+        .map_err(|_| AudioError::Timeout {
+            operation: "apple speech transcription".to_string(),
+            timeout_secs: 60,
+        })?
+        .map_err(|e| AudioError::Subprocess {
+            command: bin.to_string_lossy().to_string(),
+            message: e.to_string(),
+        })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(AudioError::SttUnavailable {
+                reason: if stderr.is_empty() {
+                    "Apple Speech Recognizer failed. Grant Speech Recognition permission in System Settings or install `mlx-whisper` (1-click in Audio & Docs / Models Hub).".to_string()
+                } else {
+                    stderr
+                },
+            });
+        }
+
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Ok(TranscriptionResult {
+            text,
             language: None,
             duration_secs: None,
             segments: Vec::new(),
@@ -351,7 +572,7 @@ impl AutoSttEngine {
             }
         }
 
-        // 3. Local CLI binaries (`mlx_whisper` or `whisper-cli`)
+        // 3. Local CLI binaries (`mlx_whisper` in ~/.dex/runtimes/mlx-venv/bin or $PATH, then `whisper-cli`)
         if is_binary_in_path("mlx_whisper").await {
             return Ok(Box::new(CliWhisperBackend::mlx_whisper()));
         }
@@ -370,8 +591,18 @@ impl AutoSttEngine {
             }
         }
 
+        // 5. Native macOS Speech framework (`SFSpeechRecognizer`) zero-download fallback
+        #[cfg(target_os = "macos")]
+        if harness_core::find_executable_in_enriched_path("swiftc").is_some()
+            || tokio::fs::try_exists(harness_core::home_dex_dir().join("bin/dex-macos-stt"))
+                .await
+                .unwrap_or(false)
+        {
+            return Ok(Box::new(AppleSpeechSttBackend));
+        }
+
         Err(AudioError::SttUnavailable {
-            reason: "No local or remote Whisper STT backend found. Start `whisper-server`/`mlx-audio` (or set `DEX_WHISPER_URL`), install `mlx_whisper` (`pip install mlx-whisper`) or `whisper-cli` (`brew install whisper-cpp`), or set `OPENAI_API_KEY`.".to_string(),
+            reason: "No local STT backend found. Click 'Install Voice STT (mlx-whisper)' in Audio & Docs / Models Hub, install `whisper-cli` (`brew install whisper-cpp`), or set `OPENAI_API_KEY`.".to_string(),
         })
     }
 
@@ -391,11 +622,7 @@ impl AutoSttEngine {
 }
 
 async fn is_binary_in_path(binary: &str) -> bool {
-    let probe = Command::new("which").arg(binary).output();
-    match tokio::time::timeout(Duration::from_secs(2), probe).await {
-        Ok(Ok(out)) => out.status.success(),
-        _ => false,
-    }
+    harness_core::find_executable_in_enriched_path(binary).is_some()
 }
 
 #[cfg(test)]

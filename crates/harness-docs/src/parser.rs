@@ -33,14 +33,8 @@ pub async fn parse_document(
     supervisor: Option<Arc<ExtensionSupervisor>>,
     event_bus: Option<&EventBus>,
 ) -> Result<DocumentParseResult, DocsError> {
-    parse_document_with_tmp_dir(
-        path,
-        max_inline_chars,
-        Path::new(DEFAULT_DOCS_TMP_DIR),
-        supervisor,
-        event_bus,
-    )
-    .await
+    let tmp_dir = harness_core::resolve_dex_subpath(DEFAULT_DOCS_TMP_DIR);
+    parse_document_with_tmp_dir(path, max_inline_chars, &tmp_dir, supervisor, event_bus).await
 }
 
 pub async fn parse_document_with_tmp_dir(

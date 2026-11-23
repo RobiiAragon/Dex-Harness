@@ -3,6 +3,7 @@ use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use std::io::Read;
+use std::path::PathBuf;
 use std::time::Duration;
 use tracing::instrument;
 
@@ -22,13 +23,20 @@ pub struct PtyShellArgs {
 }
 
 #[derive(Default, Clone)]
-pub struct PtyShellTool;
+pub struct PtyShellTool {
+    workspace_root: Option<PathBuf>,
+}
 
 impl PtyShellTool {
     pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
     pub fn new() -> Self {
-        Self
+        Self { workspace_root: None }
+    }
+
+    pub fn with_workspace_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.workspace_root = Some(root.into());
+        self
     }
 }
 
@@ -69,6 +77,7 @@ impl Tool for PtyShellTool {
         let rows = args.rows.unwrap_or(24);
         let cols = args.cols.unwrap_or(80);
         let cmd_str = args.command.clone();
+        let workspace_root = self.workspace_root.clone();
 
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
             let pty_system = native_pty_system();
@@ -89,11 +98,16 @@ impl Tool for PtyShellTool {
             };
 
             #[cfg(not(windows))]
-            let cmd = {
+            let mut cmd = {
                 let mut c = CommandBuilder::new("sh");
                 c.args(["-c", &cmd_str]);
                 c
             };
+
+            if let Some(ref root) = workspace_root {
+                cmd.cwd(root);
+            }
+            cmd.env("PATH", harness_core::enriched_path_env());
 
             let mut child = pair
                 .slave

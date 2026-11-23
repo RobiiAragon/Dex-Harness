@@ -55,6 +55,8 @@ pub struct ImageGenRequest {
     pub backend: ImageBackend,
     pub workflow: Option<String>,
     pub model: Option<String>,
+    #[serde(default)]
+    pub output_path: Option<PathBuf>,
 }
 
 impl Default for ImageGenRequest {
@@ -69,6 +71,7 @@ impl Default for ImageGenRequest {
             backend: ImageBackend::Auto,
             workflow: None,
             model: None,
+            output_path: None,
         }
     }
 }
@@ -122,15 +125,7 @@ async fn is_http_reachable(url: &str) -> bool {
 }
 
 async fn is_binary_in_path(binary: &str) -> bool {
-    match tokio::time::timeout(
-        Duration::from_secs(2),
-        Command::new("which").arg(binary).output(),
-    )
-    .await
-    {
-        Ok(Ok(out)) => out.status.success(),
-        _ => false,
-    }
+    harness_core::find_executable_in_enriched_path(binary).is_some()
 }
 
 /// Generates an image using Apple Silicon MLX (`mlx-gen` / `mflux`), ComfyUI, or an OpenAI-compatible HTTP endpoint.
@@ -146,17 +141,50 @@ pub async fn generate_image(
         });
     }
 
-    let out_dir = PathBuf::from(DEFAULT_IMAGES_DIR);
+    // Resolve destination directory safely: honor caller-provided absolute `output_path` without ever touching `/`
+    let explicit_dest = req
+        .output_path
+        .as_ref()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(harness_core::resolve_safe_path);
+    let out_dir = match explicit_dest.as_ref().and_then(|p| p.parent()) {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => harness_core::resolve_dex_subpath(DEFAULT_IMAGES_DIR),
+    };
+
+    let ts = current_epoch_millis();
+    let seed = req.seed.unwrap_or((ts % 2_147_483_647) as u64);
+    let task_id = format!("img_{ts}");
+
+    // Pre-flight check BEFORE creating output directories when in Auto mode so missing backends fail fast cleanly
+    if req.backend == ImageBackend::Auto {
+        wake_extension_if_enabled(supervisor.as_ref(), "mlx-gen").await;
+        let mlx_url = mlx_base_url();
+        let has_mlx = is_http_reachable(&format!("{mlx_url}/health")).await
+            || is_binary_in_path("mflux-generate").await;
+        let has_comfy = if has_mlx {
+            false
+        } else {
+            wake_extension_if_enabled(supervisor.as_ref(), "comfyui-mcp").await;
+            ComfyUiClient::default().is_reachable().await
+        };
+        let has_http = resolve_http_image_endpoint().is_some();
+
+        if !has_mlx && !has_comfy && !has_http {
+            return Err(MediaError::BackendNotInstalled {
+                kind: "image".to_string(),
+                backend: "mflux / comfyui-mcp".to_string(),
+                install_hint: "Install `mflux` (1-click in Models Hub -> Runtimes), start ComfyUI (:8188), or configure `DEX_IMAGE_URL` / `OPENAI_API_KEY`. Do NOT retry `image_generate` in a loop.".to_string(),
+            });
+        }
+    }
+
     tokio::fs::create_dir_all(&out_dir)
         .await
         .map_err(|e| MediaError::Io {
             path: out_dir.to_string_lossy().to_string(),
             source: e,
         })?;
-
-    let ts = current_epoch_millis();
-    let seed = req.seed.unwrap_or((ts % 2_147_483_647) as u64);
-    let task_id = format!("img_{ts}");
 
     if let Some(bus) = event_bus {
         bus.publish(DexEvent::MediaGenerationProgress {
@@ -168,7 +196,7 @@ pub async fn generate_image(
         });
     }
 
-    let result = match req.backend {
+    let mut result = match req.backend {
         ImageBackend::Mlx => {
             generate_via_mlx(&req, &prompt, seed, &out_dir, &task_id, supervisor.as_ref(), event_bus)
                 .await?
@@ -187,9 +215,10 @@ pub async fn generate_image(
         }
         ImageBackend::Http => {
             let endpoint = resolve_http_image_endpoint().ok_or_else(|| {
-                MediaError::BackendUnavailable {
+                MediaError::BackendNotInstalled {
                     kind: "image".to_string(),
-                    reason: "No HTTP image endpoint configured. Set `DEX_IMAGE_URL` or `OPENAI_API_KEY`.".to_string(),
+                    backend: "http-images".to_string(),
+                    install_hint: "Set `DEX_IMAGE_URL` or `OPENAI_API_KEY`, or install `mflux` (1-click in Models Hub).".to_string(),
                 }
             })?;
             generate_via_openai_http(
@@ -205,8 +234,6 @@ pub async fn generate_image(
             .await?
         }
         ImageBackend::Auto => {
-            // 1. MLX sidecar or mflux CLI
-            wake_extension_if_enabled(supervisor.as_ref(), "mlx-gen").await;
             let mlx_url = mlx_base_url();
             if is_http_reachable(&format!("{mlx_url}/health")).await
                 || is_binary_in_path("mflux-generate").await
@@ -222,8 +249,6 @@ pub async fn generate_image(
                 )
                 .await?
             } else {
-                // 2. ComfyUI
-                wake_extension_if_enabled(supervisor.as_ref(), "comfyui-mcp").await;
                 let comfy = ComfyUiClient::default();
                 if comfy.is_reachable().await {
                     generate_via_comfyui(
@@ -237,7 +262,6 @@ pub async fn generate_image(
                     )
                     .await?
                 } else if let Some(endpoint) = resolve_http_image_endpoint() {
-                    // 3. OpenAI-compatible HTTP
                     generate_via_openai_http(
                         &endpoint,
                         &req,
@@ -250,14 +274,26 @@ pub async fn generate_image(
                     )
                     .await?
                 } else {
-                    return Err(MediaError::BackendUnavailable {
+                    return Err(MediaError::BackendNotInstalled {
                         kind: "image".to_string(),
-                        reason: "No image generation backend reachable. Start `mlx-gen` (port 8190) / install `mflux-generate`, start ComfyUI (port 8188), or set `DEX_IMAGE_URL` / `OPENAI_API_KEY`.".to_string(),
+                        backend: "mflux / comfyui-mcp".to_string(),
+                        install_hint: "Install `mflux` (1-click in Models Hub -> Runtimes) or start ComfyUI (:8188). Do NOT retry `image_generate` in a loop.".to_string(),
                     });
                 }
             }
         }
     };
+
+    if let Some(target_dest) = explicit_dest {
+        if result.path != target_dest && tokio::fs::try_exists(&result.path).await.unwrap_or(false) {
+            if tokio::fs::rename(&result.path, &target_dest).await.is_ok() {
+                result.path = target_dest;
+            } else if tokio::fs::copy(&result.path, &target_dest).await.is_ok() {
+                let _ = tokio::fs::remove_file(&result.path).await;
+                result.path = target_dest;
+            }
+        }
+    }
 
     if let Some(bus) = event_bus {
         bus.publish(DexEvent::MediaGenerated {
@@ -300,14 +336,15 @@ async fn generate_via_mlx(
     }
 
     // Fallback to `mflux-generate` CLI with live progress parsing from stdout/stderr
-    if !is_binary_in_path("mflux-generate").await {
-        return Err(MediaError::BackendUnavailable {
+    let Some(mflux_bin) = harness_core::find_executable_in_enriched_path("mflux-generate") else {
+        return Err(MediaError::BackendNotInstalled {
             kind: "image".to_string(),
-            reason: format!(
-                "MLX sidecar not reachable at '{base}' and `mflux-generate` CLI not found in $PATH. Install with `uv tool install mflux`."
+            backend: "mflux".to_string(),
+            install_hint: format!(
+                "MLX sidecar not reachable at '{base}' and `mflux-generate` CLI is not installed. Install `mflux` with 1 click in Models Hub -> Runtimes."
             ),
         });
-    }
+    };
 
     let ts = current_epoch_millis();
     let dest = out_dir.join(format!("mlx_{ts}.png"));
@@ -316,7 +353,8 @@ async fn generate_via_mlx(
         .as_deref()
         .unwrap_or("schnell");
 
-    let mut cmd = Command::new("mflux-generate");
+    let mut cmd = Command::new(&mflux_bin);
+    harness_core::apply_enriched_path(&mut cmd);
     cmd.args([
         "--model",
         model,
@@ -406,7 +444,8 @@ async fn generate_via_comfyui(
         .as_deref()
         .filter(|w| !w.trim().is_empty())
         .unwrap_or("txt2img_default.json");
-    let template = load_workflow_template(Path::new(DEFAULT_WORKFLOWS_DIR), wf_name).await?;
+    let wf_dir = harness_core::resolve_dex_subpath(DEFAULT_WORKFLOWS_DIR);
+    let template = load_workflow_template(&wf_dir, wf_name).await?;
 
     let mut str_vars = HashMap::new();
     str_vars.insert("PROMPT", prompt.to_string());
@@ -603,7 +642,7 @@ pub async fn upscale_image(
         });
     }
 
-    let out_dir = PathBuf::from(DEFAULT_IMAGES_DIR);
+    let out_dir = harness_core::resolve_dex_subpath(DEFAULT_IMAGES_DIR);
     tokio::fs::create_dir_all(&out_dir)
         .await
         .map_err(|e| MediaError::Io {
@@ -721,8 +760,8 @@ async fn try_comfy_upscale(
     task_id: &str,
     event_bus: Option<&EventBus>,
 ) -> Result<ImageProcessResult, MediaError> {
-    let template =
-        load_workflow_template(Path::new(DEFAULT_WORKFLOWS_DIR), "upscale_default.json").await?;
+    let wf_dir = harness_core::resolve_dex_subpath(DEFAULT_WORKFLOWS_DIR);
+    let template = load_workflow_template(&wf_dir, "upscale_default.json").await?;
     let mut str_vars = HashMap::new();
     str_vars.insert("IMAGE_PATH", path.to_string_lossy().to_string());
     let mut num_vars = HashMap::new();

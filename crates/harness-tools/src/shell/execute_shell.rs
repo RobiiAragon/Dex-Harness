@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::process::Command;
 use tracing::{debug, instrument, warn};
@@ -12,20 +13,43 @@ use harness_core::{Tool, ToolError};
 pub struct ExecuteShellArgs {
     /// The shell command string to execute (e.g. "ls -la", "cargo test", "git status").
     pub command: String,
-    /// Optional working directory to execute the command from. Defaults to the current process directory.
+    /// Optional working directory to execute the command from. Defaults to the active workspace root.
     pub working_directory: Option<String>,
     /// Execution timeout in seconds. Defaults to 60 seconds.
     pub timeout_seconds: Option<u64>,
 }
 
 #[derive(Default, Clone)]
-pub struct ExecuteShellTool;
+pub struct ExecuteShellTool {
+    workspace_root: Option<PathBuf>,
+}
 
 impl ExecuteShellTool {
     pub const DEFAULT_TIMEOUT_SECS: u64 = 60;
 
     pub fn new() -> Self {
-        Self
+        Self { workspace_root: None }
+    }
+
+    pub fn with_workspace_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.workspace_root = Some(root.into());
+        self
+    }
+
+    fn resolve_cwd(&self, raw: Option<&str>) -> Option<PathBuf> {
+        match raw {
+            Some(s) if !s.trim().is_empty() => {
+                let p = Path::new(s);
+                if p.is_absolute() {
+                    Some(p.to_path_buf())
+                } else if let Some(ref ws) = self.workspace_root {
+                    Some(ws.join(p))
+                } else {
+                    Some(p.to_path_buf())
+                }
+            }
+            _ => self.workspace_root.clone(),
+        }
     }
 }
 
@@ -79,9 +103,10 @@ impl Tool for ExecuteShellTool {
             c
         };
 
-        if let Some(ref cwd) = args.working_directory {
+        if let Some(cwd) = self.resolve_cwd(args.working_directory.as_deref()) {
             cmd.current_dir(cwd);
         }
+        harness_core::apply_enriched_path(&mut cmd);
 
         // Configure stdio pipes
         cmd.stdout(std::process::Stdio::piped());

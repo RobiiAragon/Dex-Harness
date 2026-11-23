@@ -91,3 +91,15 @@ cargo check --workspace --all-targets
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
+
+---
+
+## 7. Permanent UX & QA Audit Standard (`Dex.app` & Multimodal Crates)
+
+All desktop UI, runtime, and multimodal work **must** comply with the permanent audit checklist in [`.dex/skills/ux-qa-audit/SKILL.md`](.dex/skills/ux-qa-audit/SKILL.md):
+
+- **Zero `cwd`-relative `.dex/...` writes:** macOS `.app` bundles launch with `cwd = /` (read-only, `os error 30`). Always resolve storage through `harness_core::storage` (`active_workspace_dir/.dex` or `~/.dex`) and honor explicit absolute `output_path` arguments.
+- **Enriched subprocess `$PATH`:** Always include `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, `~/.cargo/bin`, and `~/.dex/runtimes/mlx-venv/bin` when spawning external tools from `Dex.app`.
+- **Zero chat duplication & full Markdown rendering:** Consolidate streamed tokens and final answers into one Markdown-rendered assistant block with a compact collapsible activity/`<think>` accordion (`Worked for Xs · N actions`).
+- **Honest capability routing:** Inject a live Host & Capabilities Manifest into the system prompt and fail fast with `BackendNotInstalled` instead of letting the LLM loop on missing creative backends.
+- **Always use `tauri::async_runtime::spawn`** inside `crates/harness-desktop` (never `tokio::spawn`) and run the `Dex.app` smoke-test explicitly from `(cd / && ...)`.

@@ -47,4 +47,16 @@ pub enum ModelError {
         url: String,
         message: String,
     },
+
+    #[error("Local inference runtime '{runtime}' is not installed. {install_hint}")]
+    RuntimeMissing {
+        runtime: String,
+        install_hint: String,
+    },
+
+    #[error("Local inference runtime '{runtime}' failed: {message}")]
+    RuntimeFailed {
+        runtime: String,
+        message: String,
+    },
 }

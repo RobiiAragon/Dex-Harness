@@ -5,6 +5,7 @@ use crate::ollama_bridge::OllamaBridge;
 
 pub const LM_STUDIO_DEFAULT_URL: &str = "http://127.0.0.1:1234/v1";
 pub const MLX_LM_DEFAULT_PORT: u16 = 8088;
+pub const LLAMA_SERVER_DEFAULT_PORT: u16 = 8089;
 
 /// Live status of a detected local inference server (LM Studio, Ollama, MLX-LM).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,12 +98,17 @@ pub async fn detect_local_servers() -> Vec<LocalServerInfo> {
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| format!("http://127.0.0.1:{MLX_LM_DEFAULT_PORT}/v1"));
+    let llama_url = std::env::var("DEX_LLAMA_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| format!("http://127.0.0.1:{LLAMA_SERVER_DEFAULT_PORT}/v1"));
 
-    let (lm_studio, ollama, mlx_lm) = tokio::join!(
+    let (lm_studio, ollama, mlx_lm, llama_srv) = tokio::join!(
         probe_openai_server("lmstudio", "LM Studio / Bionic", &lm_url),
         probe_ollama_server(),
-        probe_openai_server("mlx-lm", "MLX-LM Server", &mlx_url),
+        probe_openai_server("mlx-lm", "Dex MLX (:8088)", &mlx_url),
+        probe_openai_server("llamacpp", "Dex llama.cpp (:8089)", &llama_url),
     );
 
-    vec![lm_studio, ollama, mlx_lm]
+    vec![mlx_lm, llama_srv, ollama, lm_studio]
 }

@@ -80,6 +80,14 @@ pub enum DexEvent {
         total_steps: u32,
         message: String,
     },
+    /// Live streaming progress or log output during local runtime installation or model loading.
+    RuntimeProgress {
+        runtime: String,
+        stage: String,
+        message: String,
+        done: bool,
+        is_error: bool,
+    },
 }
 
 /// Central publish-subscribe asynchronous event bus based on `tokio::sync::broadcast`.

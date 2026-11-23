@@ -160,7 +160,7 @@ pub async fn run_ocr_on_image(
 
 #[cfg(target_os = "macos")]
 async fn ensure_vision_binary() -> Result<PathBuf, DocsError> {
-    let bin_dir = PathBuf::from(".dex/bin");
+    let bin_dir = harness_core::home_dex_dir().join("bin");
     let bin_path = bin_dir.join("dex-vision-ocr");
 
     if tokio::fs::try_exists(&bin_path).await.unwrap_or(false) {
@@ -183,7 +183,9 @@ async fn ensure_vision_binary() -> Result<PathBuf, DocsError> {
         })?;
 
     info!(dest = ?bin_path, "Compiling native Apple Vision OCR helper binary once via swiftc");
-    let compile_cmd = Command::new("swiftc")
+    let mut swiftc_cmd = Command::new("swiftc");
+    harness_core::apply_enriched_path(&mut swiftc_cmd);
+    let compile_cmd = swiftc_cmd
         .arg("-O")
         .arg(&src_path)
         .arg("-o")
@@ -306,7 +308,9 @@ pub(crate) fn parse_vision_json(raw: &str, image_path: &Path) -> Result<OcrResul
 }
 
 async fn run_tesseract_ocr(image_path: &Path) -> Result<OcrResult, DocsError> {
-    let cmd = Command::new("tesseract")
+    let mut tess_cmd = Command::new("tesseract");
+    harness_core::apply_enriched_path(&mut tess_cmd);
+    let cmd = tess_cmd
         .arg(image_path)
         .arg("stdout")
         .args(["-l", "spa+eng"])

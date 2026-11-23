@@ -6,6 +6,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use harness_core::{DexEvent, EventBus};
 use harness_mcp::StdioTransport;
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -377,6 +378,266 @@ impl ExtensionSupervisor {
     /// Cleanly terminates an extension and marks it `Stopped`.
     pub async fn stop_extension(&self, id: &str) -> Result<ExtensionRuntimeInfo, ExtensionError> {
         self.unload_extension(id, ExtensionStatus::Stopped).await
+    }
+
+    /// Starts a `LocalSidecar` extension and waits up to `startup_timeout` until its
+    /// `healthcheck_url` returns HTTP 2xx, streaming `stderr`/`stdout` lines to `EventBus`
+    /// (`DexEvent::RuntimeProgress`) and capturing the exact `stderr` tail if startup fails.
+    pub async fn start_extension_wait_ready(
+        &self,
+        id: &str,
+        startup_timeout: Duration,
+    ) -> Result<ExtensionRuntimeInfo, ExtensionError> {
+        let reg = self.load_registry().await;
+        let manifest = reg
+            .get(id)
+            .cloned()
+            .ok_or_else(|| ExtensionError::NotFound { id: id.to_string() })?;
+
+        let (command, args, healthcheck_url, env) = match &manifest.kind {
+            ExtensionKind::LocalSidecar {
+                command,
+                args,
+                healthcheck_url,
+                env,
+                ..
+            } => (
+                command.clone(),
+                args.clone(),
+                healthcheck_url.clone(),
+                env.clone(),
+            ),
+            _ => return self.start_extension(id).await,
+        };
+
+        // Always terminate any stale or previously mounted process for this ID before re-launching
+        {
+            let mut rt = self.runtime.lock().await;
+            if let Some(entry) = rt.get_mut(id) {
+                entry.terminate().await;
+            }
+        }
+
+        info!(
+            id = %manifest.id,
+            command = %command,
+            timeout_secs = startup_timeout.as_secs(),
+            "Starting local sidecar with live readiness wait"
+        );
+
+        let mut cmd = Command::new(&command);
+        cmd.args(&args)
+            .envs(&env)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+
+        let mut child = cmd.spawn().map_err(|e| ExtensionError::ProcessSpawn {
+            id: manifest.id.clone(),
+            command: command.clone(),
+            source: e,
+        })?;
+
+        let pid = child.id();
+        let log_tail: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+        // Drain stdout & stderr concurrently without blocking the child process pipes
+        if let Some(stderr) = child.stderr.take() {
+            let tail_ref = Arc::clone(&log_tail);
+            let bus_ref = self.event_bus.clone();
+            let rt_id = manifest.id.clone();
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let clean = line.trim().to_string();
+                    if clean.is_empty() {
+                        continue;
+                    }
+                    debug!(sidecar = %rt_id, stderr = %clean, "Sidecar stderr");
+                    bus_ref.publish(DexEvent::RuntimeProgress {
+                        runtime: rt_id.clone(),
+                        stage: "loading".to_string(),
+                        message: clean.clone(),
+                        done: false,
+                        is_error: false,
+                    });
+                    let mut guard = tail_ref.lock().await;
+                    if guard.len() >= 40 {
+                        guard.remove(0);
+                    }
+                    guard.push(clean);
+                }
+            });
+        }
+
+        if let Some(stdout) = child.stdout.take() {
+            let tail_ref = Arc::clone(&log_tail);
+            let bus_ref = self.event_bus.clone();
+            let rt_id = manifest.id.clone();
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stdout).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let clean = line.trim().to_string();
+                    if clean.is_empty() {
+                        continue;
+                    }
+                    debug!(sidecar = %rt_id, stdout = %clean, "Sidecar stdout");
+                    bus_ref.publish(DexEvent::RuntimeProgress {
+                        runtime: rt_id.clone(),
+                        stage: "loading".to_string(),
+                        message: clean.clone(),
+                        done: false,
+                        is_error: false,
+                    });
+                    let mut guard = tail_ref.lock().await;
+                    if guard.len() >= 40 {
+                        guard.remove(0);
+                    }
+                    guard.push(clean);
+                }
+            });
+        }
+
+        let start_at = Instant::now();
+        let probe_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
+        if !healthcheck_url.trim().is_empty() {
+            loop {
+                // Check if process exited prematurely
+                match child.try_wait() {
+                    Ok(Some(exit_status)) => {
+                        // Brief yield so stderr reader task flushes remaining buffered lines
+                        tokio::time::sleep(Duration::from_millis(120)).await;
+                        let captured = {
+                            let guard = log_tail.lock().await;
+                            guard.join("\n")
+                        };
+                        let detail = if captured.is_empty() {
+                            format!("Process exited prematurely with {exit_status}")
+                        } else {
+                            format!("Process exited with {exit_status}:\n{captured}")
+                        };
+                        self.record_start_error(&manifest, &detail).await;
+                        return Err(ExtensionError::HealthcheckFailed {
+                            id: manifest.id.clone(),
+                            url: healthcheck_url,
+                            reason: detail,
+                        });
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        warn!(id = %manifest.id, error = %e, "try_wait check failed");
+                    }
+                }
+
+                if let Ok(resp) = probe_client.get(&healthcheck_url).send().await {
+                    if resp.status().is_success() {
+                        break;
+                    }
+                }
+
+                if start_at.elapsed() >= startup_timeout {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    tokio::time::sleep(Duration::from_millis(80)).await;
+                    let captured = {
+                        let guard = log_tail.lock().await;
+                        guard.join("\n")
+                    };
+                    let detail = if captured.is_empty() {
+                        format!(
+                            "Timed out after {}s waiting for sidecar health endpoint '{}'",
+                            startup_timeout.as_secs(),
+                            healthcheck_url
+                        )
+                    } else {
+                        format!(
+                            "Timed out after {}s waiting for '{}'. Recent logs:\n{}",
+                            startup_timeout.as_secs(),
+                            healthcheck_url,
+                            captured
+                        )
+                    };
+                    self.record_start_error(&manifest, &detail).await;
+                    return Err(ExtensionError::HealthcheckFailed {
+                        id: manifest.id.clone(),
+                        url: healthcheck_url,
+                        reason: detail,
+                    });
+                }
+
+                tokio::time::sleep(Duration::from_millis(450)).await;
+            }
+        }
+
+        let now_secs = current_epoch_secs();
+        {
+            let mut rt = self.runtime.lock().await;
+            rt.insert(
+                manifest.id.clone(),
+                ManagedRuntime {
+                    status: ExtensionStatus::Running,
+                    pid,
+                    handle: Some(ManagedHandle::Sidecar(child)),
+                    last_used_at: Instant::now(),
+                    last_used_epoch_secs: Some(now_secs),
+                    last_error: None,
+                    idle_timeout_secs: manifest.idle_timeout_secs,
+                },
+            );
+        }
+
+        self.emit_status(
+            &manifest.id,
+            ExtensionStatus::Running,
+            pid,
+            manifest.estimated_ram_mb,
+        );
+        self.event_bus.publish(DexEvent::RuntimeProgress {
+            runtime: manifest.id.clone(),
+            stage: "ready".to_string(),
+            message: format!("Model server ready at {healthcheck_url}"),
+            done: true,
+            is_error: false,
+        });
+
+        Ok(ExtensionRuntimeInfo {
+            manifest,
+            status: ExtensionStatus::Running,
+            pid,
+            last_used_epoch_secs: Some(now_secs),
+            last_error: None,
+        })
+    }
+
+    async fn record_start_error(&self, manifest: &ExtensionManifest, err_msg: &str) {
+        {
+            let mut rt = self.runtime.lock().await;
+            rt.insert(
+                manifest.id.clone(),
+                ManagedRuntime {
+                    status: ExtensionStatus::Error,
+                    pid: None,
+                    handle: None,
+                    last_used_at: Instant::now(),
+                    last_used_epoch_secs: None,
+                    last_error: Some(err_msg.to_string()),
+                    idle_timeout_secs: manifest.idle_timeout_secs,
+                },
+            );
+        }
+        self.emit_status(&manifest.id, ExtensionStatus::Error, None, 0);
+        self.event_bus.publish(DexEvent::RuntimeProgress {
+            runtime: manifest.id.clone(),
+            stage: "error".to_string(),
+            message: err_msg.to_string(),
+            done: true,
+            is_error: true,
+        });
     }
 
     /// Cleanly unloads an idle extension to reclaim RAM and marks it `Sleeping`.

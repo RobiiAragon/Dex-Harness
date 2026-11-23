@@ -33,6 +33,13 @@ pub enum ThreeDError {
     #[error("3D backend unavailable ({kind}): {reason}")]
     BackendUnavailable { kind: String, reason: String },
 
+    #[error("BackendNotInstalled ({kind}): required backend '{backend}' is not installed. {install_hint}")]
+    BackendNotInstalled {
+        kind: String,
+        backend: String,
+        install_hint: String,
+    },
+
     #[error("Invalid 3D operation parameters: {reason}")]
     InvalidInput { reason: String },
 

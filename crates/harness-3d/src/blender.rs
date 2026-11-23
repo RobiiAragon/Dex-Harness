@@ -56,18 +56,10 @@ pub async fn detect_blender_executable() -> Option<PathBuf> {
         }
     }
 
-    if let Ok(Ok(out)) = tokio::time::timeout(
-        Duration::from_secs(2),
-        Command::new("which").arg("blender").output(),
-    )
-    .await
+    if let Some(found) = harness_core::find_executable_in_enriched_path("blender")
+        .or_else(|| harness_core::find_executable_in_enriched_path("Blender"))
     {
-        if out.status.success() {
-            let found = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !found.is_empty() {
-                return Some(PathBuf::from(found));
-            }
-        }
+        return Some(found);
     }
 
     #[cfg(target_os = "macos")]
@@ -372,7 +364,7 @@ async fn run_blender_script(script_body: &str, op_label: &str) -> Result<(), Thr
         }
     })?;
 
-    let tmp_dir = PathBuf::from(BLENDER_SCRIPTS_TMP_DIR);
+    let tmp_dir = harness_core::resolve_dex_subpath(BLENDER_SCRIPTS_TMP_DIR);
     tokio::fs::create_dir_all(&tmp_dir)
         .await
         .map_err(|e| ThreeDError::Io {
@@ -395,9 +387,11 @@ async fn run_blender_script(script_body: &str, op_label: &str) -> Result<(), Thr
     let args = build_blender_cli_args(&script_path);
     debug!(exe = ?blender_exe, args = ?args, "Executing headless Blender script");
 
+    let mut blender_cmd = Command::new(&blender_exe);
+    harness_core::apply_enriched_path(&mut blender_cmd);
     let run_result = tokio::time::timeout(
         Duration::from_secs(BLENDER_TIMEOUT_SECS),
-        Command::new(&blender_exe).args(&args).output(),
+        blender_cmd.args(&args).output(),
     )
     .await;
 
@@ -503,9 +497,9 @@ pub async fn blender_render_preview(
     }
 
     let dest = match output_png {
-        Some(p) => p.to_path_buf(),
+        Some(p) => harness_core::resolve_safe_path(p),
         None => {
-            let dir = PathBuf::from(DEFAULT_3D_PREVIEWS_DIR);
+            let dir = harness_core::resolve_dex_subpath(DEFAULT_3D_PREVIEWS_DIR);
             tokio::fs::create_dir_all(&dir)
                 .await
                 .map_err(|e| ThreeDError::Io {

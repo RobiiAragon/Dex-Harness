@@ -208,6 +208,8 @@
         }
       } else if (ev.type === 'MediaGenerationProgress') {
         appendLog(`\n🎨 [Media ${ev.data.kind}] ${ev.data.step}/${ev.data.total_steps}: ${ev.data.message}`);
+      } else if (ev.type === 'RuntimeProgress') {
+        appendLog(`\n[Runtime ${ev.data.runtime}/${ev.data.stage}] ${ev.data.message}`);
       }
     }
 

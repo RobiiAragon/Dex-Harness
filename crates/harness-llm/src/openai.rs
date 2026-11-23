@@ -72,15 +72,23 @@ struct ChatCompletionRequest<'a> {
     max_tokens: Option<u32>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize)]
 struct ChatMessage {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
+    content: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<ChatToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ChatResponseMessage {
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<ChatToolCall>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -118,7 +126,7 @@ struct ChatCompletionResponse {
 
 #[derive(Deserialize)]
 struct ChatChoice {
-    message: ChatMessage,
+    message: ChatResponseMessage,
     finish_reason: Option<String>,
 }
 
@@ -175,9 +183,27 @@ impl LlmProvider for OpenAiProvider {
                     Role::Assistant => "assistant",
                     Role::Tool => "tool",
                 };
+                let content = if m.image_data_urls.is_empty() {
+                    m.content.map(serde_json::Value::String)
+                } else {
+                    let mut parts = Vec::with_capacity(m.image_data_urls.len() + 1);
+                    if let Some(text) = m.content {
+                        parts.push(serde_json::json!({
+                            "type": "text",
+                            "text": text,
+                        }));
+                    }
+                    for url in m.image_data_urls {
+                        parts.push(serde_json::json!({
+                            "type": "image_url",
+                            "image_url": { "url": url },
+                        }));
+                    }
+                    Some(serde_json::Value::Array(parts))
+                };
                 ChatMessage {
                     role: role.to_string(),
-                    content: m.content,
+                    content,
                     tool_calls: None,
                     tool_call_id: m.tool_call_id,
                 }

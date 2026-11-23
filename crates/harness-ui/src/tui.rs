@@ -143,6 +143,12 @@ pub async fn run_tui(event_bus: EventBus, mode: &str) -> Result<(), io::Error> {
                         "🎨 [MEDIA:{kind}] step {step}/{total_steps}: {message}"
                     ));
                 }
+                DexEvent::RuntimeProgress { runtime, stage, message, is_error, .. } => {
+                    let prefix = if is_error { "ERR" } else { "OK" };
+                    state.logs.push(format!(
+                        "[RUNTIME:{runtime}:{stage}:{prefix}] {message}"
+                    ));
+                }
             }
         }
 

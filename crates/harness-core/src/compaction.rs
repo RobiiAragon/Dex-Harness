@@ -118,7 +118,7 @@ impl Default for ToolOutputCompactor {
             max_chars: 8_000,
             head_chars: 2_500,
             tail_chars: 1_500,
-            output_dir: PathBuf::from(".dex/tmp/tool_outputs"),
+            output_dir: crate::storage::resolve_dex_subpath("tmp/tool_outputs"),
         }
     }
 }
@@ -129,7 +129,7 @@ impl ToolOutputCompactor {
             max_chars,
             head_chars,
             tail_chars,
-            output_dir: PathBuf::from(".dex/tmp/tool_outputs"),
+            output_dir: crate::storage::resolve_dex_subpath("tmp/tool_outputs"),
         }
     }
 

@@ -5,6 +5,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
 use tracing::instrument;
 
 use harness_core::{Tool, ToolError};
@@ -14,7 +15,7 @@ use harness_core::{Tool, ToolError};
 pub struct GrepSearchArgs {
     /// Regular expression or substring pattern to search for.
     pub pattern: String,
-    /// Root path (directory or file) to search within. Defaults to ".".
+    /// Root path (directory or file) to search within. Defaults to active workspace root (or ".").
     pub path: Option<String>,
     /// Match case-sensitively. Defaults to false.
     pub case_sensitive: Option<bool>,
@@ -23,11 +24,34 @@ pub struct GrepSearchArgs {
 }
 
 #[derive(Default, Clone)]
-pub struct GrepSearchTool;
+pub struct GrepSearchTool {
+    workspace_root: Option<PathBuf>,
+}
 
 impl GrepSearchTool {
     pub fn new() -> Self {
-        Self
+        Self { workspace_root: None }
+    }
+
+    pub fn with_workspace_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.workspace_root = Some(root.into());
+        self
+    }
+
+    fn resolve_root(&self, raw: Option<&str>) -> PathBuf {
+        match raw {
+            Some(s) if !s.trim().is_empty() => {
+                let p = Path::new(s);
+                if p.is_absolute() {
+                    p.to_path_buf()
+                } else if let Some(ref ws) = self.workspace_root {
+                    ws.join(p)
+                } else {
+                    p.to_path_buf()
+                }
+            }
+            _ => self.workspace_root.clone().unwrap_or_else(|| PathBuf::from(".")),
+        }
     }
 }
 
@@ -66,8 +90,8 @@ impl Tool for GrepSearchTool {
 
         let case_sensitive = args.case_sensitive.unwrap_or(false);
         let max_results = args.max_results.unwrap_or(50).max(1);
-        let root_str = args.path.unwrap_or_else(|| ".".to_string());
-        let root_path = std::path::PathBuf::from(&root_str);
+        let root_path = self.resolve_root(args.path.as_deref());
+        let root_str = root_path.to_string_lossy().to_string();
 
         let regex = RegexBuilder::new(&args.pattern)
             .case_insensitive(!case_sensitive)
@@ -111,7 +135,10 @@ impl Tool for GrepSearchTool {
                     if regex.is_match(&line) {
                         total_matches += 1;
                         if matches.len() < max_results {
-                            let rel_path = path.strip_prefix(".").unwrap_or(path);
+                            let rel_path = path
+                                .strip_prefix(&root_path)
+                                .or_else(|_| path.strip_prefix("."))
+                                .unwrap_or(path);
                             matches.push(format!("{}:{}: {}", rel_path.display(), line_idx + 1, line.trim()));
                         }
                     }

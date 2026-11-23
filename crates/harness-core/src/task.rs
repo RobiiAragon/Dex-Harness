@@ -39,22 +39,22 @@ impl TaskBoard {
     pub fn new() -> Self {
         Self {
             tasks: Vec::new(),
-            file_path: Some(PathBuf::from(Self::DEFAULT_PATH)),
+            file_path: Some(crate::storage::resolve_dex_subpath("tasks.json")),
         }
     }
 
     pub fn with_path(mut self, path: impl AsRef<Path>) -> Self {
-        self.file_path = Some(path.as_ref().to_path_buf());
+        self.file_path = Some(crate::storage::resolve_safe_path(path));
         self
     }
 
     pub async fn load_or_default(path: impl AsRef<Path>) -> Self {
-        let p = path.as_ref();
-        if tokio::fs::try_exists(p).await.unwrap_or(false) {
-            match tokio::fs::read_to_string(p).await {
+        let p = crate::storage::resolve_safe_path(path);
+        if tokio::fs::try_exists(&p).await.unwrap_or(false) {
+            match tokio::fs::read_to_string(&p).await {
                 Ok(data) => match serde_json::from_str::<TaskBoard>(&data) {
                     Ok(mut board) => {
-                        board.file_path = Some(p.to_path_buf());
+                        board.file_path = Some(p.clone());
                         return board;
                     }
                     Err(e) => {
@@ -66,7 +66,7 @@ impl TaskBoard {
                 }
             }
         }
-        Self::new().with_path(p)
+        Self::new().with_path(&p)
     }
 
     pub async fn save(&self) -> Result<(), CoreError> {

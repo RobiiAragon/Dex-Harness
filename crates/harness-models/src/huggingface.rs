@@ -1,20 +1,39 @@
+use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 use std::time::Duration;
+use futures::future::join_all;
 use harness_core::cookbook::HardwareProfile;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
 use tracing::debug;
 
 use crate::error::ModelError;
 use crate::scanner::infer_capabilities;
 
 const HF_HTTP_TIMEOUT_SECS: u64 = 20;
+const HF_AVATAR_TIMEOUT_MS: u64 = 2200;
 const MAX_README_BYTES: usize = 128 * 1024;
+
+static AVATAR_CACHE: OnceLock<RwLock<HashMap<String, Option<String>>>> = OnceLock::new();
+
+fn avatar_cache() -> &'static RwLock<HashMap<String, Option<String>>> {
+    AVATAR_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+#[derive(Debug, Deserialize)]
+struct HfAvatarResponse {
+    #[serde(rename = "avatarUrl")]
+    avatar_url: Option<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HfModelSummary {
     pub id: String,
     #[serde(default)]
     pub author: Option<String>,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
     #[serde(default)]
     pub downloads: Option<u64>,
     #[serde(default)]
@@ -63,6 +82,26 @@ pub struct HfGgufFile {
     pub format: String,
     #[serde(default)]
     pub is_recommended: bool,
+    #[serde(default)]
+    pub is_auxiliary: bool,
+}
+
+/// Returns true if a GGUF/model path represents an auxiliary weight (vision projector, MTP head,
+/// draft model, or imatrix calibration file) that must never be auto-selected as `Recommended`.
+pub fn is_auxiliary_model_file(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    let leaf = lower.rsplit('/').next().unwrap_or(&lower);
+    leaf.contains("mmproj")
+        || leaf.contains("imatrix")
+        || leaf.starts_with("mtp-")
+        || leaf.starts_with("mtp_")
+        || leaf.contains("-mtp-")
+        || leaf.contains("_mtp_")
+        || leaf.contains("-mtp.")
+        || leaf.contains("_mtp.")
+        || leaf.contains("draft")
+        || lower.contains("/mtp/")
+        || lower.contains("/draft/")
 }
 
 fn default_gguf_format() -> String {
@@ -72,6 +111,8 @@ fn default_gguf_format() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HfModelDetails {
     pub id: String,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
     pub files: Vec<HfGgufFile>,
 }
 
@@ -235,20 +276,101 @@ impl HfClient {
             enrich_summary(m, filter_tag);
         }
 
+        // Resolve author / organization avatars concurrently (with in-memory cache)
+        let unique_authors: Vec<String> = {
+            let mut seen = HashSet::new();
+            let mut list = Vec::new();
+            for m in &models {
+                if let Some(ref author) = m.author {
+                    if !author.trim().is_empty() && seen.insert(author.clone()) {
+                        list.push(author.clone());
+                    }
+                }
+            }
+            list
+        };
+
+        if !unique_authors.is_empty() {
+            let resolved = join_all(unique_authors.iter().map(|author| async move {
+                let url = self.fetch_author_avatar(author).await;
+                (author.clone(), url)
+            }))
+            .await;
+
+            let map: HashMap<String, Option<String>> = resolved.into_iter().collect();
+            for m in &mut models {
+                if m.avatar_url.is_none() {
+                    if let Some(ref author) = m.author {
+                        if let Some(Some(url)) = map.get(author) {
+                            m.avatar_url = Some(url.clone());
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(models)
     }
 
-    /// Inspects downloadable variants in a Hugging Face repository (both `.gguf` files
-    /// and MLX / Safetensors multi-shard repositories), grading memory fit and flagging
-    /// the best `Fits` recommendation.
+    /// Resolves a Hugging Face organization or user avatar URL via official HF avatar endpoints,
+    /// caching hits & misses in memory so repeat searches incur zero latency.
+    pub async fn fetch_author_avatar(&self, author: &str) -> Option<String> {
+        let key = author.trim();
+        if key.is_empty() || key.contains('/') || key.contains("..") {
+            return None;
+        }
+
+        {
+            let guard = avatar_cache().read().await;
+            if let Some(cached) = guard.get(key) {
+                return cached.clone();
+            }
+        }
+
+        let encoded = urlencoding(key);
+        let endpoints = [
+            format!("https://huggingface.co/api/organizations/{encoded}/avatar"),
+            format!("https://huggingface.co/api/users/{encoded}/avatar"),
+        ];
+
+        let mut found: Option<String> = None;
+        for endpoint in &endpoints {
+            let fut = self.client.get(endpoint).headers(self.headers()).send();
+            if let Ok(Ok(resp)) =
+                tokio::time::timeout(Duration::from_millis(HF_AVATAR_TIMEOUT_MS), fut).await
+            {
+                if resp.status().is_success() {
+                    if let Ok(parsed) = resp.json::<HfAvatarResponse>().await {
+                        if let Some(raw_url) = parsed.avatar_url {
+                            if let Some(norm) = normalize_hf_avatar_url(&raw_url) {
+                                found = Some(norm);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut guard = avatar_cache().write().await;
+        guard.insert(key.to_string(), found.clone());
+        found
+    }
+
+    /// Inspects downloadable variants in a Hugging Face repository recursively (`?recursive=true`)
+    /// so `.gguf` and `.safetensors` files inside subfolders are discovered, grading memory fit
+    /// and excluding auxiliary files (`mmproj`, `mtp-`, `draft`, `imatrix`) from `is_recommended`.
     pub async fn inspect_gguf_files(
         &self,
         repo_id: &str,
         profile: &HardwareProfile,
     ) -> Result<Vec<HfGgufFile>, ModelError> {
-        let url = format!("https://huggingface.co/api/models/{}/tree/main", repo_id);
+        let url = format!(
+            "https://huggingface.co/api/models/{}/tree/main?recursive=true",
+            repo_id
+        );
 
-        debug!(repo_id = %repo_id, url = %url, "Inspecting repository files");
+        debug!(repo_id = %repo_id, url = %url, "Inspecting repository files recursively");
         let resp = self
             .client
             .get(&url)
@@ -277,110 +399,7 @@ impl HfClient {
                 source: e,
             })?;
 
-        let mut files = Vec::new();
-        let mut safetensors_total_bytes: u64 = 0;
-        let mut safetensors_count: usize = 0;
-        let mut has_config_json = false;
-        let mut first_safetensor_path: Option<String> = None;
-
-        for item in &items {
-            if item.r#type != "file" {
-                continue;
-            }
-            let lower = item.path.to_lowercase();
-            if lower == "config.json" {
-                has_config_json = true;
-            }
-            if lower.ends_with(".safetensors") {
-                safetensors_count += 1;
-                safetensors_total_bytes =
-                    safetensors_total_bytes.saturating_add(item.size.unwrap_or(0));
-                if first_safetensor_path.is_none() {
-                    first_safetensor_path = Some(item.path.clone());
-                }
-            }
-            if lower.ends_with(".gguf") && !lower.contains("mmproj") {
-                let size_bytes = item.size.unwrap_or(0);
-                let filename = item
-                    .path
-                    .split('/')
-                    .next_back()
-                    .unwrap_or(&item.path)
-                    .to_string();
-                let quantization = parse_quantization(&filename);
-                let (memory_fit, ram_required_gb) = evaluate_memory_fit(size_bytes, profile);
-                let download_url = format!(
-                    "https://huggingface.co/{}/resolve/main/{}",
-                    repo_id, item.path
-                );
-
-                files.push(HfGgufFile {
-                    filename,
-                    size_bytes,
-                    quantization,
-                    download_url,
-                    memory_fit,
-                    ram_required_gb,
-                    format: "GGUF".to_string(),
-                    is_recommended: false,
-                });
-            }
-        }
-
-        // If no GGUF files exist, check if this is an MLX or Safetensors repository
-        if files.is_empty() && has_config_json && safetensors_count > 0 {
-            let repo_lower = repo_id.to_lowercase();
-            let format = if repo_lower.contains("mlx") {
-                "MLX".to_string()
-            } else {
-                "PT".to_string()
-            };
-            let quant = parse_quantization(repo_id);
-            let quantization = if quant == "UNKNOWN" {
-                "BF16".to_string()
-            } else {
-                quant
-            };
-            let (memory_fit, ram_required_gb) =
-                evaluate_memory_fit(safetensors_total_bytes, profile);
-            let repo_leaf = repo_id.split('/').next_back().unwrap_or(repo_id);
-            let sample_path = first_safetensor_path.unwrap_or_else(|| "config.json".to_string());
-            files.push(HfGgufFile {
-                filename: format!("{repo_leaf} ({safetensors_count} shard(s))"),
-                size_bytes: safetensors_total_bytes,
-                quantization,
-                download_url: format!(
-                    "https://huggingface.co/{}/resolve/main/{}",
-                    repo_id, sample_path
-                ),
-                memory_fit,
-                ram_required_gb,
-                format,
-                is_recommended: true,
-            });
-            return Ok(files);
-        }
-
-        // Sort files: prefer Fits + high preference score, then Tight, then TooLarge
-        files.sort_by(|a, b| {
-            let a_fit = fit_rank(a.memory_fit);
-            let b_fit = fit_rank(b.memory_fit);
-            let a_pref = preference_score(&a.quantization);
-            let b_pref = preference_score(&b.quantization);
-            b_fit
-                .cmp(&a_fit)
-                .then_with(|| b_pref.cmp(&a_pref))
-                .then_with(|| a.size_bytes.cmp(&b.size_bytes))
-        });
-
-        // Mark top fitting (or best overall) variant as recommended
-        if let Some(best) = files.iter_mut().find(|f| f.memory_fit == MemoryFit::Fits) {
-            best.is_recommended = true;
-        } else if let Some(first) = files.first_mut() {
-            first.is_recommended = true;
-        }
-
-        Ok(files)
+        Ok(classify_repo_tree_items(repo_id, &items, profile))
     }
 
     /// Downloads a repository's raw `README.md` from Hugging Face and strips YAML frontmatter.
@@ -593,6 +612,43 @@ fn urlencoding(input: &str) -> String {
     encoded
 }
 
+/// Normalizes a Hugging Face avatar URL (allowing only safe `https://`, `http://`, or leading `/`).
+pub fn normalize_hf_avatar_url(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
+        Some(trimmed.to_string())
+    } else if trimmed.starts_with("//") {
+        Some(format!("https:{trimmed}"))
+    } else if trimmed.starts_with('/') {
+        Some(format!("https://huggingface.co{trimmed}"))
+    } else {
+        None
+    }
+}
+
+/// Resolves relative image URLs inside a Hugging Face `README.md` against
+/// `https://huggingface.co/<repo_id>/resolve/main/<rel_path>`.
+pub fn resolve_hf_image_url(repo_id: &str, raw_src: &str) -> String {
+    let trimmed = raw_src.trim();
+    if trimmed.starts_with("https://")
+        || trimmed.starts_with("http://")
+        || trimmed.starts_with("data:image/")
+    {
+        return trimmed.to_string();
+    }
+    if trimmed.starts_with("//") {
+        return format!("https:{trimmed}");
+    }
+    let clean_rel = trimmed
+        .trim_start_matches("./")
+        .trim_start_matches('/');
+    let clean_repo = repo_id.trim().trim_matches('/');
+    format!("https://huggingface.co/{clean_repo}/resolve/main/{clean_rel}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -636,7 +692,9 @@ mod tests {
     fn test_evaluate_memory_fit() {
         let profile = HardwareProfile {
             total_memory_gb: 32.0,
+            used_memory_gb: 16.0,
             available_memory_gb: 16.0,
+            usage_percent: 50.0,
             cpu_cores: 10,
             os_name: "macOS".to_string(),
             arch: "aarch64".to_string(),
@@ -654,5 +712,35 @@ mod tests {
         let (fit3, req3) = evaluate_memory_fit(40 * 1024 * 1024 * 1024, &profile);
         assert_eq!(fit3, MemoryFit::TooLarge);
         assert_eq!(req3, 48.0);
+    }
+
+    #[test]
+    fn test_resolve_hf_image_url_and_avatar_norm() {
+        assert_eq!(
+            resolve_hf_image_url("unsloth/Qwen3-30B-GGUF", "./assets/benchmark.png"),
+            "https://huggingface.co/unsloth/Qwen3-30B-GGUF/resolve/main/assets/benchmark.png"
+        );
+        assert_eq!(
+            resolve_hf_image_url("mlx-community/Qwen2.5-7B-4bit", "images/chart.webp"),
+            "https://huggingface.co/mlx-community/Qwen2.5-7B-4bit/resolve/main/images/chart.webp"
+        );
+        assert_eq!(
+            resolve_hf_image_url("unsloth/Qwen3-30B-GGUF", "https://example.com/banner.png"),
+            "https://example.com/banner.png"
+        );
+        assert_eq!(
+            resolve_hf_image_url("unsloth/Qwen3-30B-GGUF", "//cdn.example.com/logo.svg"),
+            "https://cdn.example.com/logo.svg"
+        );
+
+        assert_eq!(
+            normalize_hf_avatar_url("/avatars/abc123.svg").as_deref(),
+            Some("https://huggingface.co/avatars/abc123.svg")
+        );
+        assert_eq!(
+            normalize_hf_avatar_url("https://cdn-avatars.huggingface.co/v1/x.png").as_deref(),
+            Some("https://cdn-avatars.huggingface.co/v1/x.png")
+        );
+        assert_eq!(normalize_hf_avatar_url("javascript:alert(1)"), None);
     }
 }

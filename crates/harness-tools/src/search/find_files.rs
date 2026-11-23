@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use ignore::WalkBuilder;
 use schemars::JsonSchema;
 use serde::Deserialize;
+use std::path::{Path, PathBuf};
 use tracing::instrument;
 
 use harness_core::{Tool, ToolError};
@@ -11,18 +12,41 @@ use harness_core::{Tool, ToolError};
 pub struct FindFilesArgs {
     /// Optional filename or path substring/pattern to match against. If omitted, lists all files.
     pub pattern: Option<String>,
-    /// Root directory to search from. Defaults to ".".
+    /// Root directory to search from. Defaults to the active workspace root (or ".").
     pub path: Option<String>,
     /// Maximum number of file paths to return. Defaults to 100.
     pub max_results: Option<usize>,
 }
 
 #[derive(Default, Clone)]
-pub struct FindFilesTool;
+pub struct FindFilesTool {
+    workspace_root: Option<PathBuf>,
+}
 
 impl FindFilesTool {
     pub fn new() -> Self {
-        Self
+        Self { workspace_root: None }
+    }
+
+    pub fn with_workspace_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.workspace_root = Some(root.into());
+        self
+    }
+
+    fn resolve_root(&self, raw: Option<&str>) -> PathBuf {
+        match raw {
+            Some(s) if !s.trim().is_empty() => {
+                let p = Path::new(s);
+                if p.is_absolute() {
+                    p.to_path_buf()
+                } else if let Some(ref ws) = self.workspace_root {
+                    ws.join(p)
+                } else {
+                    p.to_path_buf()
+                }
+            }
+            _ => self.workspace_root.clone().unwrap_or_else(|| PathBuf::from(".")),
+        }
     }
 }
 
@@ -57,8 +81,8 @@ impl Tool for FindFilesTool {
             }
         })?;
 
-        let root_str = args.path.unwrap_or_else(|| ".".to_string());
-        let root_path = std::path::PathBuf::from(&root_str);
+        let root_path = self.resolve_root(args.path.as_deref());
+        let root_str = root_path.to_string_lossy().to_string();
         let max_results = args.max_results.unwrap_or(100).max(1);
         let pattern_opt = args.pattern.map(|p| p.to_lowercase());
 
@@ -79,7 +103,12 @@ impl Tool for FindFilesTool {
                     continue;
                 }
 
-                let path_display = path.strip_prefix(".").unwrap_or(path).to_string_lossy().to_string();
+                let path_display = path
+                    .strip_prefix(&root_path)
+                    .or_else(|_| path.strip_prefix("."))
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .to_string();
 
                 let is_match = match pattern_opt {
                     Some(ref pat) => path_display.to_lowercase().contains(pat),

@@ -44,7 +44,9 @@ pub struct VisualMediaItem {
 /// Scans `.dex/media/images/` and `.dex/media/video/` and returns discovered visual media items
 /// sorted newest-filename-first.
 pub async fn list_visual_media_items() -> Result<Vec<VisualMediaItem>, MediaError> {
-    list_visual_media_in_dirs(Path::new(DEFAULT_IMAGES_DIR), Path::new(DEFAULT_VIDEO_DIR)).await
+    let img_dir = harness_core::resolve_dex_subpath(DEFAULT_IMAGES_DIR);
+    let vid_dir = harness_core::resolve_dex_subpath(DEFAULT_VIDEO_DIR);
+    list_visual_media_in_dirs(&img_dir, &vid_dir).await
 }
 
 /// Scans the given image and video directories for supported visual files.

@@ -37,6 +37,13 @@ pub enum AudioError {
     #[error("Audio generation failed ({kind}): {reason}")]
     GenerationFailed { kind: String, reason: String },
 
+    #[error("BackendNotInstalled ({kind}): required backend '{backend}' is not installed. {install_hint}")]
+    BackendNotInstalled {
+        kind: String,
+        backend: String,
+        install_hint: String,
+    },
+
     #[error("Invalid audio input: {reason}")]
     InvalidInput { reason: String },
 

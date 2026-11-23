@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
+use std::path::PathBuf;
 use tokio::process::Command;
 use tracing::instrument;
 
@@ -32,11 +33,27 @@ pub struct GitWorktreeArgs {
 }
 
 #[derive(Default, Clone)]
-pub struct GitWorktreeTool;
+pub struct GitWorktreeTool {
+    workspace_root: Option<PathBuf>,
+}
 
 impl GitWorktreeTool {
     pub fn new() -> Self {
-        Self
+        Self { workspace_root: None }
+    }
+
+    pub fn with_workspace_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.workspace_root = Some(root.into());
+        self
+    }
+
+    fn git_command(&self) -> Command {
+        let mut cmd = Command::new("git");
+        harness_core::apply_enriched_path(&mut cmd);
+        if let Some(ref root) = self.workspace_root {
+            cmd.current_dir(root);
+        }
+        cmd
     }
 }
 
@@ -75,7 +92,8 @@ impl Tool for GitWorktreeTool {
 
         match args.action {
             GitWorktreeAction::List => {
-                let output = Command::new("git")
+                let output = self
+                    .git_command()
                     .args(["worktree", "list"])
                     .output()
                     .await
@@ -97,7 +115,7 @@ impl Tool for GitWorktreeTool {
                     reason: "Missing 'path' argument for 'add' action".to_string(),
                 })?;
 
-                let mut cmd = Command::new("git");
+                let mut cmd = self.git_command();
                 cmd.arg("worktree").arg("add");
 
                 if let Some(true) = args.create_branch {
@@ -136,7 +154,8 @@ impl Tool for GitWorktreeTool {
                     reason: "Missing 'path' argument for 'remove' action".to_string(),
                 })?;
 
-                let output = Command::new("git")
+                let output = self
+                    .git_command()
                     .args(["worktree", "remove", "--force", &path])
                     .output()
                     .await

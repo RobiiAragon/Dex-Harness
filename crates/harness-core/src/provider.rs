@@ -27,6 +27,9 @@ pub struct Message {
     pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Optional data URLs (`data:image/png;base64,...`) attached for vision-capable providers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub image_data_urls: Vec<String>,
 }
 
 impl Message {
@@ -37,6 +40,7 @@ impl Message {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            image_data_urls: Vec::new(),
         }
     }
 
@@ -47,6 +51,18 @@ impl Message {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            image_data_urls: Vec::new(),
+        }
+    }
+
+    pub fn user_with_images(content: impl Into<String>, image_data_urls: Vec<String>) -> Self {
+        Self {
+            role: Role::User,
+            content: Some(content.into()),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            image_data_urls,
         }
     }
 
@@ -57,6 +73,7 @@ impl Message {
             tool_calls,
             tool_call_id: None,
             name: None,
+            image_data_urls: Vec::new(),
         }
     }
 
@@ -67,6 +84,7 @@ impl Message {
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
             name: Some(tool_name.into()),
+            image_data_urls: Vec::new(),
         }
     }
 }

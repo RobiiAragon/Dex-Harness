@@ -49,6 +49,9 @@ pub struct ImageGenerateArgs {
     /// Optional model identifier (e.g. `schnell`, `dev`, `gpt-image-1`).
     #[serde(default)]
     pub model: Option<String>,
+    /// Optional explicit output file path (e.g. `/Users/.../concept.png`). Defaults to Dex's writable media directory.
+    #[serde(default)]
+    pub output_path: Option<String>,
 }
 
 /// Generates an image via local MLX (`mlx-gen`/`mflux`), ComfyUI, or an OpenAI-compatible HTTP endpoint.
@@ -98,6 +101,10 @@ impl Tool for ImageGenerateTool {
             backend: args.backend,
             workflow: args.workflow,
             model: args.model,
+            output_path: args
+                .output_path
+                .filter(|s| !s.trim().is_empty())
+                .map(PathBuf::from),
         };
 
         let res = generate_image(req, self.supervisor.clone(), self.event_bus.as_ref())

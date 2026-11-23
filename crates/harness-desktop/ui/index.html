@@ -44,6 +44,30 @@
         </div>
 
         <nav class="sidebar-nav" aria-label="Primary Navigation">
+          <div class="sidebar-projects-section">
+            <div class="sidebar-section-head">
+              <div class="nav-section-label">Projects</div>
+              <div class="sidebar-section-actions">
+                <button class="sidebar-mini-btn" title="Create New Project" onclick="DexApp.openCreateProjectModal()">
+                  <i data-icon="plus" data-icon-size="11"></i>
+                  <span>New</span>
+                </button>
+                <button class="sidebar-mini-btn" title="Open Existing Folder" onclick="DexApp.openProjectDialog()">
+                  <i data-icon="folderOpen" data-icon-size="11"></i>
+                  <span>Open</span>
+                </button>
+              </div>
+            </div>
+            <div id="sidebar-projects-list" class="sidebar-projects-list">
+              <div class="card-meta" style="padding: 3px 8px; font-size: 11px;">Loading workspaces...</div>
+            </div>
+            <button class="new-chat-btn" title="Start a New Chat Session in Active Project" onclick="DexApp.startNewChat()">
+              <i data-icon="messageSquarePlus" data-icon-size="13"></i>
+              <span>New Chat</span>
+            </button>
+            <div id="sidebar-sessions-list" class="sidebar-sessions-list"></div>
+          </div>
+
           <div class="nav-section-label">Workspace</div>
           <button class="nav-item active" data-view="view-agent" title="Agent" onclick="DexApp.navigate('view-agent')">
             <i data-icon="terminal" data-icon-size="15"></i>
@@ -85,6 +109,9 @@
               <span>Memory</span>
               <span id="sidebar-ram-metric" class="sidebar-metric-val">Detecting...</span>
             </div>
+            <div class="sidebar-ram-bar-track" title="Live macOS Unified Memory Usage (Active + Wired + Compressed)">
+              <div id="sidebar-ram-bar-fill" class="sidebar-ram-bar-fill"></div>
+            </div>
             <div class="sidebar-metric-row">
               <span>Context</span>
               <span id="sidebar-ctx-metric" class="sidebar-metric-val">0 tok</span>
@@ -92,7 +119,7 @@
           </div>
           <button class="sidebar-model-pill" title="Configure Provider & Model" onclick="DexApp.openModelConfig()">
             <i data-icon="cpu" data-icon-size="13"></i>
-            <span id="sidebar-model-label">ollama / qwen2.5:7b</span>
+            <span id="sidebar-model-label">Select local model...</span>
           </button>
         </div>
       </aside>
@@ -104,6 +131,18 @@
              ================================================================ -->
         <section id="view-agent" class="view-panel active">
           <div class="agent-view">
+            <div class="workspace-banner">
+              <span class="workspace-banner-path" title="Active Project Workspace Root">
+                <i data-icon="folder" data-icon-size="12"></i>
+                <span id="active-workspace-path">Workspace: detecting...</span>
+              </span>
+              <div class="row" style="gap: 6px; flex-shrink: 0;">
+                <button class="sidebar-mini-btn" onclick="DexApp.openProjectDialog()">
+                  <i data-icon="folderOpen" data-icon-size="11"></i>
+                  <span>Switch</span>
+                </button>
+              </div>
+            </div>
             <div id="agent-feed-scroll" class="agent-feed-scroll">
               <div id="agent-feed" class="agent-feed-inner">
                 <div id="agent-empty" class="agent-empty">
@@ -136,8 +175,8 @@
 
             <!-- Floating Bottom Composer -->
             <div class="composer-dock">
-              <div class="composer-box">
-                <!-- Model & Provider Popover -->
+              <div id="composer-box" class="composer-box">
+                <!-- Model & Provider Popover (Zero-Typing Grouped Selector) -->
                 <div id="model-popover" class="model-popover">
                   <div class="card-header" style="margin-bottom: 2px;">
                     <span class="card-title"><i data-icon="sliders" data-icon-size="14"></i> Inference Configuration</span>
@@ -146,18 +185,51 @@
                   <div class="field">
                     <label class="field-label" for="sel-provider">Provider</label>
                     <select id="sel-provider" class="select" onchange="DexApp.onProviderChange()">
+                      <option value="dex-local">Dex Native Runtime (Autonomous MLX / GGUF)</option>
                       <option value="ollama">Ollama (Local :11434)</option>
                       <option value="lmstudio">LM Studio / Bionic (:1234)</option>
                       <option value="openai">OpenAI / Compatible API</option>
                     </select>
                   </div>
                   <div class="field">
-                    <label class="field-label" for="input-model">Model Identifier</label>
-                    <input id="input-model" class="input mono" type="text" value="qwen2.5:7b" placeholder="qwen2.5:7b, gpt-4o" oninput="DexApp.syncModelLabels()" />
+                    <div class="item-card-row">
+                      <label class="field-label" for="sel-model-picker">Model</label>
+                      <button class="sidebar-mini-btn" title="Refresh detected models" onclick="DexApp.refreshModelPickerOptions()">
+                        <i data-icon="refresh" data-icon-size="10"></i>
+                        <span>Refresh</span>
+                      </button>
+                    </div>
+                    <select id="sel-model-picker" class="select mono" onchange="DexApp.onSelectModelFromPicker()">
+                      <option value="">Scanning local models...</option>
+                    </select>
                   </div>
-                  <div class="field">
-                    <label class="field-label" for="input-apibase">API Base URL (optional)</label>
-                    <input id="input-apibase" class="input mono" type="text" placeholder="http://127.0.0.1:11434" />
+                  <div id="popover-loaded-status" class="item-card-row" style="display: none; padding: 6px 8px; border-radius: 6px; background: rgba(16, 185, 129, 0.08); border: 1px solid var(--ok-border);">
+                    <span id="popover-loaded-text" class="mono" style="font-size: 11px; color: var(--ok-fg);">Loaded</span>
+                    <button class="btn btn-sm btn-ghost" style="height: 22px; padding: 0 7px; font-size: 10.5px;" onclick="DexApp.unloadLocalModel()">
+                      <i data-icon="power" data-icon-size="11"></i>
+                      <span>Unload</span>
+                    </button>
+                  </div>
+                  <div id="popover-runtime-missing" class="item-card-row" style="display: none; padding: 7px 9px; border-radius: 6px; background: var(--warn-bg); border: 1px solid var(--warn-border);">
+                    <span id="popover-runtime-missing-text" style="font-size: 11px; color: var(--warn-fg);">Runtime not installed</span>
+                    <button id="btn-popover-install-rt" class="btn btn-sm btn-primary" style="height: 24px;" onclick="DexApp.installMissingRuntimeFromPopover()">
+                      <i data-icon="download" data-icon-size="11"></i>
+                      <span>Install (1-click)</span>
+                    </button>
+                  </div>
+                  <button class="custom-model-toggle" onclick="DexApp.toggleCustomModelInput()">
+                    <i data-icon="chevronRight" data-icon-size="11"></i>
+                    <span id="custom-model-toggle-label">Enter custom model ID...</span>
+                  </button>
+                  <div id="custom-model-fields" class="list-stack" style="display: none; gap: 8px;">
+                    <div class="field">
+                      <label class="field-label" for="input-model">Custom Model ID</label>
+                      <input id="input-model" class="input mono" type="text" value="" placeholder="gpt-4o, claude-3-7-sonnet, qwen2.5:7b" oninput="DexApp.syncModelLabels()" />
+                    </div>
+                    <div class="field">
+                      <label class="field-label" for="input-apibase">API Base URL (optional)</label>
+                      <input id="input-apibase" class="input mono" type="text" placeholder="https://api.openai.com/v1" />
+                    </div>
                   </div>
                   <div class="row" style="justify-content: space-between; padding-top: 4px;">
                     <button class="btn btn-sm btn-ghost" onclick="DexApp.closeModelPopover(); DexApp.navigate('view-models');">Open Models Hub</button>
@@ -165,19 +237,25 @@
                   </div>
                 </div>
 
+                <!-- Removable Attached Files Chips -->
+                <div id="composer-attachments" class="composer-attachments"></div>
+
                 <textarea
                   id="input-goal"
                   class="composer-textarea"
                   rows="1"
-                  placeholder="Describe an objective for Dex... (Cmd+Enter to run)"
+                  placeholder="Describe an objective for Dex... Drop files here or press Cmd+Enter"
                 ></textarea>
 
                 <div class="composer-toolbar">
                   <div class="composer-left">
                     <button id="btn-model-pill" class="model-trigger-pill" onclick="DexApp.toggleModelPopover()">
-                      <i data-icon="cpu" data-icon-size="13"></i>
-                      <span id="composer-model-label">ollama / qwen2.5:7b</span>
+                      <span id="model-pill-dot" class="model-pill-dot"></span>
+                      <span id="composer-model-label">Select local model...</span>
                       <i data-icon="chevronDown" data-icon-size="12"></i>
+                    </button>
+                    <button id="btn-attach" class="mic-btn" title="Attach Files (Images, PDFs, Code, 3D .glb)" onclick="DexApp.pickAttachmentFiles()">
+                      <i data-icon="paperclip" data-icon-size="14"></i>
                     </button>
                     <button id="btn-mic" class="mic-btn" title="Push-to-Talk Voice Objective" onclick="DexApp.toggleVoiceRecording()">
                       <i data-icon="mic" data-icon-size="14"></i>
@@ -698,7 +776,32 @@
                     </div>
                   </div>
 
-                  <!-- Local Servers Strip (LM Studio :1234 / Ollama :11434 / MLX-LM :8088) -->
+                  <!-- Autonomous Dex Native Runtimes + Active Loaded Model Panel -->
+                  <div class="runtime-panel">
+                    <div id="active-loaded-banner" class="active-model-banner">
+                      <div class="row" style="gap: 10px; min-width: 0;">
+                        <span class="model-pill-dot ready"></span>
+                        <div style="min-width: 0;">
+                          <div id="active-loaded-title" style="font-size: 12.5px; font-weight: 600; color: var(--text-primary);">Loaded model</div>
+                          <div id="active-loaded-meta" class="mono card-meta">http://127.0.0.1:8088/v1</div>
+                        </div>
+                      </div>
+                      <div class="row" style="gap: 6px;">
+                        <button class="btn btn-sm" onclick="DexApp.navigate('view-agent')">
+                          <i data-icon="terminal" data-icon-size="12"></i>
+                          <span>Open Agent</span>
+                        </button>
+                        <button class="btn btn-sm btn-danger" onclick="DexApp.unloadLocalModel()">
+                          <i data-icon="power" data-icon-size="12"></i>
+                          <span>Unload</span>
+                        </button>
+                      </div>
+                    </div>
+                    <div id="native-runtime-cards" class="runtime-cards-row"></div>
+                    <pre id="runtime-log-box" class="runtime-log-box"></pre>
+                  </div>
+
+                  <!-- Local Servers Strip (Dex MLX :8088 / llama.cpp :8089 / Ollama :11434 / LM Studio :1234) -->
                   <div id="local-servers-strip" class="servers-strip"></div>
 
                   <!-- Active Model Folders Strip -->
@@ -920,6 +1023,31 @@
           </div>
         </div>
       </aside>
+    </div>
+  </div>
+
+  <!-- Modal: Create New Project / Workspace -->
+  <div id="create-project-modal" class="modal-overlay" onclick="if(event.target===this)DexApp.closeCreateProjectModal()">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <span class="modal-title"><i data-icon="folderPlus" data-icon-size="16"></i> New Project Workspace</span>
+        <button class="icon-btn" onclick="DexApp.closeCreateProjectModal()"><i data-icon="x" data-icon-size="15"></i></button>
+      </div>
+      <div class="field">
+        <label class="field-label" for="proj-name-input">Project Name *</label>
+        <input id="proj-name-input" class="input" type="text" placeholder="my-rust-service" onkeydown="if(event.key==='Enter')DexApp.submitCreateProject();" />
+      </div>
+      <div class="field">
+        <label class="field-label" for="proj-parent-input">Parent Directory</label>
+        <input id="proj-parent-input" class="input mono" type="text" value="~/Projects" placeholder="~/Projects" />
+      </div>
+      <label class="checkbox-label">
+        <input type="checkbox" id="proj-init-git" checked /> Initialize Git repository (git init) and .dex/sessions/
+      </label>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" onclick="DexApp.closeCreateProjectModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="DexApp.submitCreateProject()">Create Project</button>
+      </div>
     </div>
   </div>
 

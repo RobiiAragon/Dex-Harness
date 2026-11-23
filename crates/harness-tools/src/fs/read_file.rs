@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::instrument;
 
 use harness_core::{Tool, ToolError};
@@ -18,11 +18,29 @@ pub struct ReadFileArgs {
 }
 
 #[derive(Default, Clone)]
-pub struct ReadFileTool;
+pub struct ReadFileTool {
+    workspace_root: Option<PathBuf>,
+}
 
 impl ReadFileTool {
     pub fn new() -> Self {
-        Self
+        Self { workspace_root: None }
+    }
+
+    pub fn with_workspace_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.workspace_root = Some(root.into());
+        self
+    }
+
+    fn resolve_path(&self, raw: &str) -> PathBuf {
+        let p = Path::new(raw);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else if let Some(ref root) = self.workspace_root {
+            root.join(p)
+        } else {
+            p.to_path_buf()
+        }
     }
 }
 
@@ -58,8 +76,8 @@ impl Tool for ReadFileTool {
             }
         })?;
 
-        let file_path = Path::new(&args.path);
-        let content = tokio::fs::read_to_string(file_path).await.map_err(|e| {
+        let file_path = self.resolve_path(&args.path);
+        let content = tokio::fs::read_to_string(&file_path).await.map_err(|e| {
             ToolError::Io {
                 name: self.name().to_string(),
                 message: format!("Could not read file '{}': {e}", args.path),

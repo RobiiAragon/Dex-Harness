@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::instrument;
 
 use harness_core::{Tool, ToolError};
@@ -18,11 +18,29 @@ pub struct WriteFileArgs {
 }
 
 #[derive(Default, Clone)]
-pub struct WriteFileTool;
+pub struct WriteFileTool {
+    workspace_root: Option<PathBuf>,
+}
 
 impl WriteFileTool {
     pub fn new() -> Self {
-        Self
+        Self { workspace_root: None }
+    }
+
+    pub fn with_workspace_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.workspace_root = Some(root.into());
+        self
+    }
+
+    fn resolve_path(&self, raw: &str) -> PathBuf {
+        let p = Path::new(raw);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else if let Some(ref root) = self.workspace_root {
+            root.join(p)
+        } else {
+            p.to_path_buf()
+        }
     }
 }
 
@@ -58,7 +76,7 @@ impl Tool for WriteFileTool {
             }
         })?;
 
-        let file_path = Path::new(&args.path);
+        let file_path = self.resolve_path(&args.path);
         let create_dirs = args.create_directories.unwrap_or(true);
 
         if create_dirs {
@@ -72,7 +90,7 @@ impl Tool for WriteFileTool {
             }
         }
 
-        tokio::fs::write(file_path, &args.content).await.map_err(|e| ToolError::Io {
+        tokio::fs::write(&file_path, &args.content).await.map_err(|e| ToolError::Io {
             name: self.name().to_string(),
             message: format!("Failed to write to file '{}': {e}", args.path),
         })?;

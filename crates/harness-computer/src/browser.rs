@@ -454,10 +454,10 @@ impl Tool for BrowserScreenshotTool {
             .unwrap_or(0);
 
         let out_path: PathBuf = match args.destination_path {
-            Some(p) => PathBuf::from(p),
+            Some(p) => harness_core::resolve_safe_path(p),
             None => {
-                let dir = Path::new(".dex/screenshots");
-                let _ = tokio::fs::create_dir_all(dir).await;
+                let dir = harness_core::resolve_dex_subpath("screenshots");
+                let _ = tokio::fs::create_dir_all(&dir).await;
                 dir.join(format!("browser_{timestamp}.png"))
             }
         };

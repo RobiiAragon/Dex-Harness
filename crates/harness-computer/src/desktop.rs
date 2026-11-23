@@ -110,10 +110,10 @@ impl Tool for DesktopScreenshotTool {
                 .unwrap_or(0);
 
             let out_path: PathBuf = match args.destination_path {
-                Some(p) => PathBuf::from(p),
+                Some(p) => harness_core::resolve_safe_path(p),
                 None => {
-                    let dir = Path::new(".dex/screenshots");
-                    let _ = std::fs::create_dir_all(dir);
+                    let dir = harness_core::resolve_dex_subpath("screenshots");
+                    let _ = std::fs::create_dir_all(&dir);
                     dir.join(format!("desktop_{timestamp}.png"))
                 }
             };

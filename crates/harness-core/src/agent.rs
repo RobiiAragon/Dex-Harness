@@ -125,6 +125,33 @@ Solve the user's objective thoroughly:
     pub fn context_mut(&mut self) -> &mut ConversationContext {
         &mut self.context
     }
+
+    /// Executes a user goal with optional multimodal image data URLs attached to the user turn.
+    pub async fn run_with_images(
+        &mut self,
+        goal: &str,
+        image_data_urls: Vec<String>,
+    ) -> Result<String, CoreError> {
+        info!(goal = %goal, images = image_data_urls.len(), "Starting multimodal agent execution run");
+        if image_data_urls.is_empty() {
+            self.context.push(Message::user(goal));
+        } else {
+            self.context.push(Message::user_with_images(goal, image_data_urls));
+        }
+        self.current_step = 0;
+
+        while self.current_step < self.max_steps {
+            let step = self.step().await?;
+            if step.is_done {
+                return Ok(step.final_answer.unwrap_or_default());
+            }
+        }
+
+        warn!(max_steps = self.max_steps, "Maximum ReAct iterations reached without conclusion");
+        Err(CoreError::MaxIterationsReached {
+            max_steps: self.max_steps,
+        })
+    }
 }
 
 #[async_trait]

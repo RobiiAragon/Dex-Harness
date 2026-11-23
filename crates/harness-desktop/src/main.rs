@@ -1,11 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod projects;
 mod shortcuts;
 mod state;
 mod tray;
 
 use std::error::Error;
+use std::path::PathBuf;
 use std::time::Duration;
 use harness_core::EventBus;
 use state::DesktopState;
@@ -31,6 +33,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mode_for_tray = desktop_state.mode.clone();
     let supervisor_for_reaper = desktop_state.extension_supervisor.clone();
     let reaper_cancel = desktop_state.reaper_cancel.clone();
+    let workspace_for_init = desktop_state.active_workspace_dir.clone();
 
     let builder = tauri::Builder::default()
         .plugin(
@@ -42,6 +45,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                 })
                 .build(),
         )
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
+                let path_strings: Vec<String> = paths
+                    .iter()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .collect();
+                if !path_strings.is_empty() {
+                    let _ = window.emit("dex-files-dropped", path_strings);
+                }
+            }
+        })
         .manage(desktop_state)
         .invoke_handler(tauri::generate_handler![
             commands::run_goal,
@@ -50,6 +64,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             commands::get_mode,
             commands::resolve_approval,
             commands::get_cookbook,
+            commands::get_live_memory,
             commands::get_tasks,
             commands::get_screenshots,
             commands::search_hf_models,
@@ -64,6 +79,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             commands::remove_model_dir,
             commands::scan_local_models,
             commands::detect_local_servers,
+            commands::detect_runtimes,
+            commands::install_runtime,
+            commands::load_local_model,
+            commands::unload_local_model,
+            commands::get_active_loaded_model,
             commands::activate_mlx_model,
             commands::open_external_url,
             commands::delete_model,
@@ -100,6 +120,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             commands::inspect_unity_project,
             commands::export_model_to_unity,
             commands::check_blender_status,
+            commands::list_projects,
+            commands::create_project,
+            commands::open_project_dialog,
+            commands::select_project,
+            commands::remove_project,
+            commands::pick_attachment_files,
+            commands::inspect_attachment_paths,
+            commands::list_project_sessions,
+            commands::save_project_session,
+            commands::load_project_session,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -113,6 +143,18 @@ fn main() -> Result<(), Box<dyn Error>> {
             if let Err(e) = shortcuts::register_global_shortcuts(&handle) {
                 tracing::warn!("Failed to register global shortcuts: {}", e);
             }
+
+            // Restore last active project workspace from ~/.dex/projects.json
+            tauri::async_runtime::spawn(async move {
+                let store = projects::ProjectsStore::load_or_default().await;
+                if let Some(active) = store.active_project() {
+                    let p = PathBuf::from(&active.path);
+                    if tokio::fs::try_exists(&p).await.unwrap_or(false) {
+                        let mut ws = workspace_for_init.write().await;
+                        *ws = p;
+                    }
+                }
+            });
 
             // Forward EventBus events in real time to the Apple WKWebView frontend
             // IMPORTANT: Use `tauri::async_runtime::spawn` because `setup` runs on AppKit's main thread.

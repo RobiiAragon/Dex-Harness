@@ -549,9 +549,11 @@ pub async fn inspect_video(path: &Path) -> Result<VideoMetadata, MediaError> {
         });
     }
 
+    let mut ffprobe_cmd = Command::new("ffprobe");
+    harness_core::apply_enriched_path(&mut ffprobe_cmd);
     let output = tokio::time::timeout(
         Duration::from_secs(FFPROBE_TIMEOUT_SECS),
-        Command::new("ffprobe")
+        ffprobe_cmd
             .args([
                 "-v",
                 "quiet",
@@ -614,13 +616,14 @@ pub async fn extract_frames(
     }
 
     let dest_dir = match output_dir {
-        Some(dir) => dir.to_path_buf(),
+        Some(dir) => harness_core::resolve_safe_path(dir),
         None => {
             let stem = path
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("video");
-            PathBuf::from(DEFAULT_FRAMES_DIR).join(format!("{stem}_{}", current_epoch_millis()))
+            harness_core::resolve_dex_subpath(DEFAULT_FRAMES_DIR)
+                .join(format!("{stem}_{}", current_epoch_millis()))
         }
     };
 
@@ -732,9 +735,9 @@ pub async fn render_timeline(
 
     let fmt = spec.resolved_format(output_path);
     let dest = match output_path {
-        Some(p) => p.to_path_buf(),
+        Some(p) => harness_core::resolve_safe_path(p),
         None => {
-            let dir = PathBuf::from(DEFAULT_VIDEO_DIR);
+            let dir = harness_core::resolve_dex_subpath(DEFAULT_VIDEO_DIR);
             tokio::fs::create_dir_all(&dir)
                 .await
                 .map_err(|e| MediaError::Io {
@@ -801,9 +804,11 @@ pub async fn render_timeline(
 }
 
 async fn run_ffmpeg(args: &[String], op_name: &str) -> Result<(), MediaError> {
+    let mut cmd = Command::new("ffmpeg");
+    harness_core::apply_enriched_path(&mut cmd);
     let output = tokio::time::timeout(
         Duration::from_secs(FFMPEG_TIMEOUT_SECS),
-        Command::new("ffmpeg").args(args).output(),
+        cmd.args(args).output(),
     )
     .await
     .map_err(|_| MediaError::Timeout {
@@ -884,7 +889,7 @@ pub async fn generate_video(
         });
     }
 
-    let out_dir = PathBuf::from(DEFAULT_VIDEO_DIR);
+    let out_dir = harness_core::resolve_dex_subpath(DEFAULT_VIDEO_DIR);
     tokio::fs::create_dir_all(&out_dir)
         .await
         .map_err(|e| MediaError::Io {
@@ -960,9 +965,10 @@ pub async fn generate_video(
                     )
                     .await?
                 } else {
-                    return Err(MediaError::BackendUnavailable {
+                    return Err(MediaError::BackendNotInstalled {
                         kind: "video".to_string(),
-                        reason: "No video generation backend reachable. Start `mlx-gen` (port 8190) or ComfyUI (port 8188) with a video workflow (e.g. LTX-Video / Wan2.1).".to_string(),
+                        backend: "mlx-gen / comfyui-mcp".to_string(),
+                        install_hint: "Install or start `mlx-gen` (port 8190) or ComfyUI (port 8188) with a video workflow. Do NOT retry `video_generate` in a loop.".to_string(),
                     });
                 }
             }
@@ -1081,7 +1087,8 @@ async fn generate_video_via_comfyui(
         .as_deref()
         .filter(|w| !w.trim().is_empty())
         .unwrap_or("video_default.json");
-    let template = load_workflow_template(Path::new(DEFAULT_WORKFLOWS_DIR), wf_name).await?;
+    let wf_dir = harness_core::resolve_dex_subpath(DEFAULT_WORKFLOWS_DIR);
+    let template = load_workflow_template(&wf_dir, wf_name).await?;
 
     let mut str_vars = HashMap::new();
     str_vars.insert("PROMPT", prompt.to_string());

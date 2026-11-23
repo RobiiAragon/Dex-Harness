@@ -596,7 +596,8 @@ fn build_sample_cube_glb_bytes() -> Result<Vec<u8>, ThreeDError> {
 
 /// Scans `.dex/media/3d/` and returns all stored 3D models with optional triangle/vertex metrics.
 pub async fn list_3d_models() -> Result<Vec<StoredModel3dItem>, ThreeDError> {
-    list_3d_models_in_dir(Path::new(DEFAULT_3D_DIR)).await
+    let dir = harness_core::resolve_dex_subpath(DEFAULT_3D_DIR);
+    list_3d_models_in_dir(&dir).await
 }
 
 /// Scans a specific directory for 3D models (`.glb`, `.gltf`, `.obj`, `.fbx`, `.blend`).

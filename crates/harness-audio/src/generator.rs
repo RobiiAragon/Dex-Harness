@@ -41,6 +41,15 @@ async fn wake_audio_extension(supervisor: Option<&Arc<ExtensionSupervisor>>) {
     }
 }
 
+async fn is_audio_sidecar_reachable(base_url: &str) -> bool {
+    let probe = reqwest::Client::builder()
+        .timeout(Duration::from_millis(450))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    let health = format!("{}/health", base_url.trim_end_matches('/'));
+    probe.get(&health).send().await.is_ok() || probe.get(base_url).send().await.is_ok()
+}
+
 /// Generates music via a local compatible sidecar (`soundbox` / `acestep-cpp` / HTTP audio endpoint),
 /// waking the extension through `ExtensionSupervisor` if sleeping.
 pub async fn generate_music(
@@ -59,7 +68,18 @@ pub async fn generate_music(
 
     wake_audio_extension(supervisor.as_ref()).await;
 
-    let out_dir = PathBuf::from(DEFAULT_MUSIC_DIR);
+    let base_url = audio_gen_base_url();
+    if !is_audio_sidecar_reachable(&base_url).await {
+        return Err(AudioError::BackendNotInstalled {
+            kind: "music".to_string(),
+            backend: "soundbox-mcp".to_string(),
+            install_hint: format!(
+                "No music generation sidecar reachable at '{base_url}'. Install/start `soundbox-mcp` in Extensions or set `DEX_AUDIO_GEN_URL`. Do NOT retry `audio_generate_music`."
+            ),
+        });
+    }
+
+    let out_dir = harness_core::resolve_dex_subpath(DEFAULT_MUSIC_DIR);
     tokio::fs::create_dir_all(&out_dir)
         .await
         .map_err(|e| AudioError::Io {
@@ -73,7 +93,7 @@ pub async fn generate_music(
         .unwrap_or(0);
     let dest = out_dir.join(format!("music_{ts}.wav"));
 
-    let endpoint = format!("{}/v1/audio/music", audio_gen_base_url());
+    let endpoint = format!("{base_url}/v1/audio/music");
     let payload = serde_json::json!({
         "prompt": trimmed,
         "lyrics": lyrics,
@@ -100,7 +120,18 @@ pub async fn generate_sfx(
 
     wake_audio_extension(supervisor.as_ref()).await;
 
-    let out_dir = PathBuf::from(DEFAULT_SFX_DIR);
+    let base_url = audio_gen_base_url();
+    if !is_audio_sidecar_reachable(&base_url).await {
+        return Err(AudioError::BackendNotInstalled {
+            kind: "sfx".to_string(),
+            backend: "soundbox-mcp".to_string(),
+            install_hint: format!(
+                "No SFX generation sidecar reachable at '{base_url}'. Install/start `soundbox-mcp` in Extensions or set `DEX_AUDIO_GEN_URL`. Do NOT retry `audio_generate_sfx`."
+            ),
+        });
+    }
+
+    let out_dir = harness_core::resolve_dex_subpath(DEFAULT_SFX_DIR);
     tokio::fs::create_dir_all(&out_dir)
         .await
         .map_err(|e| AudioError::Io {
@@ -114,7 +145,7 @@ pub async fn generate_sfx(
         .unwrap_or(0);
     let dest = out_dir.join(format!("sfx_{ts}.wav"));
 
-    let endpoint = format!("{}/v1/audio/sfx", audio_gen_base_url());
+    let endpoint = format!("{base_url}/v1/audio/sfx");
     let payload = serde_json::json!({
         "prompt": trimmed,
         "duration_secs": duration_secs.clamp(0.5, 30.0),

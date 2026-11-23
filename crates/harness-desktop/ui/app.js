@@ -51,6 +51,23 @@
     selectedHfRepoId: null,
     selectedHfFiles: [],
     exploreInitialized: false,
+    // Phase 12: Autonomous Local Runtimes, Projects, Sessions, Attachments & Live RAM
+    runtimes: [],
+    activeLoadedModel: null,
+    modelLoadingText: null,
+    installingRuntime: null,
+    pendingMissingRuntime: null,
+    runtimeLogLines: [],
+    customModelOpen: false,
+    projects: [],
+    activeProjectId: null,
+    activeWorkspaceDir: '',
+    projectSessions: [],
+    activeSessionId: null,
+    sessionMessages: [],
+    attachments: [],
+    liveMemory: null,
+    memoryPollTimer: null,
   };
 
   function el(id) {
@@ -151,11 +168,16 @@
   }
 
   // =========================================================================
-  // Model Popover & Composer Helpers
+  // Model Popover, Zero-Typing Grouped Model Selector & Composer Helpers
   // =========================================================================
   function toggleModelPopover() {
     const pop = el('model-popover');
-    if (pop) pop.classList.toggle('open');
+    if (!pop) return;
+    const willOpen = !pop.classList.contains('open');
+    pop.classList.toggle('open', willOpen);
+    if (willOpen) {
+      refreshModelPickerOptions();
+    }
   }
 
   function closeModelPopover() {
@@ -166,15 +188,53 @@
   function openModelConfig() {
     navigate('view-agent');
     const pop = el('model-popover');
-    if (pop) pop.classList.add('open');
+    if (pop) {
+      pop.classList.add('open');
+      refreshModelPickerOptions();
+    }
+  }
+
+  function toggleCustomModelInput() {
+    state.customModelOpen = !state.customModelOpen;
+    const box = el('custom-model-fields');
+    const lbl = el('custom-model-toggle-label');
+    if (box) box.style.display = state.customModelOpen ? 'flex' : 'none';
+    if (lbl) lbl.textContent = state.customModelOpen ? 'Hide custom model ID' : 'Enter custom model ID...';
   }
 
   function syncModelLabels() {
-    const provider = (el('sel-provider') && el('sel-provider').value) || 'ollama';
-    const model = (el('input-model') && el('input-model').value.trim()) || 'qwen2.5:7b';
-    const text = `${provider} / ${model}`;
+    const provider = (el('sel-provider') && el('sel-provider').value) || 'dex-local';
+    const customModel = (el('input-model') && el('input-model').value.trim()) || '';
+    const dot = el('model-pill-dot');
     const cLabel = el('composer-model-label');
     const sLabel = el('sidebar-model-label');
+
+    let text = 'Select local model...';
+    let dotState = '';
+
+    if (state.modelLoadingText) {
+      text = state.modelLoadingText;
+      dotState = 'loading';
+    } else if (provider === 'dex-local' && state.activeLoadedModel) {
+      const m = state.activeLoadedModel;
+      const fmt = String(m.format || m.runtime || 'MLX').toUpperCase();
+      const q = m.quantization ? ` ${m.quantization}` : '';
+      text = `${m.name} (${fmt}${q})`;
+      dotState = 'ready';
+    } else if (customModel) {
+      text = `${provider} / ${customModel}`;
+      dotState = provider === 'openai' || provider === 'ollama' || provider === 'lmstudio' ? 'ready' : '';
+    } else if (provider === 'dex-local') {
+      text = 'Select local model...';
+      dotState = '';
+    } else {
+      text = `${provider} / select model`;
+      dotState = '';
+    }
+
+    if (dot) {
+      dot.className = `model-pill-dot${dotState ? ' ' + dotState : ''}`;
+    }
     if (cLabel) cLabel.textContent = text;
     if (sLabel) sLabel.textContent = text;
   }
@@ -183,18 +243,178 @@
     const provider = el('sel-provider').value;
     const modelInput = el('input-model');
     const apiBaseInput = el('input-apibase');
-    if (provider === 'ollama') {
-      if (modelInput.value === 'gpt-4o') modelInput.value = 'qwen2.5:7b';
-      if (apiBaseInput && apiBaseInput.value === 'http://127.0.0.1:1234/v1') apiBaseInput.value = '';
+    if (provider === 'openai') {
+      if (!state.customModelOpen) toggleCustomModelInput();
+      if (modelInput && !modelInput.value.trim()) modelInput.value = 'gpt-4o';
+      if (apiBaseInput && (apiBaseInput.value.includes('127.0.0.1:808') || apiBaseInput.value.includes(':1234'))) {
+        apiBaseInput.value = '';
+      }
     } else if (provider === 'lmstudio') {
       if (apiBaseInput && !apiBaseInput.value.trim()) {
         apiBaseInput.value = 'http://127.0.0.1:1234/v1';
       }
-    } else if (provider === 'openai') {
-      if (modelInput.value === 'qwen2.5:7b') modelInput.value = 'gpt-4o';
-      if (apiBaseInput && apiBaseInput.value === 'http://127.0.0.1:1234/v1') apiBaseInput.value = '';
+    } else if (provider === 'ollama') {
+      if (apiBaseInput && (apiBaseInput.value.includes(':1234') || apiBaseInput.value.includes(':808'))) {
+        apiBaseInput.value = '';
+      }
+    } else if (provider === 'dex-local' && state.activeLoadedModel) {
+      if (modelInput) modelInput.value = state.activeLoadedModel.path;
+      if (apiBaseInput) apiBaseInput.value = state.activeLoadedModel.base_url;
     }
+    renderModelPickerSelect();
     syncModelLabels();
+  }
+
+  async function refreshModelPickerOptions() {
+    try {
+      const [scanned, servers, activeLoaded, runtimes] = await Promise.all([
+        invoke('scan_local_models'),
+        invoke('detect_local_servers'),
+        invoke('get_active_loaded_model'),
+        invoke('detect_runtimes'),
+      ]);
+      state.scannedModels = scanned || [];
+      state.localServers = servers || [];
+      state.activeLoadedModel = activeLoaded || null;
+      state.runtimes = runtimes || [];
+      renderModelPickerSelect();
+      renderRuntimesPanel();
+      renderActiveLoadedBanner();
+      syncModelLabels();
+    } catch (err) {
+      console.error('Model picker refresh failed:', err);
+    }
+  }
+
+  function renderModelPickerSelect() {
+    const picker = el('sel-model-picker');
+    if (!picker) return;
+
+    const localRunnable = (state.scannedModels || []).filter(
+      (m) => (m.format === 'mlx' || m.format === 'gguf') && m.path
+    );
+    const ollamaSrv = (state.localServers || []).find((s) => s.id === 'ollama' && s.reachable);
+    const lmSrv = (state.localServers || []).find((s) => s.id === 'lmstudio' && s.reachable);
+    const ollamaModels = ollamaSrv ? ollamaSrv.loaded_models || [] : [];
+    const lmModels = lmSrv ? lmSrv.loaded_models || [] : [];
+
+    const parts = [];
+    parts.push('<option value="">-- Choose a detected model --</option>');
+
+    if (localRunnable.length > 0) {
+      parts.push('<optgroup label="Dex Native Runtime (MLX &amp; GGUF)">');
+      for (const m of localRunnable) {
+        const fmt = m.format.toUpperCase();
+        const q = m.quantization ? ` · ${m.quantization}` : '';
+        const sz = formatSizeGb(m.size_bytes);
+        const val = `local::${m.id}`;
+        const isLoaded = state.activeLoadedModel && state.activeLoadedModel.path === m.path;
+        const prefix = isLoaded ? '[Loaded] ' : '';
+        parts.push(
+          `<option value="${escapeHtml(val)}" ${isLoaded ? 'selected' : ''}>${escapeHtml(prefix + m.name)} [${fmt}${escapeHtml(q)} · ${escapeHtml(sz)}]</option>`
+        );
+      }
+      parts.push('</optgroup>');
+    }
+
+    if (ollamaModels.length > 0) {
+      parts.push('<optgroup label="Ollama (Running :11434)">');
+      for (const name of ollamaModels) {
+        const val = `ollama::${name}`;
+        const isSel = el('sel-provider') && el('sel-provider').value === 'ollama' && el('input-model') && el('input-model').value === name;
+        parts.push(`<option value="${escapeHtml(val)}" ${isSel ? 'selected' : ''}>${escapeHtml(name)} [Ollama]</option>`);
+      }
+      parts.push('</optgroup>');
+    }
+
+    if (lmModels.length > 0) {
+      parts.push('<optgroup label="LM Studio / Bionic (Running :1234)">');
+      for (const name of lmModels) {
+        const val = `lmstudio::${name}`;
+        const isSel = el('sel-provider') && el('sel-provider').value === 'lmstudio' && el('input-model') && el('input-model').value === name;
+        parts.push(`<option value="${escapeHtml(val)}" ${isSel ? 'selected' : ''}>${escapeHtml(name)} [LM Studio]</option>`);
+      }
+      parts.push('</optgroup>');
+    }
+
+    picker.innerHTML = parts.join('');
+    updatePopoverLoadedStatus();
+  }
+
+  function updatePopoverLoadedStatus() {
+    const box = el('popover-loaded-status');
+    const txt = el('popover-loaded-text');
+    if (box && txt) {
+      if (state.activeLoadedModel) {
+        const m = state.activeLoadedModel;
+        const fmt = String(m.format || m.runtime || '').toUpperCase();
+        txt.textContent = `Mounted: ${m.name} (${fmt}${m.quantization ? ' ' + m.quantization : ''}) :${m.port}`;
+        box.style.display = 'flex';
+      } else {
+        box.style.display = 'none';
+      }
+    }
+
+    const missBox = el('popover-runtime-missing');
+    const missTxt = el('popover-runtime-missing-text');
+    const missBtn = el('btn-popover-install-rt');
+    if (missBox && missTxt && missBtn) {
+      if (state.pendingMissingRuntime) {
+        const label = state.pendingMissingRuntime === 'mlx' ? 'MLX Runtime' : 'llama.cpp';
+        missTxt.textContent = `${label} is not installed yet.`;
+        missBtn.innerHTML = `${icon('download', 11)} <span>Install ${escapeHtml(label)} (1-click)</span>`;
+        missBox.style.display = 'flex';
+      } else {
+        missBox.style.display = 'none';
+      }
+    }
+  }
+
+  async function onSelectModelFromPicker() {
+    const picker = el('sel-model-picker');
+    if (!picker || !picker.value) return;
+    const raw = picker.value;
+
+    if (raw.startsWith('local::')) {
+      const id = raw.slice('local::'.length);
+      const m = state.scannedModels.find((x) => x.id === id);
+      if (!m) return;
+      await loadLocalModelFromSpec(m, false);
+      return;
+    }
+
+    if (raw.startsWith('ollama::')) {
+      const name = raw.slice('ollama::'.length);
+      el('sel-provider').value = 'ollama';
+      el('input-model').value = name;
+      el('input-apibase').value = '';
+      state.pendingMissingRuntime = null;
+      updatePopoverLoadedStatus();
+      syncModelLabels();
+      appendSystemNote(`Selected Ollama model: ${name}`);
+      return;
+    }
+
+    if (raw.startsWith('lmstudio::')) {
+      const name = raw.slice('lmstudio::'.length);
+      const lmSrv = state.localServers.find((s) => s.id === 'lmstudio');
+      el('sel-provider').value = 'lmstudio';
+      el('input-model').value = name;
+      el('input-apibase').value = (lmSrv && lmSrv.base_url) || 'http://127.0.0.1:1234/v1';
+      state.pendingMissingRuntime = null;
+      updatePopoverLoadedStatus();
+      syncModelLabels();
+      appendSystemNote(`Selected LM Studio model: ${name}`);
+    }
+  }
+
+  async function installMissingRuntimeFromPopover() {
+    if (!state.pendingMissingRuntime) return;
+    const rt = state.pendingMissingRuntime;
+    closeModelPopover();
+    navigate('view-models');
+    switchModelsTab('library');
+    await installRuntime(rt);
   }
 
   function autoResizeComposer() {
@@ -222,6 +442,285 @@
       ta.focus();
     }
     if (noteText) appendSystemNote(noteText);
+  }
+
+  // =========================================================================
+  // Composer File Attachments (Native Dialog + Drag & Drop)
+  // =========================================================================
+  function iconForAttachmentKind(kind) {
+    if (kind === 'image') return 'image';
+    if (kind === 'document') return 'fileText';
+    if (kind === 'mesh_3d') return 'cube';
+    if (kind === 'audio') return 'mic';
+    if (kind === 'video') return 'film';
+    if (kind === 'code') return 'code';
+    return 'file';
+  }
+
+  function renderComposerAttachments() {
+    const box = el('composer-attachments');
+    if (!box) return;
+    if (!state.attachments || state.attachments.length === 0) {
+      box.classList.remove('has-items');
+      box.innerHTML = '';
+      return;
+    }
+    box.classList.add('has-items');
+    box.innerHTML = state.attachments.map((att, idx) => `
+      <span class="att-chip" title="${escapeHtml(att.path)}">
+        ${icon(iconForAttachmentKind(att.kind), 12)}
+        <span class="att-chip-name">${escapeHtml(att.filename)}</span>
+        <span class="att-chip-size">${escapeHtml(formatBytesKb(att.size_bytes || 0))}</span>
+        <button class="att-chip-rm" title="Remove attachment" onclick="DexApp.removeAttachment(${idx})">${icon('x', 11)}</button>
+      </span>
+    `).join('');
+  }
+
+  function mergeAttachmentMetas(items) {
+    if (!Array.isArray(items) || items.length === 0) return;
+    const seen = new Set(state.attachments.map((a) => a.path));
+    for (const item of items) {
+      if (item && item.path && !seen.has(item.path)) {
+        state.attachments.push(item);
+        seen.add(item.path);
+      }
+    }
+    renderComposerAttachments();
+  }
+
+  async function pickAttachmentFiles() {
+    try {
+      const files = await invoke('pick_attachment_files');
+      mergeAttachmentMetas(files || []);
+    } catch (err) {
+      appendSystemNote(`Attachment picker error: ${err}`, 'error');
+    }
+  }
+
+  async function addAttachmentPaths(paths) {
+    if (!Array.isArray(paths) || paths.length === 0) return;
+    try {
+      const metas = await invoke('inspect_attachment_paths', { paths });
+      mergeAttachmentMetas(metas || []);
+    } catch (err) {
+      appendSystemNote(`Could not attach dropped files: ${err}`, 'error');
+    }
+  }
+
+  function removeAttachment(idx) {
+    state.attachments.splice(idx, 1);
+    renderComposerAttachments();
+  }
+
+  // =========================================================================
+  // Projects / Workspaces & Persisted Sessions (`~/.dex/projects.json`)
+  // =========================================================================
+  async function refreshProjects() {
+    try {
+      const res = await invoke('list_projects');
+      applyProjectsResponse(res);
+      await refreshProjectSessions();
+    } catch (err) {
+      console.error('Failed to load projects:', err);
+    }
+  }
+
+  function applyProjectsResponse(res) {
+    if (!res) return;
+    state.activeProjectId = res.active_project_id || null;
+    state.activeWorkspaceDir = res.active_workspace_dir || '';
+    state.projects = res.projects || [];
+    renderSidebarProjects();
+    const wsEl = el('active-workspace-path');
+    if (wsEl) {
+      const activeProj = state.projects.find((p) => p.id === state.activeProjectId);
+      const label = activeProj ? `${activeProj.name} — ${activeProj.path}` : (state.activeWorkspaceDir || 'Default Workspace');
+      wsEl.textContent = label;
+      wsEl.parentElement && wsEl.parentElement.setAttribute('title', state.activeWorkspaceDir);
+    }
+  }
+
+  function renderSidebarProjects() {
+    const list = el('sidebar-projects-list');
+    if (!list) return;
+    if (!state.projects || state.projects.length === 0) {
+      list.innerHTML = '<div class="card-meta" style="padding: 3px 8px; font-size: 11px;">No projects yet. Click New or Open.</div>';
+      return;
+    }
+    list.innerHTML = state.projects.map((p) => {
+      const active = p.id === state.activeProjectId;
+      return `
+        <div class="project-row ${active ? 'active' : ''}" title="${escapeHtml(p.path)}" onclick="DexApp.selectProject('${escapeHtml(p.id)}')">
+          <div class="project-row-left">
+            ${icon(active ? 'folderOpen' : 'folder', 13)}
+            <span class="project-row-name">${escapeHtml(p.name)}</span>
+          </div>
+          <button class="project-row-rm" title="Remove from recent projects" onclick="event.stopPropagation(); DexApp.removeProject('${escapeHtml(p.id)}')">
+            ${icon('x', 11)}
+          </button>
+        </div>
+      `;
+    }).join('');
+  }
+
+  function openCreateProjectModal() {
+    const modal = el('create-project-modal');
+    if (modal) modal.classList.add('open');
+    const inp = el('proj-name-input');
+    if (inp) inp.focus();
+  }
+
+  function closeCreateProjectModal() {
+    const modal = el('create-project-modal');
+    if (modal) modal.classList.remove('open');
+  }
+
+  async function submitCreateProject() {
+    const name = (el('proj-name-input') && el('proj-name-input').value.trim()) || '';
+    const parentDir = (el('proj-parent-input') && el('proj-parent-input').value.trim()) || null;
+    const initGit = el('proj-init-git') ? !!el('proj-init-git').checked : true;
+    if (!name) return alert('Enter a project name.');
+    try {
+      const res = await invoke('create_project', { name, parentDir, initGit });
+      el('proj-name-input').value = '';
+      closeCreateProjectModal();
+      applyProjectsResponse(res);
+      startNewChat(true);
+      await refreshProjectSessions();
+      refreshTasks();
+      refreshScreenshots();
+      appendSystemNote(`Created and activated project workspace: ${state.activeWorkspaceDir}`);
+    } catch (err) {
+      alert(`Failed to create project: ${err}`);
+    }
+  }
+
+  async function openProjectDialog() {
+    try {
+      const res = await invoke('open_project_dialog');
+      if (!res) return;
+      applyProjectsResponse(res);
+      startNewChat(true);
+      await refreshProjectSessions();
+      refreshTasks();
+      refreshScreenshots();
+      navigate('view-agent');
+      appendSystemNote(`Workspace switched to: ${state.activeWorkspaceDir}`);
+    } catch (err) {
+      appendSystemNote(`Could not open folder: ${err}`, 'error');
+    }
+  }
+
+  async function selectProject(id) {
+    try {
+      const res = await invoke('select_project', { id });
+      applyProjectsResponse(res);
+      startNewChat(true);
+      await refreshProjectSessions();
+      refreshTasks();
+      refreshScreenshots();
+      navigate('view-agent');
+      appendSystemNote(`Active project workspace: ${state.activeWorkspaceDir}`);
+    } catch (err) {
+      appendSystemNote(`Could not select project: ${err}`, 'error');
+    }
+  }
+
+  async function removeProject(id) {
+    try {
+      const res = await invoke('remove_project', { id });
+      applyProjectsResponse(res);
+      await refreshProjectSessions();
+    } catch (err) {
+      appendSystemNote(`Failed to remove project: ${err}`, 'error');
+    }
+  }
+
+  function startNewChat(silent) {
+    state.activeSessionId = `sess-${Date.now()}`;
+    state.sessionMessages = [];
+    clearAgentFeed();
+    renderSidebarSessions();
+    if (!silent) {
+      navigate('view-agent');
+      const ta = el('input-goal');
+      if (ta) ta.focus();
+    }
+  }
+
+  async function refreshProjectSessions() {
+    try {
+      const list = await invoke('list_project_sessions');
+      state.projectSessions = list || [];
+      renderSidebarSessions();
+    } catch (_) {
+      state.projectSessions = [];
+      renderSidebarSessions();
+    }
+  }
+
+  function renderSidebarSessions() {
+    const box = el('sidebar-sessions-list');
+    if (!box) return;
+    if (!state.projectSessions || state.projectSessions.length === 0) {
+      box.innerHTML = '';
+      return;
+    }
+    box.innerHTML = state.projectSessions.slice(0, 6).map((s) => `
+      <button class="session-row ${s.id === state.activeSessionId ? 'active' : ''}" title="${escapeHtml(s.title)}" onclick="DexApp.openProjectSession('${escapeHtml(s.id)}')">
+        <span class="session-row-title">${escapeHtml(s.title)}</span>
+        <span class="mono" style="font-size: 9.5px;">${s.message_count}</span>
+      </button>
+    `).join('');
+  }
+
+  async function openProjectSession(sessionId) {
+    try {
+      const session = await invoke('load_project_session', { sessionId });
+      if (!session) return;
+      state.activeSessionId = session.id;
+      state.sessionMessages = session.messages || [];
+      clearAgentFeed();
+      navigate('view-agent');
+      for (const msg of state.sessionMessages) {
+        if (msg.role === 'user') {
+          appendUserMessage(msg.content, (msg.attachments || []).map((p) => ({
+            path: p,
+            filename: p.split('/').pop() || p,
+          })));
+        } else if (msg.role === 'assistant') {
+          appendFinalAnswer(msg.content);
+        } else if (msg.role === 'system') {
+          appendSystemNote(msg.content);
+        }
+      }
+      renderSidebarSessions();
+    } catch (err) {
+      appendSystemNote(`Could not open session: ${err}`, 'error');
+    }
+  }
+
+  async function persistCurrentSession() {
+    if (!state.sessionMessages || state.sessionMessages.length === 0) return;
+    if (!state.activeSessionId) {
+      state.activeSessionId = `sess-${Date.now()}`;
+    }
+    const firstUser = state.sessionMessages.find((m) => m.role === 'user');
+    const titleRaw = firstUser ? firstUser.content.trim() : 'Untitled Chat';
+    const title = titleRaw.length > 48 ? `${titleRaw.slice(0, 48)}...` : (titleRaw || 'Untitled Chat');
+    const nowSec = Math.floor(Date.now() / 1000);
+    try {
+      await invoke('save_project_session', {
+        session: {
+          id: state.activeSessionId,
+          title,
+          created_at: nowSec,
+          updated_at: nowSec,
+          messages: state.sessionMessages,
+        },
+      });
+      await refreshProjectSessions();
+    } catch (_) {}
   }
 
   // =========================================================================
@@ -261,13 +760,20 @@
     }
   }
 
-  function appendUserMessage(text) {
+  function appendUserMessage(text, attachedMetas) {
     hideEmptyState();
     state.currentThoughtEl = null;
     const feed = el('agent-feed');
     const div = document.createElement('div');
     div.className = 'chat-entry';
-    div.innerHTML = `<div class="chat-user">${escapeHtml(text)}</div>`;
+    const attHtml = Array.isArray(attachedMetas) && attachedMetas.length > 0
+      ? `<div class="chat-user-atts">${attachedMetas.map((a) => `
+          <span class="chat-user-att-tag" title="${escapeHtml(a.path || a.filename)}">
+            ${icon(iconForAttachmentKind(a.kind || 'file'), 11)}
+            <span>${escapeHtml(a.filename || a.path)}</span>
+          </span>`).join('')}</div>`
+      : '';
+    div.innerHTML = `<div class="chat-user">${escapeHtml(text || '(Attached files)')}${attHtml}</div>`;
     feed.appendChild(div);
     scrollFeedToBottom();
   }
@@ -439,15 +945,27 @@
     const ta = el('input-goal');
     if (!ta) return;
     const goal = ta.value.trim();
-    if (!goal || state.running) return;
+    const pendingAttachments = state.attachments.slice();
+    if ((!goal && pendingAttachments.length === 0) || state.running) return;
 
     const provider = el('sel-provider').value;
-    const model = el('input-model').value.trim();
-    const apiBase = el('input-apibase').value.trim() || null;
+    const model = el('input-model') ? el('input-model').value.trim() : '';
+    const apiBase = (el('input-apibase') && el('input-apibase').value.trim()) || null;
+    const attachmentPaths = pendingAttachments.map((a) => a.path);
 
     closeModelPopover();
-    appendUserMessage(goal);
+    appendUserMessage(goal, pendingAttachments);
+    state.sessionMessages.push({
+      role: 'user',
+      content: goal || '(Attached files)',
+      attachments: attachmentPaths,
+      timestamp: Math.floor(Date.now() / 1000),
+    });
+    persistCurrentSession();
+
     ta.value = '';
+    state.attachments = [];
+    renderComposerAttachments();
     autoResizeComposer();
     setRunningState(true);
 
@@ -456,8 +974,9 @@
         goal,
         mode: state.mode,
         provider,
-        model,
+        model: model || null,
         apiBase,
+        attachments: attachmentPaths.length > 0 ? attachmentPaths : null,
       });
     } catch (err) {
       appendSystemNote(`Failed to launch agent: ${err}`, 'error');
@@ -578,8 +1097,52 @@
   }
 
   // =========================================================================
-  // Hardware Cookbook & Sidebar Metrics (Fixed JSON field mapping)
+  // Live macOS RAM Telemetry & Hardware Cookbook
   // =========================================================================
+  function applyLiveMemoryUi(mem) {
+    if (!mem || mem.total_memory_gb === undefined) return;
+    state.liveMemory = mem;
+
+    const used = Number(mem.used_memory_gb || 0);
+    const total = Number(mem.total_memory_gb || 0);
+    const avail = Number(mem.available_memory_gb || 0);
+    const pct = Number(mem.usage_percent || 0);
+
+    const sidebarRam = el('sidebar-ram-metric');
+    if (sidebarRam) {
+      sidebarRam.textContent = `${used.toFixed(1)} / ${total.toFixed(1)} GB · ${Math.round(pct)}%`;
+    }
+    const bar = el('sidebar-ram-bar-fill');
+    if (bar) {
+      bar.style.width = `${Math.min(100, Math.max(0, pct))}%`;
+      bar.className = `sidebar-ram-bar-fill${pct >= 85 ? ' high' : pct >= 70 ? ' warn' : ''}`;
+    }
+
+    // Also keep Cookbook live stat tiles synchronized in real time
+    const tileUsed = el('cookbook-mem-used');
+    const tileAvail = el('cookbook-mem-avail');
+    const tileTotal = el('cookbook-mem-total');
+    const tilePct = el('cookbook-mem-pct');
+    if (tileUsed) tileUsed.textContent = `${used.toFixed(1)} GB`;
+    if (tileAvail) tileAvail.textContent = `${avail.toFixed(1)} GB`;
+    if (tileTotal) tileTotal.textContent = `${total.toFixed(1)} GB`;
+    if (tilePct) tilePct.textContent = `${pct.toFixed(1)}% in use (Active + Wired + Compressed)`;
+  }
+
+  async function pollLiveMemory() {
+    if (!global.__TAURI__) return;
+    try {
+      const mem = await invoke('get_live_memory');
+      if (mem) applyLiveMemoryUi(mem);
+    } catch (_) {}
+  }
+
+  function startLiveMemoryPolling() {
+    if (state.memoryPollTimer) clearInterval(state.memoryPollTimer);
+    pollLiveMemory();
+    state.memoryPollTimer = setInterval(pollLiveMemory, 3000);
+  }
+
   async function refreshCookbook() {
     try {
       const res = await invoke('get_cookbook');
@@ -588,12 +1151,17 @@
       if (reportEl && res.report) reportEl.textContent = res.report;
 
       const p = res.profile || {};
-      const totalMem = p.total_memory_gb !== undefined ? p.total_memory_gb : p.total_ram_gb;
-      const availMem = p.available_memory_gb !== undefined ? p.available_memory_gb : p.available_ram_gb;
-      const ramGb = totalMem !== undefined ? `${Number(totalMem).toFixed(1)} GB` : 'n/a';
-      const availGb = availMem !== undefined ? `${Number(availMem).toFixed(1)} GB free` : '';
-      const sidebarRam = el('sidebar-ram-metric');
-      if (sidebarRam) sidebarRam.textContent = ramGb;
+      const totalMem = Number(p.total_memory_gb !== undefined ? p.total_memory_gb : (p.total_ram_gb || 0));
+      const usedMem = Number(p.used_memory_gb !== undefined ? p.used_memory_gb : Math.max(0, totalMem - Number(p.available_memory_gb || 0)));
+      const availMem = Number(p.available_memory_gb !== undefined ? p.available_memory_gb : (p.available_ram_gb || 0));
+      const pct = Number(p.usage_percent !== undefined ? p.usage_percent : (totalMem > 0 ? (usedMem / totalMem) * 100 : 0));
+
+      applyLiveMemoryUi({
+        total_memory_gb: totalMem,
+        used_memory_gb: usedMem,
+        available_memory_gb: availMem,
+        usage_percent: pct,
+      });
 
       const statsEl = el('cookbook-stats');
       if (statsEl) {
@@ -603,24 +1171,24 @@
         const platformLabel = p.is_apple_silicon ? 'Apple Silicon' : (p.os_name || 'Desktop');
         statsEl.innerHTML = `
           <div class="stat-tile">
+            <span class="stat-label">Used Memory</span>
+            <span id="cookbook-mem-used" class="stat-value mono">${usedMem.toFixed(1)} GB</span>
+            <span id="cookbook-mem-pct" class="card-meta">${pct.toFixed(1)}% in use (Active + Wired + Compressed)</span>
+          </div>
+          <div class="stat-tile">
+            <span class="stat-label">Available Memory</span>
+            <span id="cookbook-mem-avail" class="stat-value mono" style="color: var(--ok-fg);">${availMem.toFixed(1)} GB</span>
+            <span class="card-meta">Reclaimable for MLX / GGUF models</span>
+          </div>
+          <div class="stat-tile">
             <span class="stat-label">Total Memory</span>
-            <span class="stat-value mono">${escapeHtml(ramGb)}</span>
-            <span class="card-meta">${escapeHtml(availGb || (p.is_apple_silicon ? 'Unified Memory' : 'System RAM'))}</span>
+            <span id="cookbook-mem-total" class="stat-value mono">${totalMem.toFixed(1)} GB</span>
+            <span class="card-meta">${p.is_apple_silicon ? 'Unified Memory Architecture' : 'System RAM'}</span>
           </div>
           <div class="stat-tile">
-            <span class="stat-label">CPU Cores</span>
-            <span class="stat-value mono">${escapeHtml(p.cpu_cores || 'n/a')}</span>
-            <span class="card-meta">${escapeHtml(p.os_name || 'Host OS')} · ${escapeHtml(p.arch || '')}</span>
-          </div>
-          <div class="stat-tile">
-            <span class="stat-label">Platform</span>
+            <span class="stat-label">Platform &amp; CPU</span>
             <span class="stat-value">${escapeHtml(platformLabel)}</span>
-            <span class="card-meta mono">${p.is_apple_silicon ? 'Unified GPU / MLX Ready' : escapeHtml(p.arch || '')}</span>
-          </div>
-          <div class="stat-tile">
-            <span class="stat-label">Recommended Tier</span>
-            <span class="stat-value">${escapeHtml(topRec)}</span>
-            <span class="card-meta">${(res.recommendations || []).length} model profile(s)</span>
+            <span class="card-meta mono">${escapeHtml(p.cpu_cores || 'n/a')} cores · ${escapeHtml(p.arch || '')} · ${escapeHtml(topRec)}</span>
           </div>
         `;
       }
@@ -728,22 +1296,215 @@
   async function refreshModelsLibrary() {
     const listEl = el('library-models-list');
     if (listEl && state.scannedModels.length === 0) {
-      listEl.innerHTML = '<div class="empty-note">Scanning model directories and local servers...</div>';
+      listEl.innerHTML = '<div class="empty-note">Scanning model directories and local runtimes...</div>';
     }
     try {
-      const [dirs, scanned, servers] = await Promise.all([
+      const [dirs, scanned, servers, runtimes, activeLoaded] = await Promise.all([
         invoke('list_model_dirs'),
         invoke('scan_local_models'),
         invoke('detect_local_servers'),
+        invoke('detect_runtimes'),
+        invoke('get_active_loaded_model'),
       ]);
       state.modelDirs = dirs || [];
       state.scannedModels = scanned || [];
       state.localServers = servers || [];
+      state.runtimes = runtimes || [];
+      state.activeLoadedModel = activeLoaded || null;
+      renderRuntimesPanel();
+      renderActiveLoadedBanner();
       renderModelDirsStrip();
       renderLocalServersStrip();
       renderLibraryModels();
+      renderModelPickerSelect();
+      syncModelLabels();
     } catch (err) {
       if (listEl) listEl.innerHTML = `<div class="empty-note" style="color: var(--err-fg);">Scan error: ${escapeHtml(err)}</div>`;
+    }
+  }
+
+  function renderRuntimesPanel() {
+    const container = el('native-runtime-cards');
+    if (!container) return;
+    if (!state.runtimes || state.runtimes.length === 0) {
+      container.innerHTML = '';
+      return;
+    }
+    container.innerHTML = state.runtimes.map((rt) => {
+      const installing = state.installingRuntime === rt.id;
+      const dotStyle = rt.available ? 'background: var(--ok-fg);' : 'background: var(--warn-fg);';
+      const sub = rt.available
+        ? (rt.binary_path || 'Ready')
+        : (installing ? 'Installing isolated runtime...' : rt.install_hint);
+      const btnLabel = rt.id === 'mlx' ? 'Install MLX Runtime (1-click)' : 'Install llama.cpp (1-click)';
+      const actionHtml = rt.available
+        ? '<span class="badge badge-ok">Ready</span>'
+        : `<button class="btn btn-sm btn-primary" ${installing ? 'disabled' : ''} onclick="DexApp.installRuntime('${escapeHtml(rt.id)}')">
+             ${icon('download', 12)} <span>${installing ? 'Installing...' : escapeHtml(btnLabel)}</span>
+           </button>`;
+      return `
+        <div class="runtime-card ${rt.available ? 'ready' : ''}" title="${escapeHtml(rt.binary_path || rt.managed_dir || '')}">
+          <div class="runtime-card-info">
+            <div class="runtime-card-title">
+              <span class="status-dot" style="${dotStyle}"></span>
+              <span>${escapeHtml(rt.name)}</span>
+            </div>
+            <div class="runtime-card-sub">${escapeHtml(sub)}</div>
+          </div>
+          ${actionHtml}
+        </div>
+      `;
+    }).join('');
+  }
+
+  function renderActiveLoadedBanner() {
+    const banner = el('active-loaded-banner');
+    const titleEl = el('active-loaded-title');
+    const metaEl = el('active-loaded-meta');
+    if (!banner) return;
+    const m = state.activeLoadedModel;
+    if (!m) {
+      banner.classList.remove('visible');
+      updatePopoverLoadedStatus();
+      return;
+    }
+    banner.classList.add('visible');
+    const fmt = String(m.format || m.runtime || '').toUpperCase();
+    const q = m.quantization ? ` · ${m.quantization}` : '';
+    const sz = m.size_bytes ? ` · ${formatSizeGb(m.size_bytes)}` : '';
+    const pid = m.pid ? ` · PID ${m.pid}` : '';
+    if (titleEl) titleEl.textContent = `${m.name} (${fmt}${q})`;
+    if (metaEl) metaEl.textContent = `Dex Native Runtime · ${m.base_url}${sz}${pid}`;
+    updatePopoverLoadedStatus();
+  }
+
+  function appendRuntimeLog(line, isError) {
+    const box = el('runtime-log-box');
+    if (!box) return;
+    if (!line) return;
+    state.runtimeLogLines.push(line);
+    if (state.runtimeLogLines.length > 60) {
+      state.runtimeLogLines = state.runtimeLogLines.slice(-60);
+    }
+    box.classList.add('visible');
+    box.textContent = state.runtimeLogLines.join('\n');
+    box.style.borderColor = isError ? 'var(--err-border)' : 'var(--border-strong)';
+    box.scrollTop = box.scrollHeight;
+  }
+
+  async function installRuntime(runtimeId) {
+    if (state.installingRuntime) return;
+    state.installingRuntime = runtimeId;
+    state.runtimeLogLines = [`Starting 1-click installation for ${runtimeId}...`];
+    appendRuntimeLog('Creating isolated environment (system Python untouched)...', false);
+    renderRuntimesPanel();
+    try {
+      const status = await invoke('install_runtime', { runtime: runtimeId });
+      state.installingRuntime = null;
+      state.pendingMissingRuntime = null;
+      appendRuntimeLog(`Installation complete: ${status.binary_path || status.name}`, false);
+      const noteEl = el('library-status-note');
+      if (noteEl) {
+        noteEl.style.display = 'block';
+        noteEl.innerHTML = `<span style="color: var(--ok-fg);">${escapeHtml(status.name)} is installed and ready. Click Use Model on any local model.</span>`;
+      }
+      await refreshModelsLibrary();
+    } catch (err) {
+      state.installingRuntime = null;
+      appendRuntimeLog(`Installation error: ${err}`, true);
+      renderRuntimesPanel();
+    }
+  }
+
+  async function loadLocalModelFromSpec(m, switchToAgent) {
+    if (!m || !m.path) return;
+    const noteEl = el('library-status-note');
+    const sizeText = m.size_bytes ? formatSizeGb(m.size_bytes) : 'model';
+    state.modelLoadingText = `Loading ${sizeText}...`;
+    state.pendingMissingRuntime = null;
+    state.runtimeLogLines = [`Loading ${m.name} (${m.format.toUpperCase()} ${m.quantization || ''}) into Unified Memory...`];
+    syncModelLabels();
+    if (noteEl) {
+      noteEl.style.display = 'block';
+      noteEl.textContent = `Loading '${m.name}' (${sizeText}) via Dex Native Runtime (up to 90s for large weights)...`;
+    }
+    appendRuntimeLog(`Spawning Dex Native Runtime for ${m.path}...`, false);
+
+    try {
+      const res = await invoke('load_local_model', {
+        modelId: m.id,
+        modelName: m.name,
+        format: m.format,
+        modelPath: m.path,
+        quantization: m.quantization || null,
+        sizeBytes: m.size_bytes || null,
+      });
+
+      state.modelLoadingText = null;
+
+      if (res && res.status === 'runtime_missing') {
+        state.pendingMissingRuntime = res.runtime;
+        const btnLabel = res.runtime === 'mlx' ? 'Install MLX Runtime (1-click)' : 'Install llama.cpp (1-click)';
+        if (noteEl) {
+          noteEl.style.display = 'block';
+          noteEl.innerHTML = `
+            <div class="row-wrap" style="gap: 10px; align-items: center;">
+              <span style="color: var(--warn-fg);">${escapeHtml(res.message)}</span>
+              <button class="btn btn-sm btn-primary" onclick="DexApp.installRuntime('${escapeHtml(res.runtime)}')">
+                ${icon('download', 12)} <span>${escapeHtml(btnLabel)}</span>
+              </button>
+            </div>
+          `;
+        }
+        appendRuntimeLog(res.message, true);
+        updatePopoverLoadedStatus();
+        syncModelLabels();
+        return;
+      }
+
+      if (res && res.status === 'loaded' && res.model) {
+        state.activeLoadedModel = res.model;
+        el('sel-provider').value = 'dex-local';
+        if (el('input-model')) el('input-model').value = res.model.path;
+        if (el('input-apibase')) el('input-apibase').value = res.model.base_url;
+        if (noteEl) noteEl.style.display = 'none';
+        renderActiveLoadedBanner();
+        renderModelPickerSelect();
+        renderLibraryModels();
+        syncModelLabels();
+        pollLiveMemory();
+        if (switchToAgent) {
+          navigate('view-agent');
+          el('input-goal') && el('input-goal').focus();
+        }
+        appendSystemNote(res.message || `Loaded ${res.model.name} in Dex Native Runtime`);
+      }
+    } catch (err) {
+      state.modelLoadingText = null;
+      syncModelLabels();
+      if (noteEl) {
+        noteEl.style.display = 'block';
+        noteEl.style.color = 'var(--err-fg)';
+        noteEl.textContent = String(err);
+      }
+      appendRuntimeLog(`Model load failed: ${err}`, true);
+      appendSystemNote(`Failed to load local model: ${err}`, 'error');
+    }
+  }
+
+  async function unloadLocalModel() {
+    try {
+      const msg = await invoke('unload_local_model');
+      state.activeLoadedModel = null;
+      state.modelLoadingText = null;
+      renderActiveLoadedBanner();
+      renderModelPickerSelect();
+      renderLibraryModels();
+      syncModelLabels();
+      appendSystemNote(msg || 'Unloaded local model from Unified Memory');
+      setTimeout(pollLiveMemory, 600);
+    } catch (err) {
+      appendSystemNote(`Unload failed: ${err}`, 'error');
     }
   }
 
@@ -906,10 +1667,20 @@
         ? `<button class="btn btn-sm btn-ghost" title="Delete model" onclick="DexApp.deleteModel('${escapeHtml(m.id)}')">${icon('trash', 13)}</button>`
         : '';
 
+      const isLoaded = state.activeLoadedModel && m.path && state.activeLoadedModel.path === m.path;
+      const actionBtn = isLoaded
+        ? `<button class="btn btn-sm btn-danger" onclick="DexApp.unloadLocalModel()">
+             ${icon('power', 12)} <span>Unload</span>
+           </button>`
+        : `<button class="btn btn-sm btn-primary" onclick="DexApp.useLibraryModel('${escapeHtml(m.id)}')">
+             ${icon('zap', 12)} <span>Use Model</span>
+           </button>`;
+
       return `
         <div class="library-row">
           <div class="library-row-main">
             <div class="library-row-head">
+              ${isLoaded ? '<span class="model-pill-dot ready" title="Loaded in Dex Native Runtime"></span>' : ''}
               <span class="library-model-name">${escapeHtml(m.name)}</span>
               ${fmtBadge}
               ${variantHtml}
@@ -920,9 +1691,7 @@
           </div>
           <div class="library-row-actions">
             <span class="library-size">${formatSizeGb(m.size_bytes)}</span>
-            <button class="btn btn-sm btn-primary" onclick="DexApp.useLibraryModel('${escapeHtml(m.id)}')">
-              ${icon('zap', 12)} <span>Use Model</span>
-            </button>
+            ${actionBtn}
             ${finderBtn}
             ${delBtn}
           </div>
@@ -934,7 +1703,6 @@
   async function useLibraryModel(modelId) {
     const m = state.scannedModels.find((x) => x.id === modelId);
     if (!m) return;
-    const noteEl = el('library-status-note');
 
     if (m.format === 'ollama') {
       el('sel-provider').value = 'ollama';
@@ -947,34 +1715,13 @@
       return;
     }
 
-    if (m.format === 'mlx' && m.path) {
-      if (noteEl) {
-        noteEl.style.display = 'block';
-        noteEl.textContent = `Activating MLX model '${m.name}' (checking LM Studio :1234 or starting mlx_lm.server)...`;
-      }
-      try {
-        const res = await invoke('activate_mlx_model', {
-          modelPath: m.path,
-          modelName: m.name,
-        });
-        el('sel-provider').value = res.provider === 'lmstudio' ? 'lmstudio' : 'openai';
-        el('input-model').value = res.model;
-        el('input-apibase').value = res.api_base || '';
-        syncModelLabels();
-        if (noteEl) noteEl.style.display = 'none';
-        navigate('view-agent');
-        appendSystemNote(res.status_message);
-        el('input-goal').focus();
-      } catch (err) {
-        if (noteEl) {
-          noteEl.style.display = 'block';
-          noteEl.textContent = String(err);
-        }
-      }
+    // Autonomous Dex Native Runtime for MLX (mlx_lm.server) & GGUF (llama-server -ngl 99)
+    if ((m.format === 'mlx' || m.format === 'gguf') && m.path) {
+      await loadLocalModelFromSpec(m, true);
       return;
     }
 
-    // GGUF / PT: prefer LM Studio :1234 if reachable and loaded, otherwise prefill composer
+    // PT / other local files: attach to LM Studio if loaded, else prefill
     const lm = state.localServers.find((s) => s.id === 'lmstudio' && s.reachable);
     if (lm && lm.loaded_models.length > 0) {
       const match = lm.loaded_models.find((id) => id.toLowerCase().includes(m.name.toLowerCase()));
@@ -1044,6 +1791,25 @@
     }
   }
 
+  function orgMonogram(name) {
+    const clean = String(name || 'HF').replace(/[^a-zA-Z0-9\s_-]/g, ' ').trim();
+    if (!clean) return 'HF';
+    const parts = clean.split(/[\s_-]+/).filter(Boolean);
+    if (parts.length >= 2) {
+      return (parts[0][0] + parts[1][0]).toUpperCase();
+    }
+    return clean.slice(0, 2).toUpperCase();
+  }
+
+  function renderOrgAvatar(org, avatarUrl, sizeClass) {
+    const mono = escapeHtml(orgMonogram(org));
+    const safeUrl = avatarUrl && /^(https?:\/\/|data:image\/)/i.test(avatarUrl) ? avatarUrl : '';
+    const imgHtml = safeUrl
+      ? `<img src="${escapeHtml(safeUrl)}" alt="${escapeHtml(org || '')}" loading="lazy" onerror="this.remove()" />`
+      : '';
+    return `<span class="org-avatar-wrap ${sizeClass || 'org-avatar-sm'}" title="${escapeHtml(org || '')}"><span>${mono}</span>${imgHtml}</span>`;
+  }
+
   function renderHfRepoList() {
     const container = el('hf-search-results');
     if (!container) return;
@@ -1052,6 +1818,7 @@
       const title = parts.length > 1 ? parts.slice(1).join('/') : r.id;
       const org = parts.length > 1 ? parts[0] : (r.author || '');
       const isAct = r.id === state.selectedHfRepoId;
+      const avatarHtml = renderOrgAvatar(org, r.avatar_url, 'org-avatar-sm');
       const fmts = (r.formats || []).map((f) => `<span class="badge ${formatBadgeClass(f)} mono" style="padding: 1px 5px; font-size: 9.5px;">${escapeHtml(f)}</span>`).join('');
       const caps = (r.capabilities || []).slice(0, 2).map((c) => {
         const ic = c === 'Vision' ? 'eye' : c === 'Reasoning' ? 'brain' : 'wrench';
@@ -1060,8 +1827,13 @@
       const relDate = formatRelativeDate(r.last_modified);
       return `
         <button class="repo-item ${isAct ? 'active' : ''}" onclick="DexApp.selectHfRepo(${idx})">
-          <div class="repo-item-title" title="${escapeHtml(r.id)}">${escapeHtml(title)}</div>
-          <div class="repo-item-org">${escapeHtml(org)}</div>
+          <div class="repo-item-top">
+            ${avatarHtml}
+            <div class="repo-item-meta">
+              <div class="repo-item-title" title="${escapeHtml(r.id)}">${escapeHtml(title)}</div>
+              <div class="repo-item-org">${escapeHtml(org)}</div>
+            </div>
+          </div>
           <div class="row-wrap" style="gap: 4px;">${fmts}${caps}</div>
           <div class="repo-item-foot">
             <span>${(r.downloads || 0).toLocaleString()} dl · ${(r.likes || 0).toLocaleString()} likes</span>
@@ -1083,15 +1855,20 @@
     if (!detailEl) return;
     const parts = repo.id.split('/');
     const title = parts.length > 1 ? parts.slice(1).join('/') : repo.id;
+    const org = repo.author || parts[0] || '';
+    const avatarLg = renderOrgAvatar(org, repo.avatar_url, 'org-avatar-lg');
     const hfUrl = `https://huggingface.co/${repo.id}`;
     const fmts = (repo.formats || []).map((f) => `<span class="badge ${formatBadgeClass(f)} mono">${escapeHtml(f)}</span>`).join('');
     const caps = renderCapabilityChips(repo.capabilities || []);
 
     detailEl.innerHTML = `
       <div class="item-card-row" style="align-items: flex-start;">
-        <div>
-          <h2 style="font-size: 18px; font-weight: 600; letter-spacing: -0.02em;">${escapeHtml(title)}</h2>
-          <div class="mono card-meta" style="margin-top: 2px;">${escapeHtml(repo.id)} · ${(repo.downloads || 0).toLocaleString()} downloads · ${(repo.likes || 0).toLocaleString()} likes</div>
+        <div class="row" style="gap: 12px; align-items: center; min-width: 0;">
+          ${avatarLg}
+          <div style="min-width: 0;">
+            <h2 style="font-size: 18px; font-weight: 600; letter-spacing: -0.02em;">${escapeHtml(title)}</h2>
+            <div class="mono card-meta" style="margin-top: 2px;">${escapeHtml(repo.id)} · ${(repo.downloads || 0).toLocaleString()} downloads · ${(repo.likes || 0).toLocaleString()} likes</div>
+          </div>
         </div>
         <button class="btn btn-sm" onclick="DexApp.openExternalUrl('${escapeHtml(hfUrl)}')">
           ${icon('externalLink', 12)} <span>Open on Hugging Face</span>
@@ -1113,7 +1890,7 @@
           <span class="card-title">${icon('sliders', 14)} Details</span>
         </div>
         <div class="row-wrap" style="gap: 8px;">
-          <span class="card-meta">Author: <strong style="color: var(--text-primary);">${escapeHtml(repo.author || parts[0] || '-')}</strong></span>
+          <span class="card-meta">Author: <strong style="color: var(--text-primary);">${escapeHtml(org || '-')}</strong></span>
           ${fmts}
           ${caps}
           ${repo.last_modified ? `<span class="card-meta mono">Updated ${escapeHtml(formatRelativeDate(repo.last_modified))}</span>` : ''}
@@ -1172,7 +1949,7 @@
     const readmeBody = el('hf-readme-body');
     if (readmeBody) {
       if (readmeRes.status === 'fulfilled' && readmeRes.value) {
-        readmeBody.innerHTML = renderSafeMarkdown(readmeRes.value);
+        readmeBody.innerHTML = renderSafeMarkdown(readmeRes.value, currentRepoId);
       } else {
         readmeBody.innerHTML = '<div class="card-meta">No README.md available for this repository.</div>';
       }
@@ -1238,28 +2015,137 @@
     }
   }
 
-  // Safe Pure-JS Markdown Renderer (escapes all raw HTML before formatting)
-  function renderSafeMarkdown(md) {
+  function resolveHfImageUrl(repoId, rawSrc) {
+    const trimmed = String(rawSrc || '').trim();
+    if (!trimmed) return '';
+    if (/^javascript:/i.test(trimmed) || /^vbscript:/i.test(trimmed)) return '';
+    if (/^(https?:\/\/|data:image\/)/i.test(trimmed)) return trimmed;
+    if (trimmed.startsWith('//')) return `https:${trimmed}`;
+    const cleanRel = trimmed.replace(/^\.\//, '').replace(/^\/+/, '');
+    const cleanRepo = String(repoId || '').trim().replace(/^\/+|\/+$/g, '');
+    if (!cleanRepo) return '';
+    return `https://huggingface.co/${cleanRepo}/resolve/main/${cleanRel}`;
+  }
+
+  function resolveHfLinkUrl(repoId, rawHref) {
+    const trimmed = String(rawHref || '').trim();
+    if (!trimmed || /^javascript:/i.test(trimmed) || trimmed.startsWith('#')) return '';
+    if (/^https?:\/\//i.test(trimmed)) return trimmed;
+    if (trimmed.startsWith('//')) return `https:${trimmed}`;
+    const cleanRel = trimmed.replace(/^\.\//, '').replace(/^\/+/, '');
+    const cleanRepo = String(repoId || '').trim().replace(/^\/+|\/+$/g, '');
+    if (!cleanRepo) return '';
+    return `https://huggingface.co/${cleanRepo}/blob/main/${cleanRel}`;
+  }
+
+  // Safe Full GFM Markdown Renderer (GFM Tables, Relative/Absolute HF Images, Blockquotes, Nested Lists, Code)
+  function renderSafeMarkdown(md, repoId) {
     const lines = String(md || '').replace(/\r\n/g, '\n').split('\n');
-    let out = [];
+    const out = [];
     let inCode = false;
     let codeBuf = [];
-    let inList = false;
+    let listStack = []; // entries: { tag: 'ul'|'ol', indent: number }
+    let inBlockquote = false;
+
+    function closeLists() {
+      while (listStack.length > 0) {
+        const top = listStack.pop();
+        out.push(`</${top.tag}>`);
+      }
+    }
+
+    function closeBlockquote() {
+      if (inBlockquote) {
+        out.push('</blockquote>');
+        inBlockquote = false;
+      }
+    }
+
+    function splitTableRow(rowStr) {
+      let s = rowStr.trim();
+      if (s.startsWith('|')) s = s.slice(1);
+      if (s.endsWith('|')) s = s.slice(0, -1);
+      return s.split('|').map((c) => c.trim());
+    }
+
+    function isTableSeparator(rowStr) {
+      const t = rowStr.trim();
+      if (!t.includes('-')) return false;
+      const cells = splitTableRow(t);
+      return cells.length >= 1 && cells.every((c) => /^:?-{2,}:?$/.test(c));
+    }
 
     function formatInline(raw) {
-      let s = escapeHtml(raw);
-      s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+      // 1. Extract safe HTML <img ...> tags into placeholders before HTML-escaping raw text
+      const tokens = [];
+      let work = String(raw || '').replace(/<img\b([^>]*?)\/?>/gi, (_, attrs) => {
+        const srcMatch = attrs.match(/\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))/i);
+        const altMatch = attrs.match(/\balt\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+        const rawSrc = srcMatch ? (srcMatch[1] || srcMatch[2] || srcMatch[3] || '') : '';
+        const alt = altMatch ? (altMatch[1] || altMatch[2] || '') : '';
+        const resolved = resolveHfImageUrl(repoId, rawSrc);
+        if (!resolved) return '';
+        const idx = tokens.length;
+        tokens.push(`<img src="${escapeHtml(resolved)}" alt="${escapeHtml(alt)}" loading="lazy" onerror="this.style.display='none'" />`);
+        return `\u0000IMG${idx}\u0000`;
+      });
+
+      // 2. Escape all remaining raw HTML to guarantee zero XSS
+      let s = escapeHtml(work);
+
+      // 3. Inline code spans (protect contents from bold/italic/image replacements)
+      s = s.replace(/`([^`]+)`/g, (_, code) => {
+        const idx = tokens.length;
+        tokens.push(`<code>${code}</code>`);
+        return `\u0000TOK${idx}\u0000`;
+      });
+
+      // 4. Markdown images ![alt](url) (including linked badge images [![alt](img)](href))
+      s = s.replace(/\[!\[([^\]]*)\]\(([^)\s]+)(?:\s+&quot;[^&]*&quot;)?\)\]\(([^)\s]+)\)/g, (_, alt, imgUrl, href) => {
+        const resolvedImg = resolveHfImageUrl(repoId, imgUrl);
+        const resolvedHref = resolveHfLinkUrl(repoId, href);
+        if (!resolvedImg) return '';
+        const imgTag = `<img src="${escapeHtml(resolvedImg)}" alt="${alt}" loading="lazy" onerror="this.style.display='none'" />`;
+        if (!resolvedHref) return imgTag;
+        const idx = tokens.length;
+        tokens.push(`<a href="#" onclick="event.preventDefault(); DexApp.openExternalUrl('${escapeHtml(resolvedHref)}')">${imgTag}</a>`);
+        return `\u0000TOK${idx}\u0000`;
+      });
+
+      s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+&quot;[^&]*&quot;)?\)/g, (_, alt, imgUrl) => {
+        const resolved = resolveHfImageUrl(repoId, imgUrl);
+        if (!resolved) return '';
+        const idx = tokens.length;
+        tokens.push(`<img src="${escapeHtml(resolved)}" alt="${alt}" loading="lazy" onerror="this.style.display='none'" />`);
+        return `\u0000TOK${idx}\u0000`;
+      });
+
+      // 5. Markdown links [label](url)
+      s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label, rawUrl) => {
+        const resolved = resolveHfLinkUrl(repoId, rawUrl);
+        if (!resolved) return label;
+        const idx = tokens.length;
+        tokens.push(`<a href="#" onclick="event.preventDefault(); DexApp.openExternalUrl('${escapeHtml(resolved)}')">${label}</a>`);
+        return `\u0000TOK${idx}\u0000`;
+      });
+
+      // 6. Bold & italic
       s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-      s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, (_, label, url) =>
-        `<a href="#" onclick="event.preventDefault(); DexApp.openExternalUrl('${url}')">${label}</a>`
-      );
+      s = s.replace(/(^|[^*])\*([^*]+)\*(?!\*)/g, '$1<em>$2</em>');
+
+      // 7. Restore safe HTML tokens
+      s = s.replace(/\u0000(?:IMG|TOK)(\d+)\u0000/g, (_, idxStr) => tokens[Number(idxStr)] || '');
       return s;
     }
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
-      if (line.trim().startsWith('```')) {
-        if (inList) { out.push('</ul>'); inList = false; }
+      const trimmed = line.trim();
+
+      // Fenced code blocks
+      if (trimmed.startsWith('```')) {
+        closeLists();
+        closeBlockquote();
         if (!inCode) {
           inCode = true;
           codeBuf = [];
@@ -1273,34 +2159,107 @@
         codeBuf.push(line);
         continue;
       }
-      const trimmed = line.trim();
+
       if (!trimmed) {
-        if (inList) { out.push('</ul>'); inList = false; }
+        closeLists();
+        closeBlockquote();
         continue;
       }
-      if (/^---+$/.test(trimmed)) {
-        if (inList) { out.push('</ul>'); inList = false; }
+
+      // Skip standalone HTML wrapper tags like <div align="center">, </p>, <br/> cleanly
+      if (/^<\/?(?:div|p|center|section|details|summary|table|thead|tbody|tr|td|th|br|hr|span|h[1-6]|a)\b[^>]*>$/i.test(trimmed)) {
+        if (/^<br\s*\/?>$/i.test(trimmed)) out.push('<br />');
+        continue;
+      }
+
+      // Horizontal rule
+      if (/^(?:---+|\*\*\*+|___+)$/.test(trimmed)) {
+        closeLists();
+        closeBlockquote();
         out.push('<hr />');
         continue;
       }
+
+      // GFM Table detection: header line containing `|` + next line is separator `|---|---|`
+      if (trimmed.includes('|') && i + 1 < lines.length && isTableSeparator(lines[i + 1])) {
+        closeLists();
+        closeBlockquote();
+        const headerCells = splitTableRow(trimmed);
+        const bodyRows = [];
+        i += 2; // consume header + separator
+        while (i < lines.length) {
+          const rowTrim = lines[i].trim();
+          if (!rowTrim || !rowTrim.includes('|')) {
+            i -= 1;
+            break;
+          }
+          bodyRows.push(splitTableRow(rowTrim));
+          i += 1;
+        }
+        const thead = `<thead><tr>${headerCells.map((c) => `<th>${formatInline(c)}</th>`).join('')}</tr></thead>`;
+        const tbody = `<tbody>${bodyRows.map((row) => {
+          const cells = [];
+          for (let col = 0; col < Math.max(headerCells.length, row.length); col++) {
+            cells.push(`<td>${formatInline(row[col] || '')}</td>`);
+          }
+          return `<tr>${cells.join('')}</tr>`;
+        }).join('')}</tbody>`;
+        out.push(`<div class="md-table-wrap"><table class="md-table">${thead}${tbody}</table></div>`);
+        continue;
+      }
+
+      // Headings
       const hMatch = trimmed.match(/^(#{1,4})\s+(.*)$/);
       if (hMatch) {
-        if (inList) { out.push('</ul>'); inList = false; }
+        closeLists();
+        closeBlockquote();
         const lvl = hMatch[1].length;
         out.push(`<h${lvl}>${formatInline(hMatch[2])}</h${lvl}>`);
         continue;
       }
-      const liMatch = trimmed.match(/^[-*+]\s+(.*)$/);
-      if (liMatch) {
-        if (!inList) { out.push('<ul>'); inList = true; }
-        out.push(`<li>${formatInline(liMatch[1])}</li>`);
+
+      // Blockquotes (`> ...`)
+      const bqMatch = trimmed.match(/^>\s?(.*)$/);
+      if (bqMatch) {
+        closeLists();
+        if (!inBlockquote) {
+          out.push('<blockquote>');
+          inBlockquote = true;
+        }
+        out.push(`<p>${formatInline(bqMatch[1])}</p>`);
         continue;
       }
-      if (inList) { out.push('</ul>'); inList = false; }
+      closeBlockquote();
+
+      // Unordered & ordered nested lists
+      const ulMatch = line.match(/^(\s*)[-*+]\s+(.*)$/);
+      const olMatch = !ulMatch ? line.match(/^(\s*)\d+\.\s+(.*)$/) : null;
+      if (ulMatch || olMatch) {
+        const indent = (ulMatch ? ulMatch[1] : olMatch[1]).length;
+        const tag = ulMatch ? 'ul' : 'ol';
+        const content = ulMatch ? ulMatch[2] : olMatch[2];
+        while (listStack.length > 0 && indent < listStack[listStack.length - 1].indent) {
+          out.push(`</${listStack.pop().tag}>`);
+        }
+        if (
+          listStack.length === 0 ||
+          indent > listStack[listStack.length - 1].indent ||
+          listStack[listStack.length - 1].tag !== tag
+        ) {
+          out.push(`<${tag}>`);
+          listStack.push({ tag, indent });
+        }
+        out.push(`<li>${formatInline(content)}</li>`);
+        continue;
+      }
+
+      closeLists();
       out.push(`<p>${formatInline(trimmed)}</p>`);
     }
+
     if (inCode) out.push(`<pre><code>${escapeHtml(codeBuf.join('\n'))}</code></pre>`);
-    if (inList) out.push('</ul>');
+    closeLists();
+    closeBlockquote();
     return out.join('\n');
   }
 
@@ -2334,6 +3293,17 @@
       } else if (ev.type === 'VoiceCaptureState') {
         const badge = el('voice-db-badge');
         if (badge) badge.textContent = `${Number(d.level_db || -60).toFixed(1)} dB`;
+      } else if (ev.type === 'RuntimeProgress') {
+        appendRuntimeLog(`[${d.runtime || 'runtime'}:${d.stage || 'log'}] ${d.message || ''}`, !!d.is_error);
+      }
+    });
+
+    listen('dex-files-dropped', (event) => {
+      const paths = event.payload;
+      if (Array.isArray(paths) && paths.length > 0) {
+        addAttachmentPaths(paths);
+        const box = el('composer-box');
+        if (box) box.classList.remove('drag-over');
       }
     });
 
@@ -2346,7 +3316,15 @@
       const data = event.payload || {};
       setRunningState(false);
       if (data.status === 'success') {
-        appendFinalAnswer(data.answer || 'Objective completed.');
+        const ans = data.answer || 'Objective completed.';
+        appendFinalAnswer(ans);
+        state.sessionMessages.push({
+          role: 'assistant',
+          content: ans,
+          attachments: [],
+          timestamp: Math.floor(Date.now() / 1000),
+        });
+        persistCurrentSession();
       } else if (data.status === 'cancelled') {
         appendSystemNote(data.error || 'Execution cancelled by user.', 'warn');
       } else {
@@ -2384,10 +3362,39 @@
       });
     }
 
+    // Drag & Drop highlight & fallback path extraction on Agent Composer
+    const composerBox = el('composer-box');
+    if (composerBox) {
+      composerBox.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        composerBox.classList.add('drag-over');
+      });
+      composerBox.addEventListener('dragleave', (e) => {
+        if (!composerBox.contains(e.relatedTarget)) {
+          composerBox.classList.remove('drag-over');
+        }
+      });
+      composerBox.addEventListener('drop', (e) => {
+        e.preventDefault();
+        composerBox.classList.remove('drag-over');
+        const files = e.dataTransfer && e.dataTransfer.files;
+        if (files && files.length > 0) {
+          const droppedPaths = [];
+          for (let i = 0; i < files.length; i++) {
+            if (files[i].path) droppedPaths.push(files[i].path);
+          }
+          if (droppedPaths.length > 0) {
+            addAttachmentPaths(droppedPaths);
+          }
+        }
+      });
+    }
+
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
         closeModelPopover();
         closeCustomMcpModal();
+        closeCreateProjectModal();
       } else if ((e.metaKey || e.ctrlKey) && e.key === '\\') {
         e.preventDefault();
         toggleSidebar();
@@ -2414,13 +3421,16 @@
     syncModelLabels();
     registerEventListeners();
 
-    // Sync initial execution mode & host hardware summary quietly
+    // Sync initial execution mode, live RAM telemetry, projects, and detected models
     if (global.__TAURI__) {
       try {
         const mode = await invoke('get_mode');
         if (mode) updateModeButtons(mode);
       } catch (_) {}
+      startLiveMemoryPolling();
       refreshCookbook();
+      refreshProjects();
+      refreshModelPickerOptions();
       refreshTasks();
     }
   }
@@ -2433,16 +3443,34 @@
     toggleModelPopover,
     closeModelPopover,
     openModelConfig,
+    toggleCustomModelInput,
     syncModelLabels,
     onProviderChange,
+    refreshModelPickerOptions,
+    onSelectModelFromPicker,
+    installMissingRuntimeFromPopover,
     useQuickPrompt,
     clearAgentFeed,
+    pickAttachmentFiles,
+    addAttachmentPaths,
+    removeAttachment,
+    refreshProjects,
+    openCreateProjectModal,
+    closeCreateProjectModal,
+    submitCreateProject,
+    openProjectDialog,
+    selectProject,
+    removeProject,
+    startNewChat,
+    refreshProjectSessions,
+    openProjectSession,
     setMode,
     runGoal,
     stopGoal,
     resolveApproval,
     refreshTasks,
     refreshScreenshots,
+    pollLiveMemory,
     refreshCookbook,
     refreshInstalledModels,
     initModelsHubView,
@@ -2450,6 +3478,9 @@
     toggleModelsDrawer,
     closeModelsDrawers,
     refreshModelsLibrary,
+    installRuntime,
+    loadLocalModelFromSpec,
+    unloadLocalModel,
     connectLocalServer,
     addModelDirFromUi,
     removeModelDirFromUi,
@@ -2466,6 +3497,8 @@
     downloadSelectedHfVariant,
     inspectHfRepo,
     openExternalUrl,
+    resolveHfImageUrl,
+    renderSafeMarkdown,
     startDownload,
     cancelActiveDownload,
     importLocalGguf,

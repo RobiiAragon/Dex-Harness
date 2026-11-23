@@ -1,8 +1,10 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use async_trait::async_trait;
 use harness_audio::VoiceRecorderHandle;
 use harness_core::{AgentEvent, CoreError, EventBus, ExecutionMode, Hook, HookAction};
 use harness_extensions::ExtensionSupervisor;
+use harness_models::ActiveLoadedModel;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{oneshot, Mutex, RwLock};
@@ -24,11 +26,18 @@ pub struct DesktopState {
     pub extension_supervisor: Arc<ExtensionSupervisor>,
     pub reaper_cancel: CancellationToken,
     pub active_recorder: Arc<Mutex<Option<VoiceRecorderHandle>>>,
+    pub active_workspace_dir: Arc<RwLock<PathBuf>>,
+    pub active_loaded_model: Arc<RwLock<Option<ActiveLoadedModel>>>,
 }
 
 impl DesktopState {
     pub fn new(event_bus: EventBus) -> Self {
         let extension_supervisor = Arc::new(ExtensionSupervisor::new(event_bus.clone()));
+        let default_workspace = std::env::current_dir()
+            .ok()
+            .filter(|p| p != &PathBuf::from("/"))
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| PathBuf::from("."));
         Self {
             event_bus,
             mode: Arc::new(RwLock::new(ExecutionMode::Autopilot)),
@@ -39,6 +48,8 @@ impl DesktopState {
             extension_supervisor,
             reaper_cancel: CancellationToken::new(),
             active_recorder: Arc::new(Mutex::new(None)),
+            active_workspace_dir: Arc::new(RwLock::new(default_workspace)),
+            active_loaded_model: Arc::new(RwLock::new(None)),
         }
     }
 }

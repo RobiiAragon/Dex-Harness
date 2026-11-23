@@ -36,9 +36,9 @@ pub async fn synthesize_speech(
     }
 
     let final_path = match output_path {
-        Some(p) => p.to_path_buf(),
+        Some(p) => harness_core::resolve_safe_path(p),
         None => {
-            let dir = PathBuf::from(DEFAULT_TTS_DIR);
+            let dir = harness_core::resolve_dex_subpath(DEFAULT_TTS_DIR);
             tokio::fs::create_dir_all(&dir)
                 .await
                 .map_err(|e| AudioError::Io {
