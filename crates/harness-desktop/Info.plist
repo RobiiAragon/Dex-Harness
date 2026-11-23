@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>Dex requires screen recording permission to capture screenshots for visual perception and autonomous computer use.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Dex requires automation permissions to control mouse and keyboard actions autonomously when requested.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Dex may use microphone access for voice-guided autonomous tasks.</string>
+    <key>LSUIElement</key>
+    <false/>
+</dict>
+</plist>

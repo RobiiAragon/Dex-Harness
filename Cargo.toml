@@ -5,7 +5,11 @@ members = [
     "crates/harness-llm",
     "crates/harness-tools",
     "crates/harness-mcp",
+    "crates/harness-computer",
+    "crates/harness-ui",
     "crates/harness-cli",
+    "crates/harness-desktop",
+    "crates/harness-models",
 ]
 
 [workspace.package]
@@ -19,15 +23,43 @@ readme = "README.md"
 [workspace.dependencies]
 # Async Runtime & Concurrency
 tokio = { version = "1.43", features = ["full"] }
+tokio-util = { version = "0.7", features = ["sync"] }
+futures = "0.3"
 async-trait = "0.1"
 
 # Networking & HTTP Client
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+axum = { version = "0.8", features = ["ws"] }
+
+# Browser & Desktop Automation
+chromiumoxide = { version = "0.8", default-features = false, features = ["tokio-runtime"] }
+xcap = "0.9"
+image = { version = "0.25", default-features = false, features = ["png"] }
+enigo = { version = "0.6", default-features = false }
+
+# TUI & Terminal
+ratatui = "0.29"
+crossterm = "0.28"
+portable-pty = "0.8"
+
+# Tauri v2 Desktop & Native macOS
+tauri = { version = "2.0", features = ["tray-icon", "image-png"] }
+tauri-build = "2.0"
+tauri-plugin-global-shortcut = "2.0"
+
+# Hardware & System Info
+sysinfo = "0.33"
 
 # Serialization & Schemas
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+serde_yaml = "0.9"
 schemars = "0.8"
+
+# Search, Regex & Filesystem
+dirs = "7.0"
+ignore = "0.4"
+regex = "1.11"
 
 # Error Handling
 thiserror = "2.0"
@@ -45,3 +77,6 @@ harness-core = { path = "crates/harness-core" }
 harness-llm = { path = "crates/harness-llm" }
 harness-tools = { path = "crates/harness-tools" }
 harness-mcp = { path = "crates/harness-mcp" }
+harness-computer = { path = "crates/harness-computer" }
+harness-ui = { path = "crates/harness-ui" }
+harness-models = { path = "crates/harness-models" }

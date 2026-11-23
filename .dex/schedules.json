@@ -1,0 +1,12 @@
+{
+  "tasks": [
+    {
+      "id": "sched_1",
+      "name": "Security Lint",
+      "goal": "Run cargo clippy and security check",
+      "interval_seconds": 1800,
+      "last_run_timestamp": null,
+      "enabled": true
+    }
+  ]
+}

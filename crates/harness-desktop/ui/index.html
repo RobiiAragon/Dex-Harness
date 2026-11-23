@@ -1,0 +1,746 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dex</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --card-bg: #161b22;
+      --card-border: #30363d;
+      --text: #c9d1d9;
+      --text-muted: #8b949e;
+      --primary: #58a6ff;
+      --success: #3fb950;
+      --warning: #d29922;
+      --danger: #f85149;
+      --purple: #bc8cff;
+      --cyan: #39c5cf;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+      user-select: none;
+    }
+    /* macOS Overlay Titlebar */
+    .titlebar {
+      height: 48px;
+      background: rgba(22, 27, 34, 0.85);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--card-border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px;
+      -webkit-app-region: drag;
+    }
+    .title-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-left: 72px; /* space for macOS traffic lights */
+    }
+    .logo-badge {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 700;
+      font-size: 15px;
+      color: #fff;
+      letter-spacing: -0.3px;
+    }
+    .logo-badge span.robot {
+      font-size: 18px;
+      filter: drop-shadow(0 0 6px rgba(57, 197, 207, 0.6));
+    }
+    .title-right {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      -webkit-app-region: no-drag;
+    }
+    .mode-pill {
+      display: flex;
+      background: #090d13;
+      border: 1px solid var(--card-border);
+      border-radius: 20px;
+      padding: 2px;
+      gap: 2px;
+    }
+    .mode-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      font-size: 11px;
+      font-weight: 600;
+      padding: 4px 10px;
+      border-radius: 16px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    .mode-btn.active {
+      background: var(--primary);
+      color: #fff;
+      box-shadow: 0 0 8px rgba(88, 166, 255, 0.4);
+    }
+    .mode-btn.active.safe {
+      background: var(--warning);
+      color: #000;
+      box-shadow: 0 0 8px rgba(210, 153, 34, 0.4);
+    }
+    .mode-btn.active.plan {
+      background: var(--purple);
+      color: #fff;
+      box-shadow: 0 0 8px rgba(188, 140, 255, 0.4);
+    }
+    /* Main Layout */
+    .app-body {
+      display: flex;
+      flex: 1;
+      height: calc(100vh - 48px);
+      overflow: hidden;
+    }
+    .stream-column {
+      flex: 1.2;
+      display: flex;
+      flex-direction: column;
+      border-right: 1px solid var(--card-border);
+      background: #0b0f15;
+    }
+    .side-column {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      background: var(--bg);
+    }
+    /* Goal Input Bar */
+    .goal-panel {
+      padding: 14px 16px;
+      background: var(--card-bg);
+      border-bottom: 1px solid var(--card-border);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .config-row {
+      display: flex;
+      gap: 8px;
+      font-size: 12px;
+    }
+    .config-select, .config-input {
+      background: #090d13;
+      border: 1px solid var(--card-border);
+      border-radius: 6px;
+      color: var(--text);
+      padding: 4px 8px;
+      font-size: 12px;
+      outline: none;
+    }
+    .input-row {
+      display: flex;
+      gap: 8px;
+    }
+    .goal-input {
+      flex: 1;
+      background: #090d13;
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      color: #fff;
+      padding: 10px 14px;
+      font-size: 13px;
+      font-family: inherit;
+      outline: none;
+      resize: none;
+      height: 48px;
+      transition: border-color 0.2s;
+    }
+    .goal-input:focus { border-color: var(--primary); }
+    .btn {
+      border: none;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 12px;
+      padding: 0 16px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.2s ease;
+    }
+    .btn-run {
+      background: var(--primary);
+      color: #fff;
+    }
+    .btn-run:hover { background: #71b4ff; }
+    .btn-stop {
+      background: rgba(248, 81, 73, 0.2);
+      border: 1px solid var(--danger);
+      color: var(--danger);
+      display: none;
+    }
+    .btn-stop:hover { background: var(--danger); color: #fff; }
+    /* Log & Stream View */
+    .stream-header {
+      padding: 8px 16px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-muted);
+      border-bottom: 1px solid var(--card-border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: #0d121a;
+    }
+    .stream-log {
+      flex: 1;
+      padding: 16px;
+      overflow-y: auto;
+      font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, monospace;
+      font-size: 13px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-break: break-word;
+      user-select: text;
+    }
+    /* Tabs on the Right Side */
+    .tabs-bar {
+      display: flex;
+      background: var(--card-bg);
+      border-bottom: 1px solid var(--card-border);
+      padding: 0 8px;
+    }
+    .tab-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      font-size: 12px;
+      font-weight: 600;
+      padding: 12px 14px;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: all 0.2s ease;
+    }
+    .tab-btn.active {
+      color: var(--primary);
+      border-bottom: 2px solid var(--primary);
+    }
+    .tab-content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+      display: none;
+    }
+    .tab-content.active { display: block; }
+    /* Task Card */
+    .task-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 10px;
+    }
+    .task-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 13px;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+    .task-badge {
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      padding: 2px 6px;
+      border-radius: 10px;
+    }
+    .badge-pending { background: rgba(139, 148, 158, 0.2); color: var(--text-muted); }
+    .badge-in_progress { background: rgba(57, 197, 207, 0.2); color: var(--cyan); }
+    .badge-completed { background: rgba(63, 185, 80, 0.2); color: var(--success); }
+    .badge-blocked { background: rgba(248, 81, 73, 0.2); color: var(--danger); }
+    /* Screenshot Gallery */
+    .gallery-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+      gap: 12px;
+    }
+    .gallery-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 6px;
+      overflow: hidden;
+      cursor: pointer;
+      transition: transform 0.2s;
+    }
+    .gallery-card:hover { transform: scale(1.03); }
+    .gallery-card img {
+      width: 100%;
+      height: 100px;
+      object-fit: cover;
+      display: block;
+    }
+    .gallery-card-info {
+      padding: 6px 8px;
+      font-size: 11px;
+      color: var(--text-muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    /* Approval Modal */
+    .modal-overlay {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0, 0, 0, 0.75);
+      backdrop-filter: blur(6px);
+      -webkit-backdrop-filter: blur(6px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+    }
+    .modal-card {
+      background: #161b22;
+      border: 2px solid var(--warning);
+      border-radius: 12px;
+      width: 520px;
+      max-width: 90%;
+      padding: 20px;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.8);
+      animation: popIn 0.2s ease;
+    }
+    @keyframes popIn {
+      from { transform: scale(0.95); opacity: 0; }
+      to { transform: scale(1); opacity: 1; }
+    }
+    .modal-title {
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--warning);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .modal-pre {
+      background: #090d13;
+      border: 1px solid var(--card-border);
+      border-radius: 6px;
+      padding: 10px;
+      font-family: ui-monospace, monospace;
+      font-size: 12px;
+      color: var(--text);
+      max-height: 200px;
+      overflow-y: auto;
+      margin-bottom: 16px;
+      white-space: pre-wrap;
+    }
+    .modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+    }
+    .btn-allow {
+      background: var(--success);
+      color: #000;
+      padding: 8px 18px;
+    }
+    .btn-deny {
+      background: var(--danger);
+      color: #fff;
+      padding: 8px 18px;
+    }
+    /* Hardware Report Card */
+    .report-box {
+      background: #090d13;
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 16px;
+      font-family: ui-monospace, monospace;
+      font-size: 12px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      user-select: text;
+    }
+  </style>
+</head>
+<body>
+  <!-- macOS Overlay Titlebar -->
+  <header class="titlebar">
+    <div class="title-left">
+      <div class="logo-badge">
+        <span class="robot">🤖</span>
+        <span>Dex</span>
+      </div>
+      <span style="font-size: 12px; color: var(--text-muted);">v0.1.0 · macOS Native Agent Harness</span>
+    </div>
+
+    <div class="title-right">
+      <div class="mode-pill">
+        <button id="btn-autopilot" class="mode-btn active" onclick="setMode('autopilot')">🚀 Autopilot</button>
+        <button id="btn-safe" class="mode-btn" onclick="setMode('safe')">🛡️ Safe</button>
+        <button id="btn-plan" class="mode-btn" onclick="setMode('plan')">📝 Plan</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Body -->
+  <main class="app-body">
+    <!-- Left Column: Agent Stream & Controls -->
+    <section class="stream-column">
+      <div class="goal-panel">
+        <div class="config-row">
+          <select id="sel-provider" class="config-select" onchange="onProviderChange()">
+            <option value="ollama">Ollama (Local LLM)</option>
+            <option value="openai">OpenAI / Compatible API</option>
+          </select>
+          <input id="input-model" class="config-input" type="text" value="qwen2.5:7b" placeholder="Model name (e.g. qwen2.5:7b, gpt-4o)" style="flex: 1;" />
+          <input id="input-apibase" class="config-input" type="text" placeholder="API Base URL (optional)" style="flex: 1;" />
+        </div>
+        <div class="input-row">
+          <textarea id="input-goal" class="goal-input" placeholder="Enter objective for Dex (e.g., 'Inspect repo structure, build tests, and fix clippy warnings')..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();runGoal();}"></textarea>
+          <button id="btn-run" class="btn btn-run" onclick="runGoal()">▶ Run</button>
+          <button id="btn-stop" class="btn btn-stop" onclick="stopGoal()">⏹ Stop</button>
+        </div>
+      </div>
+
+      <div class="stream-header">
+        <span>⚡ REAL-TIME THOUGHT STREAM & EXECUTION TRACE</span>
+        <button style="background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 11px;" onclick="clearStream()">🧹 Clear</button>
+      </div>
+
+      <div id="stream-log" class="stream-log">✨ Dex is ready. Type an objective above or press Option+Space to show/hide this window.</div>
+    </section>
+
+    <!-- Right Column: Inspector Tabs -->
+    <section class="side-column">
+      <nav class="tabs-bar">
+        <button class="tab-btn active" onclick="openTab('tab-tasks')">📋 TaskBoard</button>
+        <button class="tab-btn" onclick="openTab('tab-subagents')">🤖 Subagents</button>
+        <button class="tab-btn" onclick="openTab('tab-vision')">👁️ Vision & Screenshots</button>
+        <button class="tab-btn" onclick="openTab('tab-cookbook')">🖥️ Cookbook</button>
+      </nav>
+
+      <!-- Tab: Tasks -->
+      <div id="tab-tasks" class="tab-content active">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+          <h4 style="font-size: 13px; color: var(--primary);">Active Project Graph (.dex/tasks.json)</h4>
+          <button style="background: none; border: 1px solid var(--card-border); color: var(--text-muted); padding: 2px 8px; border-radius: 4px; font-size: 11px; cursor: pointer;" onclick="refreshTasks()">🔄 Refresh</button>
+        </div>
+        <div id="tasks-list">
+          <p style="color: var(--text-muted); font-size: 12px;">No active tasks found in .dex/tasks.json.</p>
+        </div>
+      </div>
+
+      <!-- Tab: Subagents -->
+      <div id="tab-subagents" class="tab-content">
+        <h4 style="font-size: 13px; color: var(--primary); margin-bottom: 12px;">Concurrent Subagent Orbits</h4>
+        <div id="subagents-list">
+          <p style="color: var(--text-muted); font-size: 12px;">No concurrent subagents active. When `spawn_subagent` executes, child processes will appear here.</p>
+        </div>
+      </div>
+
+      <!-- Tab: Vision & Screenshots -->
+      <div id="tab-vision" class="tab-content">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+          <h4 style="font-size: 13px; color: var(--primary);">Desktop & Browser Perception Previews</h4>
+          <button style="background: none; border: 1px solid var(--card-border); color: var(--text-muted); padding: 2px 8px; border-radius: 4px; font-size: 11px; cursor: pointer;" onclick="refreshScreenshots()">🔄 Refresh</button>
+        </div>
+        <div id="gallery-container" class="gallery-grid">
+          <p style="color: var(--text-muted); font-size: 12px;">No screenshots captured yet.</p>
+        </div>
+      </div>
+
+      <!-- Tab: Cookbook -->
+      <div id="tab-cookbook" class="tab-content">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+          <h4 style="font-size: 13px; color: var(--primary);">Hardware Detection & Model Sizing</h4>
+          <button style="background: none; border: 1px solid var(--card-border); color: var(--text-muted); padding: 2px 8px; border-radius: 4px; font-size: 11px; cursor: pointer;" onclick="refreshCookbook()">🔄 Detect</button>
+        </div>
+        <div id="cookbook-report" class="report-box">Loading hardware specifications and model tier recommendations...</div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Interactive Safe Mode Approval Modal -->
+  <div id="approval-modal" class="modal-overlay">
+    <div class="modal-card">
+      <div class="modal-title">
+        <span>🛡️</span>
+        <span>Permission Request (Safe Mode)</span>
+      </div>
+      <p style="font-size: 13px; color: var(--text); margin-bottom: 8px;">
+        Dex is attempting to execute a sensitive action that modifies your system, files, or desktop:
+      </p>
+      <div style="font-size: 13px; font-weight: 600; color: var(--cyan); margin-bottom: 6px;">
+        Tool: <span id="modal-tool-name">execute_shell</span>
+      </div>
+      <div id="modal-arguments" class="modal-pre">{}</div>
+      <div class="modal-actions">
+        <button class="btn btn-deny" onclick="resolveApproval(false)">❌ Deny Action</button>
+        <button class="btn btn-allow" onclick="resolveApproval(true)">✅ Allow Action</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Tauri v2 IPC Bridge
+    const invoke = window.__TAURI__ ? window.__TAURI__.core.invoke : async () => {};
+    const listen = window.__TAURI__ ? window.__TAURI__.event.listen : () => {};
+
+    const streamEl = document.getElementById('stream-log');
+    const runBtn = document.getElementById('btn-run');
+    const stopBtn = document.getElementById('btn-stop');
+    const goalInput = document.getElementById('input-goal');
+
+    function appendStream(text) {
+      streamEl.textContent += text;
+      streamEl.scrollTop = streamEl.scrollHeight;
+    }
+
+    function clearStream() {
+      streamEl.textContent = '✨ Log cleared. Ready for next objective.\n';
+    }
+
+    function setRunningState(running) {
+      if (running) {
+        runBtn.style.display = 'none';
+        stopBtn.style.display = 'flex';
+      } else {
+        runBtn.style.display = 'flex';
+        stopBtn.style.display = 'none';
+      }
+    }
+
+    async function runGoal() {
+      const goal = goalInput.value.trim();
+      if (!goal) return;
+
+      const provider = document.getElementById('sel-provider').value;
+      const model = document.getElementById('input-model').value.trim();
+      const apiBase = document.getElementById('input-apibase').value.trim() || null;
+
+      appendStream(`\n\n🎯 >>> NEW OBJECTIVE DISPATCHED:\n${goal}\n----------------------------------------\n`);
+      setRunningState(true);
+
+      try {
+        await invoke('run_goal', {
+          goal: goal,
+          provider: provider,
+          model: model,
+          apiBase: apiBase,
+        });
+      } catch (err) {
+        appendStream(`\n❌ Error starting goal: ${err}\n`);
+        setRunningState(false);
+      }
+    }
+
+    async function stopGoal() {
+      try {
+        await invoke('stop_goal');
+        appendStream('\n⚠️  Cancel request sent to agent orchestrator.\n');
+      } catch (err) {
+        appendStream(`\n❌ Error stopping goal: ${err}\n`);
+      }
+    }
+
+    async function setMode(mode) {
+      document.querySelectorAll('.mode-btn').forEach(btn => btn.className = 'mode-btn');
+      const activeBtn = document.getElementById(`btn-${mode.toLowerCase()}`);
+      if (activeBtn) {
+        activeBtn.className = `mode-btn active ${mode.toLowerCase()}`;
+      }
+      try {
+        await invoke('set_mode', { mode });
+        appendStream(`\n🛡️  [Mode Switched] Execution mode set to: ${mode.toUpperCase()}\n`);
+      } catch (err) {
+        console.error('Failed to set mode:', err);
+      }
+    }
+
+    function onProviderChange() {
+      const provider = document.getElementById('sel-provider').value;
+      const modelInput = document.getElementById('input-model');
+      if (provider === 'ollama') {
+        modelInput.value = 'qwen2.5:7b';
+      } else {
+        modelInput.value = 'gpt-4o';
+      }
+    }
+
+    function openTab(tabId) {
+      document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(tab => tab.classList.remove('active'));
+      event.target.classList.add('active');
+      const target = document.getElementById(tabId);
+      if (target) target.classList.add('active');
+
+      if (tabId === 'tab-tasks') refreshTasks();
+      if (tabId === 'tab-vision') refreshScreenshots();
+      if (tabId === 'tab-cookbook') refreshCookbook();
+    }
+
+    // Modal Approval Handling
+    function showApprovalModal(toolName, args) {
+      document.getElementById('modal-tool-name').textContent = toolName;
+      document.getElementById('modal-arguments').textContent = typeof args === 'string' ? args : JSON.stringify(args, null, 2);
+      document.getElementById('approval-modal').style.display = 'flex';
+    }
+
+    async function resolveApproval(approved) {
+      document.getElementById('approval-modal').style.display = 'none';
+      try {
+        await invoke('resolve_approval', { approved });
+        const icon = approved ? '✅ APPROVED' : '❌ DENIED';
+        appendStream(`\n🛡️  [Human Decision] ${icon} by user\n`);
+      } catch (err) {
+        console.error('Failed to resolve approval:', err);
+      }
+    }
+
+    // Fetch Tasks
+    async function refreshTasks() {
+      try {
+        const tasks = await invoke('get_tasks');
+        const container = document.getElementById('tasks-list');
+        if (!tasks || tasks.length === 0) {
+          container.innerHTML = '<p style="color: var(--text-muted); font-size: 12px;">No tasks found in .dex/tasks.json.</p>';
+          return;
+        }
+        let html = '';
+        for (const t of tasks) {
+          let statusStr = typeof t.status === 'string' ? t.status : Object.keys(t.status)[0];
+          let badgeClass = `badge-${statusStr}`;
+          html += `
+            <div class="task-card">
+              <div class="task-head">
+                <span>${t.id}: ${t.title}</span>
+                <span class="task-badge ${badgeClass}">${statusStr}</span>
+              </div>
+              <p style="font-size: 12px; color: var(--text-muted);">${t.description}</p>
+            </div>
+          `;
+        }
+        container.innerHTML = html;
+      } catch (err) {
+        console.error('Failed to load tasks:', err);
+      }
+    }
+
+    // Fetch Screenshots
+    async function refreshScreenshots() {
+      try {
+        const screenshots = await invoke('get_screenshots');
+        const container = document.getElementById('gallery-container');
+        if (!screenshots || screenshots.length === 0) {
+          container.innerHTML = '<p style="color: var(--text-muted); font-size: 12px;">No screenshots captured yet.</p>';
+          return;
+        }
+        let html = '';
+        for (const s of screenshots) {
+          html += `
+            <div class="gallery-card" onclick="window.open('${s.data_url}')">
+              <img src="${s.data_url}" alt="${s.filename}" />
+              <div class="gallery-card-info">${s.filename} (${Math.round(s.size_bytes / 1024)} KB)</div>
+            </div>
+          `;
+        }
+        container.innerHTML = html;
+      } catch (err) {
+        console.error('Failed to load screenshots:', err);
+      }
+    }
+
+    // Fetch Cookbook
+    async function refreshCookbook() {
+      try {
+        const res = await invoke('get_cookbook');
+        const container = document.getElementById('cookbook-report');
+        if (res && res.report) {
+          container.textContent = res.report;
+        }
+      } catch (err) {
+        console.error('Failed to detect hardware:', err);
+      }
+    }
+
+    // Register Tauri Event Listeners
+    if (window.__TAURI__) {
+      listen('dex-event', (event) => {
+        const ev = event.payload;
+        if (ev.type === 'ThoughtToken') {
+          appendStream(ev.data.token);
+        } else if (ev.type === 'ToolStarted') {
+          appendStream(`\n🛠️  [Tool Call] ${ev.data.tool_name}\n   Arguments: ${JSON.stringify(ev.data.arguments)}\n`);
+        } else if (ev.type === 'ToolFinished') {
+          const status = ev.data.is_error ? '❌ FAILED' : '✅ SUCCESS';
+          appendStream(`   Status: ${status}\n   Result: ${ev.data.output.slice(0, 300)}${ev.data.output.length > 300 ? '...' : ''}\n`);
+          refreshTasks();
+          if (ev.data.tool_name.includes('screenshot')) {
+            refreshScreenshots();
+          }
+        } else if (ev.type === 'SubagentSpawned') {
+          appendStream(`\n🤖 [Subagent Spawned] Role: ${ev.data.role}\n   Task: ${ev.data.task}\n`);
+          const subagentDiv = document.createElement('div');
+          subagentDiv.className = 'task-card';
+          subagentDiv.innerHTML = `
+            <div class="task-head">
+              <span>🤖 Role: ${ev.data.role}</span>
+              <span class="task-badge badge-in_progress">RUNNING</span>
+            </div>
+            <p style="font-size: 12px; color: var(--text-muted);">${ev.data.task}</p>
+          `;
+          document.getElementById('subagents-list').prepend(subagentDiv);
+        } else if (ev.type === 'SubagentCompleted') {
+          appendStream(`\n🏁 [Subagent Completed] Role: ${ev.data.role}\n`);
+        }
+      });
+
+      listen('dex-approval-request', (event) => {
+        const data = event.payload;
+        showApprovalModal(data.tool, data.arguments);
+      });
+
+      listen('dex-goal-finished', (event) => {
+        const data = event.payload;
+        setRunningState(false);
+        if (data.status === 'success') {
+          appendStream(`\n\n🎉 [GOAL COMPLETED SUCCESSFULLY]\n${data.answer}\n`);
+        } else {
+          appendStream(`\n\n⚠️  [GOAL ENDED] ${data.error || 'Finished'}\n`);
+        }
+      });
+
+      listen('dex-mode-changed', (event) => {
+        const mode = event.payload.mode;
+        document.querySelectorAll('.mode-btn').forEach(btn => btn.className = 'mode-btn');
+        const activeBtn = document.getElementById(`btn-${mode.toLowerCase()}`);
+        if (activeBtn) {
+          activeBtn.className = `mode-btn active ${mode.toLowerCase()}`;
+        }
+      });
+
+      listen('dex-open-tab', (event) => {
+        const tab = event.payload.tab;
+        if (tab === 'cookbook') {
+          const btn = document.querySelector("button[onclick=\"openTab('tab-cookbook')\"]");
+          if (btn) btn.click();
+        }
+      });
+    }
+
+    // Initial hardware detection
+    refreshCookbook();
+    refreshTasks();
+  </script>
+</body>
+</html>

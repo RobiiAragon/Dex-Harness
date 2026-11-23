@@ -1,0 +1,23 @@
+[package]
+name = "harness-computer"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[dependencies]
+harness-core = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chromiumoxide = { workspace = true }
+xcap = { workspace = true }
+image = { workspace = true }
+enigo = { workspace = true }

@@ -1,11 +1,27 @@
 pub mod agent;
+pub mod compaction;
+pub mod cookbook;
 pub mod error;
+pub mod event;
+pub mod hook;
 pub mod memory;
 pub mod provider;
+pub mod scheduler;
+pub mod skill;
+pub mod subagent;
+pub mod task;
 pub mod tool;
 
 pub use agent::{Agent, AgentStep, ReActAgent, StepObserver};
+pub use compaction::ContextCompactor;
+pub use cookbook::{HardwareProfile, ModelRecommendation};
 pub use error::{CoreError, ProviderError, ToolError};
+pub use event::{DexEvent, EventBus};
+pub use hook::{AgentEvent, ExecutionMode, Hook, HookAction, HookRegistry};
 pub use memory::ConversationContext;
-pub use provider::{CompletionRequest, CompletionResponse, LlmProvider, Message, Role};
+pub use provider::{CompletionRequest, CompletionResponse, LlmProvider, Message, Role, TokenCallback};
+pub use scheduler::{ScheduleRegistry, ScheduledTask};
+pub use skill::{LoadSkillArgs, LoadSkillTool, ProgressiveSkillLoader, Skill, SkillMetadata};
+pub use subagent::{SpawnSubagentArgs, SpawnSubagentTool};
+pub use task::{ManageTasksArgs, ManageTasksTool, TaskAction, TaskBoard, TaskItem, TaskStatus};
 pub use tool::{Tool, ToolCall, ToolDefinition, ToolRegistry, ToolResult};

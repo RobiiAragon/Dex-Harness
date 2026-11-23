@@ -1,8 +1,11 @@
+use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ProviderError;
 use crate::tool::{ToolCall, ToolDefinition};
+
+pub type TokenCallback = Arc<dyn Fn(&str) + Send + Sync>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -68,7 +71,7 @@ impl Message {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CompletionRequest {
     pub messages: Vec<Message>,
     pub tools: Vec<ToolDefinition>,
@@ -76,6 +79,8 @@ pub struct CompletionRequest {
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    #[serde(skip)]
+    pub token_callback: Option<TokenCallback>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

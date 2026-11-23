@@ -1,0 +1,33 @@
+[package]
+name = "harness-desktop"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Dex-Harness Native macOS Desktop Application"
+
+[[bin]]
+name = "dex-desktop"
+path = "src/main.rs"
+
+[dependencies]
+harness-core = { workspace = true }
+harness-llm = { workspace = true }
+harness-tools = { workspace = true }
+harness-computer = { workspace = true }
+
+image = { workspace = true }
+tauri = { workspace = true }
+tauri-plugin-global-shortcut = { workspace = true }
+
+tokio = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+
+[build-dependencies]
+tauri-build = { workspace = true }

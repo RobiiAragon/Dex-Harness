@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::time::Duration;
 use async_trait::async_trait;
+use futures::StreamExt;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -49,6 +51,7 @@ struct ChatCompletionRequest<'a> {
     messages: Vec<ChatMessage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<ChatTool>,
+    stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -105,6 +108,37 @@ struct ChatChoice {
     finish_reason: Option<String>,
 }
 
+// Streaming chunk types
+#[derive(Deserialize)]
+struct ChatStreamChunk {
+    choices: Vec<ChatStreamChoice>,
+}
+
+#[derive(Deserialize)]
+struct ChatStreamChoice {
+    delta: ChatStreamDelta,
+    finish_reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ChatStreamDelta {
+    content: Option<String>,
+    tool_calls: Option<Vec<ChatStreamToolCall>>,
+}
+
+#[derive(Deserialize)]
+struct ChatStreamToolCall {
+    index: usize,
+    id: Option<String>,
+    function: Option<ChatStreamFunction>,
+}
+
+#[derive(Deserialize)]
+struct ChatStreamFunction {
+    name: Option<String>,
+    arguments: Option<String>,
+}
+
 #[async_trait]
 impl LlmProvider for OpenAiProvider {
     fn name(&self) -> &str {
@@ -114,6 +148,8 @@ impl LlmProvider for OpenAiProvider {
     #[instrument(skip(self, request), fields(model = %self.model))]
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+        let is_streaming = request.token_callback.is_some();
+        let token_callback = request.token_callback.clone();
 
         let messages: Vec<ChatMessage> = request
             .messages
@@ -151,6 +187,7 @@ impl LlmProvider for OpenAiProvider {
             model: &self.model,
             messages,
             tools,
+            stream: is_streaming,
             temperature: request.temperature,
             max_tokens: request.max_tokens,
         };
@@ -164,7 +201,7 @@ impl LlmProvider for OpenAiProvider {
             }
         }
 
-        debug!(url = %url, "Sending request to OpenAI chat completions");
+        debug!(url = %url, streaming = is_streaming, "Sending request to OpenAI chat completions");
 
         let response = self
             .client
@@ -184,6 +221,104 @@ impl LlmProvider for OpenAiProvider {
             });
         }
 
+        // Handle SSE streaming
+        if is_streaming {
+            let mut byte_stream = response.bytes_stream();
+            let mut line_buffer = String::new();
+            let mut accumulated_content = String::new();
+            let mut tool_calls_map: HashMap<usize, (String, String, String)> = HashMap::new(); // index -> (id, name, args)
+            let mut finish_reason = None;
+
+            while let Some(chunk_result) = byte_stream.next().await {
+                let chunk = chunk_result.map_err(|e| ProviderError::Http(e.to_string()))?;
+                line_buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+                while let Some(pos) = line_buffer.find('\n') {
+                    let line = line_buffer[..pos].trim().to_string();
+                    line_buffer = line_buffer[pos + 1..].to_string();
+
+                    if line.is_empty() {
+                        continue;
+                    }
+
+                    if let Some(data_str) = line.strip_prefix("data: ") {
+                        let trimmed_data = data_str.trim();
+                        if trimmed_data == "[DONE]" {
+                            break;
+                        }
+
+                        if let Ok(chunk_payload) = serde_json::from_str::<ChatStreamChunk>(trimmed_data) {
+                            for choice in chunk_payload.choices {
+                                if let Some(ref reason) = choice.finish_reason {
+                                    finish_reason = Some(reason.clone());
+                                }
+
+                                if let Some(ref content) = choice.delta.content {
+                                    if !content.is_empty() {
+                                        if let Some(ref cb) = token_callback {
+                                            cb(content);
+                                        }
+                                        accumulated_content.push_str(content);
+                                    }
+                                }
+
+                                if let Some(tcs) = choice.delta.tool_calls {
+                                    for tc in tcs {
+                                        let entry = tool_calls_map.entry(tc.index).or_insert_with(|| {
+                                            (
+                                                tc.id.clone().unwrap_or_default(),
+                                                String::new(),
+                                                String::new(),
+                                            )
+                                        });
+
+                                        if let Some(id) = tc.id {
+                                            entry.0 = id;
+                                        }
+                                        if let Some(func) = tc.function {
+                                            if let Some(name) = func.name {
+                                                entry.1.push_str(&name);
+                                            }
+                                            if let Some(args) = func.arguments {
+                                                entry.2.push_str(&args);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            let mut tool_calls = Vec::new();
+            let mut sorted_keys: Vec<_> = tool_calls_map.keys().copied().collect();
+            sorted_keys.sort_unstable();
+
+            for idx in sorted_keys {
+                if let Some((id, name, args_str)) = tool_calls_map.remove(&idx) {
+                    let parsed_args = serde_json::from_str(&args_str)
+                        .unwrap_or(serde_json::Value::String(args_str));
+                    tool_calls.push(ToolCall {
+                        id: if id.is_empty() { format!("call_{idx}_{name}") } else { id },
+                        name,
+                        arguments: parsed_args,
+                    });
+                }
+            }
+
+            return Ok(CompletionResponse {
+                content: if accumulated_content.is_empty() {
+                    None
+                } else {
+                    Some(accumulated_content)
+                },
+                tool_calls,
+                finish_reason,
+            });
+        }
+
+        // Non-streaming response
         let resp: ChatCompletionResponse = response
             .json()
             .await

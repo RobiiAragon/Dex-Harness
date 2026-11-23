@@ -2,9 +2,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tracing::{debug, info, warn};
 
+use crate::compaction::ContextCompactor;
 use crate::error::CoreError;
+use crate::event::{DexEvent, EventBus};
+use crate::hook::{AgentEvent, HookAction, HookRegistry};
 use crate::memory::ConversationContext;
-use crate::provider::{CompletionRequest, LlmProvider, Message};
+use crate::provider::{CompletionRequest, LlmProvider, Message, TokenCallback};
 use crate::tool::{ToolCall, ToolRegistry, ToolResult};
 
 /// Represents a single step in the ReAct (Reasoning + Action) execution loop.
@@ -31,14 +34,18 @@ pub trait Agent: Send + Sync {
 }
 
 /// A ReAct (Reasoning + Action) agent implementation that coordinates
-/// LLM inference, tool execution, and conversation history.
+/// LLM inference, tool execution, conversation history, compaction, and hooks.
 pub struct ReActAgent {
     provider: Arc<dyn LlmProvider>,
     tools: ToolRegistry,
     context: ConversationContext,
+    hooks: HookRegistry,
+    compactor: ContextCompactor,
     max_steps: usize,
     current_step: usize,
     observer: Option<StepObserver>,
+    token_callback: Option<TokenCallback>,
+    event_bus: Option<EventBus>,
 }
 
 impl ReActAgent {
@@ -47,7 +54,7 @@ impl ReActAgent {
     pub fn new(provider: Arc<dyn LlmProvider>, tools: ToolRegistry) -> Self {
         let system_prompt = "\
 You are Dex, a world-class autonomous software engineering and systems agent.
-You have native access to tools allowing you to inspect files, execute shell commands, and interact with the environment.
+You have native access to tools allowing you to inspect files, execute shell commands, edit files surgically, and interact with the environment.
 Solve the user's objective thoroughly:
 1. Break complex problems down methodically.
 2. Formulate your reasoning and plan of action.
@@ -59,9 +66,13 @@ Solve the user's objective thoroughly:
             provider,
             tools,
             context: ConversationContext::new().with_system_prompt(system_prompt),
+            hooks: HookRegistry::new(),
+            compactor: ContextCompactor::default(),
             max_steps: Self::DEFAULT_MAX_STEPS,
             current_step: 0,
             observer: None,
+            token_callback: None,
+            event_bus: None,
         }
     }
 
@@ -77,6 +88,26 @@ Solve the user's objective thoroughly:
 
     pub fn with_observer(mut self, observer: StepObserver) -> Self {
         self.observer = Some(observer);
+        self
+    }
+
+    pub fn with_token_callback(mut self, callback: TokenCallback) -> Self {
+        self.token_callback = Some(callback);
+        self
+    }
+
+    pub fn with_event_bus(mut self, event_bus: EventBus) -> Self {
+        self.event_bus = Some(event_bus);
+        self
+    }
+
+    pub fn with_hooks(mut self, hooks: HookRegistry) -> Self {
+        self.hooks = hooks;
+        self
+    }
+
+    pub fn with_compactor(mut self, compactor: ContextCompactor) -> Self {
+        self.compactor = compactor;
         self
     }
 
@@ -97,14 +128,50 @@ impl Agent for ReActAgent {
 
         info!(iteration = iteration, max_steps = self.max_steps, "Executing ReAct step");
 
+        // Automatically compact context if token threshold is exceeded
+        if self.compactor.compact(&mut self.context) {
+            if let Some(ref bus) = self.event_bus {
+                let estimated = ContextCompactor::estimate_tokens(self.context.messages());
+                bus.publish(DexEvent::ContextCompacted { estimated_tokens: estimated });
+            }
+        }
+
+        // Bridge token callback to EventBus if token_callback wasn't explicitly set
+        let effective_token_cb: Option<TokenCallback> = match (&self.token_callback, &self.event_bus) {
+            (Some(cb), Some(bus)) => {
+                let cb_clone = cb.clone();
+                let bus_clone = bus.clone();
+                Some(Arc::new(move |token: &str| {
+                    bus_clone.publish(DexEvent::ThoughtToken { token: token.to_string() });
+                    cb_clone(token);
+                }))
+            }
+            (Some(cb), None) => Some(cb.clone()),
+            (None, Some(bus)) => {
+                let bus_clone = bus.clone();
+                Some(Arc::new(move |token: &str| {
+                    bus_clone.publish(DexEvent::ThoughtToken { token: token.to_string() });
+                }))
+            }
+            (None, None) => None,
+        };
+
         let request = CompletionRequest {
             messages: self.context.assemble_messages(),
             tools: self.tools.definitions(),
             temperature: Some(0.2),
             max_tokens: None,
+            token_callback: effective_token_cb,
         };
 
-        let response = self.provider.complete(request).await?;
+        let response = match self.provider.complete(request).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                let err_msg = e.to_string();
+                self.hooks.trigger(&AgentEvent::OnError { error: err_msg.clone() }).await?;
+                return Err(e.into());
+            }
+        };
 
         let thought = response.content.clone();
         let tool_calls = response.tool_calls.clone();
@@ -138,10 +205,55 @@ impl Agent for ReActAgent {
             Some(tool_calls.clone()),
         ));
 
-        // Execute each requested tool call
+        // Execute each requested tool call, running lifecycle hooks
         let mut tool_results = Vec::with_capacity(tool_calls.len());
-        for call in &tool_calls {
-            let result = self.tools.execute(call).await;
+        for mut call in tool_calls.clone() {
+            // Trigger PreToolUse hook
+            let pre_event = AgentEvent::PreToolUse {
+                tool_name: call.name.clone(),
+                arguments: call.arguments.clone(),
+            };
+
+            match self.hooks.trigger(&pre_event).await? {
+                HookAction::Continue => {}
+                HookAction::Halt(reason) => {
+                    if let Some(ref bus) = self.event_bus {
+                        bus.publish(DexEvent::SecurityBlocked {
+                            tool_name: call.name.clone(),
+                            reason: reason.clone(),
+                        });
+                    }
+                    return Err(CoreError::AgentHalted { reason });
+                }
+                HookAction::ModifyArguments(new_args) => {
+                    call.arguments = new_args;
+                }
+            }
+
+            if let Some(ref bus) = self.event_bus {
+                bus.publish(DexEvent::ToolStarted {
+                    tool_name: call.name.clone(),
+                    arguments: call.arguments.clone(),
+                });
+            }
+
+            let result = self.tools.execute(&call).await;
+
+            if let Some(ref bus) = self.event_bus {
+                bus.publish(DexEvent::ToolFinished {
+                    tool_name: call.name.clone(),
+                    output: result.output.clone(),
+                    is_error: result.is_error,
+                });
+            }
+
+            // Trigger PostToolUse hook
+            let post_event = AgentEvent::PostToolUse {
+                tool_name: call.name.clone(),
+                result: result.clone(),
+            };
+            self.hooks.trigger(&post_event).await?;
+
             self.context.push(Message::tool_result(
                 &result.call_id,
                 &result.tool_name,
