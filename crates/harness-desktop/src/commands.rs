@@ -1,5 +1,11 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+use harness_models::{
+    import_local_gguf as import_gguf_impl, parse_quantization, HfClient, HfGgufFile,
+    HfModelSummary, ModelDownloader, ModelMetadata, ModelRegistry, ModelSource, OllamaBridge,
+};
+use tokio_util::sync::CancellationToken;
 use harness_computer::{
     BrowserClickTool, BrowserExtractDomTool, BrowserNavigateTool, BrowserScreenshotTool,
     BrowserSession, BrowserTypeTool, DesktopKeyboardTool, DesktopMouseTool, DesktopScreenshotTool,
@@ -368,6 +374,183 @@ pub async fn get_screenshots() -> Result<Vec<ScreenshotEntry>, String> {
     // Sort newest first
     entries.sort_by(|a, b| b.filename.cmp(&a.filename));
     Ok(entries)
+}
+
+#[tauri::command]
+pub async fn search_hf_models(query: String, limit: Option<usize>) -> Result<Vec<HfModelSummary>, String> {
+    let client = HfClient::new(None);
+    client.search_models(&query, limit.unwrap_or(15)).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_hf_files(repo_id: String) -> Result<Vec<HfGgufFile>, String> {
+    let client = HfClient::new(None);
+    let profile = HardwareProfile::detect();
+    client.inspect_gguf_files(&repo_id, &profile).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn download_model(
+    state: State<'_, DesktopState>,
+    repo_id: String,
+    filename: String,
+    download_url: String,
+) -> Result<String, String> {
+    let cancel = CancellationToken::new();
+    {
+        let mut lock = state.download_cancel.lock().await;
+        *lock = Some(cancel.clone());
+    }
+
+    let models_dir = ModelRegistry::default_dir();
+    let dest_path = models_dir.join(&filename);
+    let event_bus = state.event_bus.clone();
+    let filename_for_task = filename.clone();
+
+    tokio::spawn(async move {
+        let downloader = ModelDownloader::new(None);
+        match downloader.download(&download_url, &dest_path, &repo_id, &filename_for_task, Some(&event_bus), cancel).await {
+            Ok(saved_path) => {
+                let quantization = parse_quantization(&filename_for_task);
+                let meta = tokio::fs::metadata(&saved_path).await.ok();
+                let size_bytes = meta.map(|m| m.len()).unwrap_or(0);
+                let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                let model_id = format!("hf:{}", filename_for_task.trim_end_matches(".gguf"));
+
+                let metadata = ModelMetadata {
+                    id: model_id,
+                    name: filename_for_task.clone(),
+                    source: ModelSource::HuggingFace,
+                    file_path: Some(saved_path.to_string_lossy().to_string()),
+                    repo_id: Some(repo_id),
+                    filename: Some(filename_for_task),
+                    quantization: Some(quantization),
+                    size_bytes,
+                    created_at: now,
+                };
+
+                let mut registry = ModelRegistry::load_or_default().await;
+                let _ = registry.add(metadata).await;
+            }
+            Err(e) => {
+                tracing::error!("Download error: {}", e);
+            }
+        }
+    });
+
+    Ok(format!("Download started for {}", filename))
+}
+
+#[tauri::command]
+pub async fn cancel_download(state: State<'_, DesktopState>) -> Result<String, String> {
+    let mut lock = state.download_cancel.lock().await;
+    if let Some(token) = lock.take() {
+        token.cancel();
+        Ok("Download cancellation requested".to_string())
+    } else {
+        Ok("No active download running".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn import_local_gguf(
+    path: String,
+    name: Option<String>,
+    to_ollama: bool,
+) -> Result<ModelMetadata, String> {
+    let p = PathBuf::from(&path);
+    let bridge = if to_ollama { Some(OllamaBridge::default()) } else { None };
+    import_gguf_impl(p, name.as_deref(), true, to_ollama, bridge.as_ref())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_installed_models() -> Result<Vec<ModelMetadata>, String> {
+    let registry = ModelRegistry::load_or_default().await;
+    let mut models = registry.list().to_vec();
+
+    // Query Ollama models and merge
+    let bridge = OllamaBridge::default();
+    if let Ok(tags) = bridge.list_models().await {
+        for tag in tags {
+            let id = format!("ollama:{}", tag.name);
+            if !models.iter().any(|m| m.id == id || m.name == tag.name) {
+                let quant = tag.details.as_ref().and_then(|d| d.quantization_level.clone());
+                models.push(ModelMetadata {
+                    id,
+                    name: tag.name.clone(),
+                    source: ModelSource::Ollama,
+                    file_path: None,
+                    repo_id: None,
+                    filename: None,
+                    quantization: quant,
+                    size_bytes: tag.size,
+                    created_at: 0,
+                });
+            }
+        }
+    }
+
+    Ok(models)
+}
+
+#[tauri::command]
+pub async fn delete_model(model_id: String) -> Result<String, String> {
+    if model_id.starts_with("ollama:") {
+        let name = model_id.trim_start_matches("ollama:");
+        let bridge = OllamaBridge::default();
+        let _ = bridge.delete_model(name).await;
+    }
+
+    let mut registry = ModelRegistry::load_or_default().await;
+    let removed = registry.remove(&model_id, true).await.map_err(|e| e.to_string())?;
+    if let Some(m) = removed {
+        Ok(format!("Deleted model '{}'", m.name))
+    } else {
+        Ok(format!("Model '{}' removed", model_id))
+    }
+}
+
+#[tauri::command]
+pub async fn pull_ollama_model(
+    state: State<'_, DesktopState>,
+    model_name: String,
+) -> Result<String, String> {
+    let cancel = CancellationToken::new();
+    {
+        let mut lock = state.download_cancel.lock().await;
+        *lock = Some(cancel.clone());
+    }
+
+    let event_bus = state.event_bus.clone();
+    let name = model_name.clone();
+
+    tokio::spawn(async move {
+        let bridge = OllamaBridge::default();
+        match bridge.pull_model(&name, Some(&event_bus), cancel).await {
+            Ok(()) => {
+                let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                let mut registry = ModelRegistry::load_or_default().await;
+                let _ = registry.add(ModelMetadata {
+                    id: format!("ollama:{}", name),
+                    name: name.clone(),
+                    source: ModelSource::Ollama,
+                    file_path: None,
+                    repo_id: None,
+                    filename: None,
+                    quantization: None,
+                    size_bytes: 0,
+                    created_at: now,
+                }).await;
+            }
+            Err(e) => {
+                tracing::error!("Ollama pull error: {}", e);
+            }
+        }
+    });
+
+    Ok(format!("Pull started for Ollama model {}", model_name))
 }
 
 #[cfg(test)]

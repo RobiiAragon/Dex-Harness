@@ -159,3 +159,54 @@ impl ModelRegistry {
         &self.models
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_model_registry_crud_lifecycle() {
+        let temp_dir = std::env::temp_dir().join(format!("dex_reg_test_{}", std::process::id()));
+        let manifest = temp_dir.join("registry.json");
+        let models_dir = temp_dir.join("models");
+
+        let mut registry = ModelRegistry::load_from(&manifest, &models_dir).await;
+        assert_eq!(registry.list().len(), 0);
+
+        let dummy_path = models_dir.join("dummy-model.gguf");
+        tokio::fs::create_dir_all(&models_dir).await.expect("create test dir");
+        tokio::fs::write(&dummy_path, b"dummy gguf content").await.expect("write dummy");
+
+        let model = ModelMetadata {
+            id: "local:dummy-model".to_string(),
+            name: "dummy-model".to_string(),
+            source: ModelSource::Local,
+            file_path: Some(dummy_path.to_string_lossy().to_string()),
+            repo_id: None,
+            filename: Some("dummy-model.gguf".to_string()),
+            quantization: Some("Q4_K_M".to_string()),
+            size_bytes: 18,
+            created_at: 1700000000,
+        };
+
+        // Add
+        registry.add(model).await.expect("add model");
+        assert_eq!(registry.list().len(), 1);
+        assert!(registry.get("local:dummy-model").is_some());
+
+        // Reload from disk to verify persistence
+        let reloaded = ModelRegistry::load_from(&manifest, &models_dir).await;
+        assert_eq!(reloaded.list().len(), 1);
+        let found = reloaded.get("local:dummy-model").expect("model found");
+        assert_eq!(found.quantization.as_deref(), Some("Q4_K_M"));
+
+        // Remove with file deletion
+        let removed = registry.remove("local:dummy-model", true).await.expect("remove model");
+        assert!(removed.is_some());
+        assert_eq!(registry.list().len(), 0);
+        assert!(!tokio::fs::try_exists(&dummy_path).await.unwrap_or(true));
+
+        // Cleanup temp dir
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+}

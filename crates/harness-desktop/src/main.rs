@@ -49,6 +49,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             commands::get_cookbook,
             commands::get_tasks,
             commands::get_screenshots,
+            commands::search_hf_models,
+            commands::list_hf_files,
+            commands::download_model,
+            commands::cancel_download,
+            commands::import_local_gguf,
+            commands::list_installed_models,
+            commands::delete_model,
+            commands::pull_ollama_model,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

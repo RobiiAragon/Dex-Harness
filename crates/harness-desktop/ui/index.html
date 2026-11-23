@@ -266,6 +266,22 @@
     .badge-in_progress { background: rgba(57, 197, 207, 0.2); color: var(--cyan); }
     .badge-completed { background: rgba(63, 185, 80, 0.2); color: var(--success); }
     .badge-blocked { background: rgba(248, 81, 73, 0.2); color: var(--danger); }
+    .badge-fits { background: rgba(63, 185, 80, 0.2); color: var(--success); }
+    .badge-tight { background: rgba(210, 153, 34, 0.2); color: var(--warning); }
+    .badge-toolarge { background: rgba(248, 81, 73, 0.2); color: var(--danger); }
+    .btn-sm {
+      padding: 3px 8px;
+      font-size: 11px;
+      font-weight: 600;
+      border-radius: 4px;
+      border: none;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .btn-use { background: var(--primary); color: #fff; }
+    .btn-use:hover { background: #71b4ff; }
+    .btn-del { background: rgba(248, 81, 73, 0.2); color: var(--danger); }
+    .btn-del:hover { background: var(--danger); color: #fff; }
     /* Screenshot Gallery */
     .gallery-grid {
       display: grid;
@@ -427,6 +443,7 @@
         <button class="tab-btn" onclick="openTab('tab-subagents')">🤖 Subagents</button>
         <button class="tab-btn" onclick="openTab('tab-vision')">👁️ Vision & Screenshots</button>
         <button class="tab-btn" onclick="openTab('tab-cookbook')">🖥️ Cookbook</button>
+        <button class="tab-btn" onclick="openTab('tab-models')">🧠 Models Hub</button>
       </nav>
 
       <!-- Tab: Tasks -->
@@ -466,6 +483,70 @@
           <button style="background: none; border: 1px solid var(--card-border); color: var(--text-muted); padding: 2px 8px; border-radius: 4px; font-size: 11px; cursor: pointer;" onclick="refreshCookbook()">🔄 Detect</button>
         </div>
         <div id="cookbook-report" class="report-box">Loading hardware specifications and model tier recommendations...</div>
+      </div>
+
+      <!-- Tab: Models Hub -->
+      <div id="tab-models" class="tab-content">
+        <!-- Live Download Progress Card -->
+        <div id="download-progress-box" style="display: none; background: #0f141c; border: 1px solid var(--primary); border-radius: 8px; padding: 12px; margin-bottom: 16px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+            <span style="font-size: 13px; font-weight: 600; color: var(--primary);" id="dl-title">Downloading Model...</span>
+            <span style="font-size: 12px; color: var(--text-muted);" id="dl-speed">0.0 MB/s</span>
+          </div>
+          <div style="width: 100%; height: 8px; background: #161b22; border-radius: 4px; overflow: hidden; margin-bottom: 8px;">
+            <div id="dl-bar" style="width: 0%; height: 100%; background: var(--primary); transition: width 0.2s;"></div>
+          </div>
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <span style="font-size: 11px; color: var(--text-muted);" id="dl-stats">0 MB / 0 MB (0%)</span>
+            <button class="btn btn-deny" style="padding: 2px 10px; font-size: 11px;" onclick="cancelActiveDownload()">Cancel</button>
+          </div>
+        </div>
+
+        <!-- Section 1: Installed Models -->
+        <div style="margin-bottom: 20px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+            <h4 style="font-size: 13px; color: var(--primary);">📦 Installed Models (Local & Ollama)</h4>
+            <button style="background: none; border: 1px solid var(--card-border); color: var(--text-muted); padding: 2px 8px; border-radius: 4px; font-size: 11px; cursor: pointer;" onclick="refreshInstalledModels()">🔄 Refresh</button>
+          </div>
+          <div id="installed-models-list">
+            <p style="color: var(--text-muted); font-size: 12px;">Loading installed models...</p>
+          </div>
+        </div>
+
+        <!-- Section 2: Hugging Face GGUF Hub Search -->
+        <div style="margin-bottom: 20px;">
+          <h4 style="font-size: 13px; color: var(--primary); margin-bottom: 8px;">🤗 Hugging Face Hub (GGUF Search)</h4>
+          <div style="display: flex; gap: 8px; margin-bottom: 10px;">
+            <input id="hf-search-input" class="config-input" type="text" placeholder="Search models (e.g. qwen2.5, llama-3.1, deepseek-r1)..." style="flex: 1;" onkeydown="if(event.key==='Enter')searchHfModels();" />
+            <button class="btn btn-run" style="padding: 0 12px;" onclick="searchHfModels()">🔍 Search</button>
+          </div>
+          <div id="hf-search-results"></div>
+          <div id="hf-repo-files" style="margin-top: 10px;"></div>
+        </div>
+
+        <!-- Section 3: Import Local GGUF -->
+        <div style="margin-bottom: 20px; background: #0f141c; border: 1px solid var(--card-border); border-radius: 8px; padding: 12px;">
+          <h4 style="font-size: 13px; color: var(--cyan); margin-bottom: 8px;">📥 Import Local .gguf Model File</h4>
+          <div style="display: flex; flex-direction: column; gap: 8px;">
+            <input id="import-path" class="config-input" type="text" placeholder="/path/to/my-model.gguf" />
+            <div style="display: flex; gap: 8px; align-items: center;">
+              <input id="import-name" class="config-input" type="text" placeholder="Alias name (optional)" style="flex: 1;" />
+              <label style="font-size: 12px; color: var(--text-muted); display: flex; align-items: center; gap: 4px; cursor: pointer;">
+                <input type="checkbox" id="import-to-ollama" /> Register in Ollama
+              </label>
+              <button class="btn btn-run" style="padding: 6px 14px;" onclick="importLocalGguf()">Import</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Section 4: Direct Ollama Pull -->
+        <div style="background: #0f141c; border: 1px solid var(--card-border); border-radius: 8px; padding: 12px;">
+          <h4 style="font-size: 13px; color: var(--warning); margin-bottom: 8px;">🦙 Pull Model from Ollama Library</h4>
+          <div style="display: flex; gap: 8px;">
+            <input id="ollama-pull-input" class="config-input" type="text" placeholder="e.g. qwen2.5-coder:7b, llama3.2:3b" style="flex: 1;" onkeydown="if(event.key==='Enter')pullOllamaModel();" />
+            <button class="btn btn-run" style="padding: 6px 14px;" onclick="pullOllamaModel()">Pull</button>
+          </div>
+        </div>
       </div>
     </section>
   </main>
@@ -587,6 +668,7 @@
       if (tabId === 'tab-tasks') refreshTasks();
       if (tabId === 'tab-vision') refreshScreenshots();
       if (tabId === 'tab-cookbook') refreshCookbook();
+      if (tabId === 'tab-models') refreshInstalledModels();
     }
 
     // Modal Approval Handling
@@ -673,6 +755,208 @@
       }
     }
 
+    // Model Hub Logic
+    async function refreshInstalledModels() {
+      try {
+        const models = await invoke('list_installed_models');
+        const container = document.getElementById('installed-models-list');
+        if (!models || models.length === 0) {
+          container.innerHTML = '<p style="color: var(--text-muted); font-size: 12px;">No models installed yet. Search Hugging Face or pull from Ollama below.</p>';
+          return;
+        }
+
+        let html = '';
+        for (const m of models) {
+          const sizeMb = m.size_bytes > 0 ? (m.size_bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB' : '-';
+          const quant = m.quantization || '-';
+          html += `
+            <div class="task-card" style="display: flex; justify-content: space-between; align-items: center;">
+              <div>
+                <div style="font-size: 13px; font-weight: 600; color: #fff;">
+                  ${m.name}
+                  <span class="task-badge" style="background: rgba(88, 166, 255, 0.2); color: var(--primary); margin-left: 6px;">${m.source}</span>
+                  ${quant !== '-' ? `<span class="task-badge" style="background: rgba(57, 197, 207, 0.2); color: var(--cyan); margin-left: 4px;">${quant}</span>` : ''}
+                </div>
+                <div style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">
+                  Size: ${sizeMb} · ID: ${m.id}
+                </div>
+              </div>
+              <div style="display: flex; gap: 6px;">
+                <button class="btn-sm btn-use" onclick="useModel('${m.name}', '${m.source}')">⚡ Usar este modelo</button>
+                <button class="btn-sm btn-del" onclick="deleteModel('${m.id}')">🗑️</button>
+              </div>
+            </div>
+          `;
+        }
+        container.innerHTML = html;
+      } catch (err) {
+        console.error('Failed to list installed models:', err);
+      }
+    }
+
+    function useModel(name, source) {
+      const modelInput = document.getElementById('input-model');
+      const providerSelect = document.getElementById('sel-provider');
+      modelInput.value = name;
+      if (source === 'ollama') {
+        providerSelect.value = 'ollama';
+      }
+      appendStream(`\n🧠 [Model Selected] Active model set to: ${name} (${source})\n`);
+      document.getElementById('input-goal').focus();
+    }
+
+    async function deleteModel(modelId) {
+      if (!confirm(`Are you sure you want to delete model '${modelId}'?`)) return;
+      try {
+        await invoke('delete_model', { modelId });
+        appendStream(`\n🗑️ [Model Removed] Deleted ${modelId}\n`);
+        refreshInstalledModels();
+      } catch (err) {
+        alert('Failed to delete model: ' + err);
+      }
+    }
+
+    async function searchHfModels() {
+      const query = document.getElementById('hf-search-input').value.trim();
+      if (!query) return;
+
+      const container = document.getElementById('hf-search-results');
+      container.innerHTML = '<p style="color: var(--text-muted); font-size: 12px;">Searching Hugging Face Hub...</p>';
+      document.getElementById('hf-repo-files').innerHTML = '';
+
+      try {
+        const repos = await invoke('search_hf_models', { query, limit: 8 });
+        if (!repos || repos.length === 0) {
+          container.innerHTML = '<p style="color: var(--text-muted); font-size: 12px;">No GGUF models found for query.</p>';
+          return;
+        }
+
+        let html = '<div style="display: flex; flex-direction: column; gap: 6px;">';
+        for (const r of repos) {
+          html += `
+            <div class="task-card" style="display: flex; justify-content: space-between; align-items: center; cursor: pointer;" onclick="inspectHfRepo('${r.id}')">
+              <div>
+                <div style="font-size: 13px; font-weight: 600; color: var(--primary);">${r.id}</div>
+                <div style="font-size: 11px; color: var(--text-muted);">
+                  ⬇️ ${r.downloads || 0} downloads · ❤️ ${r.likes || 0} likes
+                </div>
+              </div>
+              <button class="btn-sm btn-use" onclick="event.stopPropagation(); inspectHfRepo('${r.id}')">Inspect GGUFs</button>
+            </div>
+          `;
+        }
+        html += '</div>';
+        container.innerHTML = html;
+      } catch (err) {
+        container.innerHTML = `<p style="color: var(--danger); font-size: 12px;">Search failed: ${err}</p>`;
+      }
+    }
+
+    async function inspectHfRepo(repoId) {
+      const container = document.getElementById('hf-repo-files');
+      container.innerHTML = `<p style="color: var(--text-muted); font-size: 12px;">Inspecting GGUF quantizations for <strong>${repoId}</strong>...</p>`;
+
+      try {
+        const files = await invoke('list_hf_files', { repoId });
+        if (!files || files.length === 0) {
+          container.innerHTML = '<p style="color: var(--text-muted); font-size: 12px;">No GGUF files found in this repository.</p>';
+          return;
+        }
+
+        let html = `
+          <div style="background: #090d13; border: 1px solid var(--card-border); border-radius: 8px; padding: 12px;">
+            <div style="font-size: 13px; font-weight: 600; color: #fff; margin-bottom: 8px;">
+              Files for ${repoId}:
+            </div>
+            <div style="display: flex; flex-direction: column; gap: 6px;">
+        `;
+
+        for (const f of files) {
+          const sizeGb = (f.size_bytes / (1024 * 1024 * 1024)).toFixed(1);
+          let badgeClass = 'badge-fits';
+          let fitLabel = '🟢 Fits RAM';
+          if (f.memory_fit === 'tight') {
+            badgeClass = 'badge-tight';
+            fitLabel = '🟡 Tight';
+          } else if (f.memory_fit === 'too_large') {
+            badgeClass = 'badge-toolarge';
+            fitLabel = '🔴 Too Large';
+          }
+
+          html += `
+            <div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 8px; border-radius: 6px; background: #161b22;">
+              <div>
+                <span style="font-size: 12px; font-weight: 600; color: #fff;">${f.filename}</span>
+                <span class="task-badge ${badgeClass}" style="margin-left: 6px;">${fitLabel}</span>
+                <span style="font-size: 11px; color: var(--text-muted); margin-left: 6px;">${sizeGb} GB (${f.quantization})</span>
+              </div>
+              <button class="btn-sm btn-use" onclick="startDownload('${repoId}', '${f.filename}', '${f.download_url}')">📥 Download</button>
+            </div>
+          `;
+        }
+        html += '</div></div>';
+        container.innerHTML = html;
+      } catch (err) {
+        container.innerHTML = `<p style="color: var(--danger); font-size: 12px;">Inspection failed: ${err}</p>`;
+      }
+    }
+
+    async function startDownload(repoId, filename, downloadUrl) {
+      try {
+        await invoke('download_model', { repoId, filename, downloadUrl });
+        appendStream(`\n📥 [Download Started] Initiated download of ${filename} from ${repoId}\n`);
+        document.getElementById('download-progress-box').style.display = 'block';
+        document.getElementById('dl-title').textContent = `Downloading ${filename}`;
+      } catch (err) {
+        alert('Failed to start download: ' + err);
+      }
+    }
+
+    async function cancelActiveDownload() {
+      try {
+        await invoke('cancel_download');
+        appendStream('\n⚠️  [Download Cancelled] Cancel requested for active download.\n');
+      } catch (err) {
+        console.error('Failed to cancel download:', err);
+      }
+    }
+
+    async function importLocalGguf() {
+      const path = document.getElementById('import-path').value.trim();
+      const name = document.getElementById('import-name').value.trim() || null;
+      const toOllama = document.getElementById('import-to-ollama').checked;
+
+      if (!path) {
+        alert('Please specify the path to the .gguf file');
+        return;
+      }
+
+      try {
+        const meta = await invoke('import_local_gguf', { path, name, toOllama });
+        appendStream(`\n📥 [Model Imported] ${meta.name} (${meta.id}) registered successfully!\n`);
+        document.getElementById('import-path').value = '';
+        document.getElementById('import-name').value = '';
+        refreshInstalledModels();
+      } catch (err) {
+        alert('Import failed: ' + err);
+      }
+    }
+
+    async function pullOllamaModel() {
+      const modelName = document.getElementById('ollama-pull-input').value.trim();
+      if (!modelName) return;
+
+      try {
+        await invoke('pull_ollama_model', { modelName });
+        appendStream(`\n🦙 [Ollama Pull Started] Initiated pull of ${modelName}\n`);
+        document.getElementById('download-progress-box').style.display = 'block';
+        document.getElementById('dl-title').textContent = `Ollama: Pulling ${modelName}`;
+        document.getElementById('ollama-pull-input').value = '';
+      } catch (err) {
+        alert('Failed to pull from Ollama: ' + err);
+      }
+    }
+
     // Register Tauri Event Listeners
     if (window.__TAURI__) {
       listen('dex-event', (event) => {
@@ -702,6 +986,33 @@
           document.getElementById('subagents-list').prepend(subagentDiv);
         } else if (ev.type === 'SubagentCompleted') {
           appendStream(`\n🏁 [Subagent Completed] Role: ${ev.data.role}\n`);
+        } else if (ev.type === 'ModelDownloadProgress') {
+          const d = ev.data;
+          const box = document.getElementById('download-progress-box');
+          box.style.display = 'block';
+          document.getElementById('dl-title').textContent = `Downloading ${d.file_name}`;
+          document.getElementById('dl-speed').textContent = `${d.speed_mbps.toFixed(1)} MB/s`;
+          const pct = d.total_bytes > 0 ? (d.downloaded_bytes / d.total_bytes * 100) : 0;
+          document.getElementById('dl-bar').style.width = `${pct}%`;
+          const downloadedMb = (d.downloaded_bytes / (1024 * 1024)).toFixed(1);
+          const totalMb = (d.total_bytes / (1024 * 1024)).toFixed(1);
+          document.getElementById('dl-stats').textContent = `${downloadedMb} MB / ${totalMb} MB (${pct.toFixed(1)}%)`;
+        } else if (ev.type === 'ModelDownloadCompleted') {
+          const d = ev.data;
+          appendStream(`\n✅ [Download Finished] Successfully downloaded ${d.file_name}!\n`);
+          document.getElementById('dl-stats').textContent = `Complete! Saved to disk.`;
+          document.getElementById('dl-bar').style.width = '100%';
+          refreshInstalledModels();
+          setTimeout(() => {
+            document.getElementById('download-progress-box').style.display = 'none';
+          }, 3000);
+        } else if (ev.type === 'ModelDownloadFailed') {
+          const d = ev.data;
+          appendStream(`\n❌ [Download Error] ${d.file_name}: ${d.error}\n`);
+          document.getElementById('dl-stats').textContent = `Failed: ${d.error}`;
+          setTimeout(() => {
+            document.getElementById('download-progress-box').style.display = 'none';
+          }, 4000);
         }
       });
 

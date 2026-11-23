@@ -18,7 +18,9 @@ harness-tools = { workspace = true }
 harness-mcp = { workspace = true }
 harness-computer = { workspace = true }
 harness-ui = { workspace = true }
+harness-models = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

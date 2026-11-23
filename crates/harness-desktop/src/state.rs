@@ -4,6 +4,7 @@ use harness_core::{AgentEvent, CoreError, EventBus, ExecutionMode, Hook, HookAct
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{oneshot, Mutex, RwLock};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolApprovalPayload {
@@ -17,6 +18,7 @@ pub struct DesktopState {
     pub cancel_sender: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     pub approval_sender: Arc<Mutex<Option<oneshot::Sender<bool>>>>,
     pub active_goal: Arc<RwLock<Option<String>>>,
+    pub download_cancel: Arc<Mutex<Option<CancellationToken>>>,
 }
 
 impl DesktopState {
@@ -27,6 +29,7 @@ impl DesktopState {
             cancel_sender: Arc::new(Mutex::new(None)),
             approval_sender: Arc::new(Mutex::new(None)),
             active_goal: Arc::new(RwLock::new(None)),
+            download_cancel: Arc::new(Mutex::new(None)),
         }
     }
 }

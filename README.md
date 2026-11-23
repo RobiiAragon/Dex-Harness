@@ -37,9 +37,41 @@ crates/
 ├── harness-tools/       # Native tools (filesystem, surgical edit, search, git worktrees, PTY shell)
 ├── harness-computer/    # Browser automation (CDP) and desktop perception/mouse/keyboard control
 ├── harness-mcp/         # Bidirectional Model Context Protocol client & stdio server
+├── harness-models/      # Local Model Hub: Hugging Face GGUF client, resumable downloader, Ollama bridge, local importer
 ├── harness-ui/          # Ratatui TUI dashboard & Axum WebSocket web monitor
 ├── harness-cli/         # Unified executable (binary name: `dex`)
 └── harness-desktop/     # Native macOS Desktop Application (`Dex.app`) via Tauri v2
+```
+
+---
+
+## 🧠 Local Model Hub (`harness-models`)
+
+Dex-Harness features a native, LM Studio / Ollama-grade **Model Hub** directly in Rust:
+
+- **Hugging Face Hub Search:** Search millions of open-source GGUF models (`https://huggingface.co/api/models`) with automatic extraction of available quantizations (`Q4_K_M`, `Q5_K_M`, `Q8_0`, `BF16`, etc.).
+- **Hardware RAM Compatibility Calculation:** Evaluates model footprint against detected host RAM and Apple Silicon unified memory, grading each quantization with `🟢 Fits`, `🟡 Tight`, or `🔴 Too Large`.
+- **Resumable Async Streaming Downloader:** Supports `HTTP Range` headers to resume interrupted downloads, writes to `.part` files, and renames atomically upon completion.
+- **Ollama Bridge & Local Importer:** Pull models from Ollama library with streaming progress, import arbitrary `.gguf` files into `~/.dex/models/`, and automatically register imported models into local Ollama via `FROM /path/to/model.gguf`.
+
+```bash
+# Search GGUF models on Hugging Face:
+dex models search "qwen2.5-coder"
+
+# Pull a specific quantization from Hugging Face:
+dex models pull Qwen/Qwen2.5-Coder-14B-Instruct-GGUF --quant Q4_K_M
+
+# Pull directly from Ollama library:
+dex models pull ollama:qwen2.5:7b
+
+# Import any local .gguf file (and optionally register into Ollama):
+dex models import ./my-model.gguf --name "custom-qwen" --to-ollama
+
+# List all local Dex + Ollama models:
+dex models list
+
+# Remove a model from registry and disk:
+dex models rm local:custom-qwen
 ```
 
 ---

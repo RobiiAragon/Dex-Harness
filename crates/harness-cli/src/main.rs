@@ -24,6 +24,8 @@ use harness_tools::{
 };
 use harness_ui::{run_tui, start_web_dashboard};
 
+mod models_cli;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ExecutionMode {
     /// Fully autonomous execution without interactive confirmation prompts
@@ -97,6 +99,49 @@ enum Commands {
     },
     /// Run background daemon executing scheduled tasks
     Daemon,
+    /// Local Model Hub: Search, pull, import, and manage local models (Hugging Face GGUF / Ollama)
+    Models {
+        #[command(subcommand)]
+        action: ModelCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ModelCommands {
+    /// Search GGUF models on Hugging Face Hub
+    Search {
+        /// Search query (e.g. qwen, llama, deepseek)
+        query: String,
+        /// Maximum number of repositories to return
+        #[arg(short, long, default_value_t = 10)]
+        limit: usize,
+    },
+    /// Download a model from Hugging Face or Ollama
+    Pull {
+        /// Model identifier (e.g. Qwen/Qwen2.5-Coder-14B-Instruct-GGUF or ollama:qwen2.5:7b)
+        source: String,
+        /// Preferred quantization (e.g. Q4_K_M, Q5_K_M, Q8_0)
+        #[arg(short, long, default_value = "Q4_K_M")]
+        quant: String,
+    },
+    /// Import a local .gguf file into Dex registry (and optionally register into Ollama)
+    Import {
+        /// Path to the .gguf file on disk
+        path: String,
+        /// Alias name for the model
+        #[arg(short, long)]
+        name: Option<String>,
+        /// Also register the imported model in the local Ollama instance
+        #[arg(long, default_value_t = false)]
+        to_ollama: bool,
+    },
+    /// List all local models in Dex registry and Ollama
+    List,
+    /// Remove a model from the Dex registry and disk
+    Rm {
+        /// Model identifier to remove (e.g. local:my-model, hf:..., or ollama:...)
+        model_id: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -348,6 +393,26 @@ async fn main() -> Result<()> {
                     } else {
                         println!("❌ Schedule task '{id}' not found.");
                     }
+                }
+            }
+            return Ok(());
+        }
+        Some(Commands::Models { action }) => {
+            match action {
+                ModelCommands::Search { query, limit } => {
+                    models_cli::search_models(&query, limit).await?;
+                }
+                ModelCommands::Pull { source, quant } => {
+                    models_cli::pull_model(&source, &quant).await?;
+                }
+                ModelCommands::Import { path, name, to_ollama } => {
+                    models_cli::import_model(&path, name.as_deref(), to_ollama).await?;
+                }
+                ModelCommands::List => {
+                    models_cli::list_models().await?;
+                }
+                ModelCommands::Rm { model_id } => {
+                    models_cli::remove_model(&model_id).await?;
                 }
             }
             return Ok(());
