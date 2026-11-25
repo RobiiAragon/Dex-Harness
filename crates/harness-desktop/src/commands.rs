@@ -2095,6 +2095,25 @@ pub async fn stop_and_transcribe(
     }
 }
 
+/// Generates instrumental music or a sound effect locally (MusicGen sidecar, sized to this Mac).
+#[tauri::command]
+pub async fn generate_audio_clip(
+    state: State<'_, DesktopState>,
+    kind: String,
+    prompt: String,
+    duration_secs: Option<f64>,
+) -> Result<harness_audio::GeneratedAudio, String> {
+    let sup = Some(state.extension_supervisor.clone());
+    let result = if kind.eq_ignore_ascii_case("sfx") {
+        harness_audio::generate_sfx(&prompt, duration_secs.unwrap_or(4.0), None, sup, Some(&state.event_bus))
+            .await
+    } else {
+        harness_audio::generate_music(&prompt, None, duration_secs.unwrap_or(15.0), None, sup, Some(&state.event_bus))
+            .await
+    };
+    result.map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn speak_text(

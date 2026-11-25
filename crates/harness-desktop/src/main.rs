@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use harness_core::EventBus;
 use state::DesktopState;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::ShortcutState;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -32,6 +32,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let desktop_state = DesktopState::new(event_bus.clone());
     let mode_for_tray = desktop_state.mode.clone();
     let supervisor_for_reaper = desktop_state.extension_supervisor.clone();
+    let supervisor_for_signals = desktop_state.extension_supervisor.clone();
     let reaper_cancel = desktop_state.reaper_cancel.clone();
     let workspace_for_init = desktop_state.active_workspace_dir.clone();
 
@@ -100,6 +101,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             commands::start_voice_recording,
             commands::stop_and_transcribe,
             commands::speak_text,
+            commands::generate_audio_clip,
             commands::list_audio_media,
             commands::get_audio_studio_state,
             commands::save_audio_settings_cmd,
@@ -208,10 +210,40 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
             });
 
+            // `kill` / logout send SIGTERM, which skips Tauri's exit events: stop the model
+            // sidecars first so none is orphaned holding memory.
+            let handle_for_signals = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                use tokio::signal::unix::{signal, SignalKind};
+                let (Ok(mut term), Ok(mut int)) =
+                    (signal(SignalKind::terminate()), signal(SignalKind::interrupt()))
+                else {
+                    return;
+                };
+                tokio::select! {
+                    _ = term.recv() => {}
+                    _ = int.recv() => {}
+                }
+                tracing::info!("Termination signal received; stopping Dex sidecars");
+                let _ = tokio::time::timeout(Duration::from_secs(10), supervisor_for_signals.stop_all()).await;
+                handle_for_signals.exit(0);
+            });
+
             tracing::info!("Dex Desktop setup successfully completed");
             Ok(())
         });
 
-    builder.run(tauri::generate_context!())?;
+    let app = builder.build(tauri::generate_context!())?;
+    app.run(|app_handle, event| {
+        if let tauri::RunEvent::Exit = event {
+            // Quit must not leave local models running (they hold GBs of unified memory).
+            let state = app_handle.state::<state::DesktopState>();
+            let supervisor = state.extension_supervisor.clone();
+            tauri::async_runtime::block_on(async move {
+                let _ = tokio::time::timeout(Duration::from_secs(10), supervisor.stop_all()).await;
+            });
+            tracing::info!("Stopped all Dex sidecars on exit");
+        }
+    });
     Ok(())
 }

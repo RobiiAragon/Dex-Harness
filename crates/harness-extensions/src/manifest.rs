@@ -109,6 +109,9 @@ pub struct ExtensionManifest {
 }
 
 /// Persistent extension registry stored at `~/.dex/extensions/extensions.json`.
+/// Extensions removed from Dex (they never had a working package); dropped from old manifests.
+pub const RETIRED_EXTENSION_IDS: &[&str] = &["soundbox-mcp"];
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ExtensionRegistry {
     pub extensions: Vec<ExtensionManifest>,
@@ -142,6 +145,15 @@ impl ExtensionRegistry {
                 Ok(content) => match serde_json::from_str::<ExtensionRegistry>(&content) {
                     Ok(mut reg) => {
                         reg.manifest_path = path;
+                        let before = reg.extensions.len();
+                        reg.extensions
+                            .retain(|m| !RETIRED_EXTENSION_IDS.contains(&m.id.as_str()));
+                        if reg.extensions.len() != before {
+                            // Persist the cleanup so stale entries stop showing in the UI.
+                            if let Err(e) = reg.save().await {
+                                warn!(error = %e, "Could not save cleaned extensions manifest");
+                            }
+                        }
                         return reg;
                     }
                     Err(e) => {

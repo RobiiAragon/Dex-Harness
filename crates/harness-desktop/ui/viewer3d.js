@@ -229,7 +229,25 @@
           }
         }
 
-        let color = [0.65, 0.68, 0.96, 1.0];
+        // Per-vertex colors (COLOR_0): generated meshes (Shap-E, photogrammetry) carry their
+        // colors here instead of in textures.
+        let colors = null;
+        if (prim.attributes.COLOR_0 !== undefined) {
+          const acc = gltfJson.accessors[prim.attributes.COLOR_0];
+          const colRaw = readGltfAccessor(gltfJson, binChunk, prim.attributes.COLOR_0);
+          const comps = acc && acc.type === 'VEC4' ? 4 : 3;
+          const scale = acc && acc.componentType === 5121 ? 1 / 255 : acc && acc.componentType === 5123 ? 1 / 65535 : 1;
+          if (colRaw && colRaw.length >= vertCount * comps) {
+            colors = new Float32Array(vertCount * 3);
+            for (let i = 0; i < vertCount; i++) {
+              colors[i * 3] = colRaw[i * comps] * scale;
+              colors[i * 3 + 1] = colRaw[i * comps + 1] * scale;
+              colors[i * 3 + 2] = colRaw[i * comps + 2] * scale;
+            }
+          }
+        }
+
+        let color = colors ? [1.0, 1.0, 1.0, 1.0] : [0.65, 0.68, 0.96, 1.0];
         if (prim.material !== undefined && gltfJson.materials && gltfJson.materials[prim.material]) {
           const pbr = gltfJson.materials[prim.material].pbrMetallicRoughness;
           if (pbr && Array.isArray(pbr.baseColorFactor) && pbr.baseColorFactor.length >= 3) {
@@ -252,7 +270,7 @@
           wireIndices[w + 4] = c; wireIndices[w + 5] = a;
         }
 
-        rawPrimitives.push({ positions, normals, indices, wireIndices, color });
+        rawPrimitives.push({ positions, normals, colors, indices, wireIndices, color });
       }
     }
 
@@ -349,16 +367,20 @@
       const meshVS = `#version 300 es
         layout(location = 0) in vec3 aPos;
         layout(location = 1) in vec3 aNorm;
+        layout(location = 2) in vec3 aVertColor;
         uniform mat4 uMVP;
         out vec3 vNorm;
+        out vec3 vVertColor;
         void main() {
           vNorm = normalize(aNorm);
+          vVertColor = aVertColor;
           gl_Position = uMVP * vec4(aPos, 1.0);
         }
       `;
       const meshFS = `#version 300 es
         precision mediump float;
         in vec3 vNorm;
+        in vec3 vVertColor;
         uniform vec4 uBaseColor;
         uniform int uWireframe;
         out vec4 fragColor;
@@ -375,7 +397,8 @@
           float diff2 = max(dot(N, L2), 0.0) * 0.42;
           float rim   = max(dot(N, L3), 0.0) * 0.25;
           float hemi  = 0.24 + 0.14 * (N.y * 0.5 + 0.5);
-          vec3 lit = uBaseColor.rgb * (hemi + diff1 * 0.82) + vec3(0.39, 0.40, 0.95) * diff2 + vec3(0.75, 0.78, 0.85) * rim;
+          vec3 base = uBaseColor.rgb * vVertColor;
+          vec3 lit = base * (hemi + diff1 * 0.82) + vec3(0.39, 0.40, 0.95) * diff2 + vec3(0.75, 0.78, 0.85) * rim;
           fragColor = vec4(clamp(lit, 0.0, 1.0), 1.0);
         }
       `;
@@ -495,6 +518,7 @@
         gl.deleteVertexArray(p.vao);
         gl.deleteBuffer(p.posBuf);
         gl.deleteBuffer(p.normBuf);
+        if (p.colBuf) gl.deleteBuffer(p.colBuf);
         gl.deleteBuffer(p.idxBuf);
         gl.deleteBuffer(p.wireBuf);
       }
@@ -524,6 +548,17 @@
         gl.enableVertexAttribArray(1);
         gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 0, 0);
 
+        let colBuf = null;
+        if (prim.colors) {
+          colBuf = gl.createBuffer();
+          gl.bindBuffer(gl.ARRAY_BUFFER, colBuf);
+          gl.bufferData(gl.ARRAY_BUFFER, prim.colors, gl.STATIC_DRAW);
+          gl.enableVertexAttribArray(2);
+          gl.vertexAttribPointer(2, 3, gl.FLOAT, false, 0, 0);
+        } else {
+          gl.disableVertexAttribArray(2);
+        }
+
         const idxBuf = gl.createBuffer();
         gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
         gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, prim.indices, gl.STATIC_DRAW);
@@ -534,7 +569,7 @@
 
         gl.bindVertexArray(null);
         this.gpuPrimitives.push({
-          vao, posBuf, normBuf, idxBuf, wireBuf,
+          vao, posBuf, normBuf, colBuf, idxBuf, wireBuf, hasColors: !!prim.colors,
           indexCount: prim.indices.length,
           wireCount: prim.wireIndices.length,
           color: prim.color,
@@ -583,6 +618,8 @@
         gl.uniform1i(this.uMeshWire, this.wireframe ? 1 : 0);
         for (const p of this.gpuPrimitives) {
           gl.bindVertexArray(p.vao);
+          // Meshes without COLOR_0 use a constant white vertex color (attribute disabled).
+          if (!p.hasColors) gl.vertexAttrib3f(2, 1.0, 1.0, 1.0);
           gl.uniform4fv(this.uMeshColor, p.color);
           if (this.wireframe) {
             gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, p.wireBuf);

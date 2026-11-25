@@ -333,8 +333,8 @@
                     <div class="field">
                       <label class="field-label" for="media-model-select">Image Model (Apple Silicon MLX / Open Weights)</label>
                       <select id="media-model-select" class="select" onchange="DexApp.onMediaModelChange()">
-                        <option value="flux-schnell-4bit">FLUX.1-schnell (4-bit · Fast, No Token)</option>
-                        <option value="z-image-turbo">Z-Image Turbo (4-bit · Fast, Open)</option>
+                        <option value="z-image-turbo" selected>Z-Image Turbo (4-bit · Best quality, Recommended)</option>
+                        <option value="flux-schnell-4bit">FLUX.1-schnell (4-bit · Fastest, for 8-16 GB Macs)</option>
                         <option value="flux2-klein-4b">FLUX.2 Klein 4B (4-bit · Open)</option>
                         <option value="qwen-image">Qwen-Image (4-bit · Supports Negative Prompt)</option>
                         <option value="flux-dev-4bit">FLUX.1-dev (4-bit · High Detail)</option>
@@ -366,7 +366,7 @@
                       </div>
                       <div class="field">
                         <label class="field-label" for="media-steps-input">Steps</label>
-                        <input id="media-steps-input" class="input mono" type="number" value="4" min="1" max="150" />
+                        <input id="media-steps-input" class="input mono" type="number" value="8" min="1" max="150" />
                       </div>
                       <div class="field">
                         <label class="field-label" for="media-backend-select">Backend</label>
@@ -545,6 +545,38 @@
                         <button id="btn-synthesize-audio" class="btn btn-primary" onclick="DexApp.speakTextFromUi()">
                           <i data-icon="play" data-icon-size="13"></i>
                           <span>Synthesize Audio</span>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Music & SFX (local MusicGen, model sized to this Mac) -->
+                  <div class="card">
+                    <div class="card-header">
+                      <span class="card-title"><i data-icon="headphones" data-icon-size="14"></i> Music &amp; Sound Effects</span>
+                      <span class="badge">MusicGen · Local</span>
+                    </div>
+                    <div class="card-body">
+                      <div class="field">
+                        <label class="field-label" for="music-kind-select">Type</label>
+                        <select id="music-kind-select" class="select" onchange="DexApp.onMusicKindChange()">
+                          <option value="music">Music (instrumental)</option>
+                          <option value="sfx">Sound effect</option>
+                        </select>
+                      </div>
+                      <div class="field">
+                        <label class="field-label" for="music-prompt-input">Description</label>
+                        <textarea id="music-prompt-input" class="textarea" rows="2" placeholder="e.g. upbeat synthwave with punchy drums and retro bass"></textarea>
+                      </div>
+                      <div class="field">
+                        <label class="field-label" for="music-duration-input">Duration (seconds)</label>
+                        <input id="music-duration-input" class="input mono" type="number" value="15" min="2" max="120" />
+                      </div>
+                      <div class="item-card-row">
+                        <span id="music-status-note" class="card-meta mono" style="flex: 1;"></span>
+                        <button id="btn-generate-music" class="btn btn-primary" onclick="DexApp.generateMusicFromUi()">
+                          <i data-icon="sparkles" data-icon-size="13"></i>
+                          <span>Generate</span>
                         </button>
                       </div>
                     </div>
@@ -736,7 +768,7 @@
                 <!-- Image-to-3D Generator -->
                 <div class="card">
                   <div class="card-header">
-                    <span class="card-title"><i data-icon="cube" data-icon-size="14"></i> Image to 3D (.glb)</span>
+                    <span class="card-title"><i data-icon="cube" data-icon-size="14"></i> Text or Image to 3D (.glb)</span>
                   </div>
                   <div class="list-stack" style="gap: 10px;">
                     <div id="dropzone-3d-image" class="drop-zone" data-drop-target="3d-image" onclick="DexApp.browse3dSourceImage()">
@@ -763,7 +795,7 @@
                     </div>
                     <div class="field">
                       <label class="field-label" for="gen3d-prompt">Optional Prompt</label>
-                      <input id="gen3d-prompt" class="input" type="text" placeholder="Stylized sci-fi crate, game-ready PBR" />
+                      <input id="gen3d-prompt" class="input" type="text" placeholder="Describe the object (works without an image), e.g. a red wooden chair" />
                     </div>
                     <div class="row-wrap">
                       <select id="gen3d-backend" class="select" style="flex: 1; min-width: 140px;">

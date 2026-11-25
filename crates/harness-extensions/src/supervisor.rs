@@ -105,6 +105,75 @@ fn model_memory_fraction() -> f64 {
         .unwrap_or(MODEL_MEMORY_FRACTION)
 }
 
+/// `~/.dex/run/<id>.pid`: lets a later Dex process reap a sidecar orphaned by a crash or a
+/// forced quit (child processes outlive their parent on macOS, holding GBs of model memory).
+fn pidfile_path(id: &str) -> PathBuf {
+    let safe: String = id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    harness_core::home_dex_dir().join("run").join(format!("{safe}.pid"))
+}
+
+async fn record_pid(id: &str, pid: Option<u32>) {
+    let Some(pid) = pid else { return };
+    let path = pidfile_path(id);
+    if let Some(parent) = path.parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+    if let Err(e) = tokio::fs::write(&path, pid.to_string()).await {
+        debug!(id, error = %e, "Could not record sidecar pid");
+    }
+}
+
+async fn clear_pid(id: &str) {
+    let _ = tokio::fs::remove_file(pidfile_path(id)).await;
+}
+
+/// Kills a previous run's sidecar for `id` if it was orphaned (parent is launchd) and is still
+/// running the same `command`. Never touches a process another live Dex instance owns.
+async fn reap_orphaned_sidecar(id: &str, command: &str) {
+    let path = pidfile_path(id);
+    let Ok(raw) = tokio::fs::read_to_string(&path).await else { return };
+    let Ok(pid) = raw.trim().parse::<u32>() else {
+        clear_pid(id).await;
+        return;
+    };
+    let probe = tokio::time::timeout(
+        Duration::from_secs(3),
+        Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "ppid=,command="])
+            .output(),
+    )
+    .await;
+    let Ok(Ok(out)) = probe else { return };
+    let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let (ppid, cmdline) = line.split_once(char::is_whitespace).unwrap_or(("", ""));
+    let orphaned = ppid.trim() == "1";
+    if orphaned && !command.is_empty() && cmdline.contains(command) {
+        info!(id, pid, "Stopping sidecar left running by a previous Dex session");
+        for signal in ["-TERM", "-KILL"] {
+            let _ = tokio::time::timeout(
+                Duration::from_secs(3),
+                Command::new("kill").args([signal, &pid.to_string()]).status(),
+            )
+            .await;
+            tokio::time::sleep(Duration::from_millis(800)).await;
+            let alive = Command::new("ps")
+                .args(["-p", &pid.to_string()])
+                .stdout(Stdio::null())
+                .status()
+                .await
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !alive {
+                break;
+            }
+        }
+    }
+    clear_pid(id).await;
+}
+
 /// Supervises external MCP servers and local sidecar processes,
 /// providing on-demand startup, health probing, and idle auto-unload to reclaim RAM.
 pub struct ExtensionSupervisor {
@@ -255,6 +324,7 @@ impl ExtensionSupervisor {
                 env,
                 ..
             } => {
+                reap_orphaned_sidecar(&manifest.id, command).await;
                 self.make_room_for(&manifest).await;
                 let mut cmd = Command::new(command);
                 harness_core::apply_enriched_path(&mut cmd);
@@ -273,6 +343,7 @@ impl ExtensionSupervisor {
                 })?;
 
                 let pid = child.id();
+                record_pid(&manifest.id, pid).await;
 
                 // Keep draining stderr for the process lifetime (a full pipe would block the
                 // sidecar) and remember the tail so startup failures are actionable.
@@ -448,6 +519,27 @@ impl ExtensionSupervisor {
         }
     }
 
+    /// Stops every process this supervisor started (call on app quit so no model keeps
+    /// holding memory after Dex exits).
+    pub async fn stop_all(&self) {
+        let ids: Vec<String> = {
+            let rt = self.runtime.lock().await;
+            rt.iter()
+                .filter(|(_, e)| e.handle.is_some())
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        for id in ids {
+            let mut rt = self.runtime.lock().await;
+            if let Some(entry) = rt.get_mut(&id) {
+                entry.terminate().await;
+                entry.status = ExtensionStatus::Stopped;
+            }
+            drop(rt);
+            clear_pid(&id).await;
+        }
+    }
+
     /// Cleanly terminates an extension and marks it `Stopped`.
     pub async fn stop_extension(&self, id: &str) -> Result<ExtensionRuntimeInfo, ExtensionError> {
         self.unload_extension(id, ExtensionStatus::Stopped).await
@@ -490,6 +582,7 @@ impl ExtensionSupervisor {
                 entry.terminate().await;
             }
         }
+        reap_orphaned_sidecar(&manifest.id, &command).await;
         self.make_room_for(&manifest).await;
 
         info!(
@@ -515,6 +608,7 @@ impl ExtensionSupervisor {
         })?;
 
         let pid = child.id();
+        record_pid(&manifest.id, pid).await;
         let log_tail: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
         // Drain stdout & stderr concurrently without blocking the child process pipes
@@ -736,6 +830,9 @@ impl ExtensionSupervisor {
         let last_used = {
             let mut rt = self.runtime.lock().await;
             if let Some(entry) = rt.get_mut(id) {
+                if entry.pid.is_some() {
+                    clear_pid(id).await;
+                }
                 entry.terminate().await;
                 entry.status = target_status;
                 entry.last_error = None;

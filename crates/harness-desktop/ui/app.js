@@ -1548,7 +1548,19 @@
     scrollFeedToBottom();
   }
 
+  // Re-reads which model Dex's runtime has mounted (it may have auto-loaded one).
+  async function refreshActiveModelPill() {
+    try {
+      state.activeLoadedModel = (await invoke('get_active_loaded_model')) || null;
+      renderActiveLoadedBanner();
+      syncModelLabels();
+    } catch (err) {
+      console.error('Active model refresh failed:', err);
+    }
+  }
+
   function finalizeActiveTurn(finalAnswer) {
+    refreshActiveModelPill();
     const turn = ensureActiveTurn();
     turn.done = true;
     turn.activityEl.classList.remove('working');
@@ -1722,6 +1734,12 @@
     autoResizeComposer();
     setRunningState(true);
 
+    // Nothing mounted yet: Dex picks and loads the best local model for this Mac itself.
+    const autoLoading = provider === 'dex-local' && !state.activeLoadedModel;
+    if (autoLoading) {
+      state.modelLoadingText = 'Loading best local model...';
+      syncModelLabels();
+    }
     try {
       await invoke('run_goal', {
         goal,
@@ -1732,7 +1750,15 @@
         attachments: attachmentPaths.length > 0 ? attachmentPaths : null,
         history,
       });
+      if (autoLoading) {
+        state.modelLoadingText = null;
+        refreshActiveModelPill();
+      }
     } catch (err) {
+      if (autoLoading) {
+        state.modelLoadingText = null;
+        syncModelLabels();
+      }
       appendSystemNote(`Failed to launch agent: ${err}`, 'error');
       presentActionableError(err, 'view-agent');
       setRunningState(false);
@@ -3975,6 +4001,44 @@
     }
   }
 
+  function onMusicKindChange() {
+    const kind = (el('music-kind-select') && el('music-kind-select').value) || 'music';
+    const dur = el('music-duration-input');
+    const prompt = el('music-prompt-input');
+    if (dur) dur.value = kind === 'sfx' ? '4' : '15';
+    if (prompt) {
+      prompt.placeholder = kind === 'sfx'
+        ? 'e.g. heavy wooden door creaking open'
+        : 'e.g. upbeat synthwave with punchy drums and retro bass';
+    }
+  }
+
+  async function generateMusicFromUi() {
+    const prompt = (el('music-prompt-input') && el('music-prompt-input').value.trim()) || '';
+    if (!prompt) {
+      showGlobalToast({ title: 'Description Required', message: 'Describe the music or sound effect you want.', variant: 'warn' });
+      return;
+    }
+    const kind = (el('music-kind-select') && el('music-kind-select').value) || 'music';
+    const duration = parseFloat((el('music-duration-input') && el('music-duration-input').value) || '') || (kind === 'sfx' ? 4 : 15);
+    const btn = el('btn-generate-music');
+    const note = el('music-status-note');
+    if (btn) btn.disabled = true;
+    if (note) note.textContent = `Generating ${duration}s of ${kind === 'sfx' ? 'sound effect' : 'music'} (first run downloads the model)...`;
+    const started = Date.now();
+    try {
+      const res = await invoke('generate_audio_clip', { kind, prompt, durationSecs: duration });
+      const secs = ((Date.now() - started) / 1000).toFixed(1);
+      if (note) note.textContent = `Saved via ${res.backend} in ${secs}s`;
+      refreshAudioMedia();
+    } catch (err) {
+      if (note) note.textContent = `Error: ${stripInstallMarkers(err)}`;
+      presentActionableError(err, 'view-audio', () => generateMusicFromUi());
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
   async function refreshAudioMedia() {
     const container = el('audio-gallery-list');
     if (!container) return;
@@ -4077,7 +4141,9 @@
     const val = sel.value;
     if (customWrap) customWrap.style.display = val === 'custom' ? 'flex' : 'none';
     if (stepsInput) {
-      if (val === 'flux-schnell-4bit' || val === 'z-image-turbo') {
+      if (val === 'z-image-turbo') {
+        stepsInput.value = '8';
+      } else if (val === 'flux-schnell-4bit') {
         stepsInput.value = '4';
       } else if (val === 'flux2-klein-4b') {
         stepsInput.value = '8';
@@ -4114,10 +4180,10 @@
     const [wStr, hStr] = (el('media-res-select').value || '1024x1024').split('x');
     const width = parseInt(wStr, 10) || 1024;
     const height = parseInt(hStr, 10) || 1024;
-    const steps = parseInt(el('media-steps-input').value, 10) || 4;
+    const steps = parseInt(el('media-steps-input').value, 10) || 8;
     const backend = el('media-backend-select').value || 'auto';
     const workflow = el('media-workflow-select').value || null;
-    const selModel = (el('media-model-select') && el('media-model-select').value) || 'flux-schnell-4bit';
+    const selModel = (el('media-model-select') && el('media-model-select').value) || 'z-image-turbo';
     const customModel = (el('media-custom-model-input') && el('media-custom-model-input').value.trim()) || '';
     const model = selModel === 'custom' ? (customModel || 'flux-schnell-4bit') : selModel;
 
@@ -5447,6 +5513,8 @@
     testMicAndSttFromUi,
     toggleVoiceRecording,
     speakTextFromUi,
+    generateMusicFromUi,
+    onMusicKindChange,
     refreshAudioMedia,
     runOcrFromUi,
     parseDocFromUi,
