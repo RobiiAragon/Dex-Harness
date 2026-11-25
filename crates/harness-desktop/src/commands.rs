@@ -626,6 +626,23 @@ pub async fn run_goal(
         }
     }
 
+    // A model was picked for LM Studio / Ollama without an explicit base URL: use the port the
+    // server is really listening on (LM Studio moves to :1235/:1236 when :1234 is taken).
+    if effective_api_base.is_none() {
+        let wanted_id = match provider_name.to_lowercase().as_str() {
+            "lmstudio" | "lm_studio" | "bionic" => Some("lmstudio"),
+            "ollama" => Some("ollama"),
+            _ => None,
+        };
+        if let Some(id) = wanted_id {
+            effective_api_base = harness_models::detect_local_servers()
+                .await
+                .into_iter()
+                .find(|s| s.id == id && s.reachable)
+                .map(|s| s.base_url);
+        }
+    }
+
     let provider_instance =
         build_provider(&provider_name, &model_name, effective_api_base.as_deref())?;
 

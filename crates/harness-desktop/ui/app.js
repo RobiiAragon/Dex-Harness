@@ -4668,7 +4668,7 @@
         updateContextMetric(d.estimated_tokens || 0);
         appendSystemNote(`Context compacted to ~${d.estimated_tokens} tokens`);
       } else if (ev.type === 'SecurityBlocked') {
-        appendSystemNote(`Security hook halted ${d.tool_name}: ${d.reason}`, 'warn');
+        appendSystemNote(`Blocked ${d.tool_name}: ${d.reason}`, 'warn');
       } else if (ev.type === 'ModelDownloadProgress') {
         const box = el('download-progress-box');
         if (box) {

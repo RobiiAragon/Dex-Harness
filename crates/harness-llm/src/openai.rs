@@ -155,9 +155,13 @@ struct ChatStreamChoice {
 #[derive(Deserialize)]
 struct ChatStreamDelta {
     content: Option<String>,
-    /// Reasoning tokens (LM Studio / vLLM / DeepSeek use `reasoning_content`, others `reasoning`).
-    #[serde(default, alias = "reasoning")]
+    /// Reasoning tokens. LM Studio / DeepSeek use `reasoning_content`, OpenRouter uses
+    /// `reasoning`, and recent vLLM sends both — so they are separate fields (a serde alias
+    /// would reject chunks carrying both and silently drop their content).
+    #[serde(default)]
     reasoning_content: Option<String>,
+    #[serde(default)]
+    reasoning: Option<String>,
     tool_calls: Option<Vec<ChatStreamToolCall>>,
 }
 
@@ -354,7 +358,12 @@ impl LlmProvider for OpenAiProvider {
                                     finish_reason = Some(reason.clone());
                                 }
 
-                                if let Some(ref reasoning) = choice.delta.reasoning_content {
+                                let reasoning_delta = choice
+                                    .delta
+                                    .reasoning_content
+                                    .as_ref()
+                                    .or(choice.delta.reasoning.as_ref());
+                                if let Some(reasoning) = reasoning_delta {
                                     if !reasoning.is_empty() {
                                         received_any_token = true;
                                         if let Some(ref cb) = token_callback {
@@ -477,5 +486,25 @@ impl LlmProvider for OpenAiProvider {
             tool_calls,
             finish_reason: choice.finish_reason,
         })
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stream_chunk_accepts_both_reasoning_fields() {
+        let raw = r#"{"choices":[{"delta":{"content":"hi","reasoning":"a","reasoning_content":"a"},"finish_reason":null}]}"#;
+        let chunk: ChatStreamChunk = serde_json::from_str(raw).expect("chunk should parse");
+        assert_eq!(chunk.choices[0].delta.content.as_deref(), Some("hi"));
+    }
+
+    #[test]
+    fn stream_chunk_accepts_reasoning_only() {
+        let raw = r#"{"choices":[{"delta":{"reasoning":"thinking"},"finish_reason":null}]}"#;
+        let chunk: ChatStreamChunk = serde_json::from_str(raw).expect("chunk should parse");
+        assert_eq!(chunk.choices[0].delta.reasoning.as_deref(), Some("thinking"));
     }
 }
