@@ -61,11 +61,11 @@ pub enum ExecutionMode {
     after_help = "Examples:\n  dex                         start an interactive session (auto-detects LM Studio / Ollama / MLX)\n  dex \"fix the failing test\"  start a session with a first task\n  dex run \"summarize README\"  one-shot, non-interactive\n  dex doctor                  check servers, models and runtimes"
 )]
 struct Cli {
-    /// Model server: auto (default), lmstudio, ollama, mlx, llamacpp, openai
+    /// Model server: auto (default: Dex runs your local MLX/GGUF model itself), mlx, llamacpp, ollama, lmstudio, openai
     #[arg(short, long, env = "DEX_PROVIDER", global = true)]
     provider: Option<String>,
 
-    /// Model id (defaults to the last one you picked with /model, else the first loaded model)
+    /// Model (defaults to the last one you picked with /model, else the best local model for this Mac)
     #[arg(short, long, env = "DEX_MODEL", global = true)]
     model: Option<String>,
 
@@ -1035,7 +1035,7 @@ Example: dex install gen3d");
 
     if let Some(Commands::McpServe) = cli.command {
         // stdout carries the MCP protocol: status lines must go to stderr.
-        let endpoint = match endpoint::resolve(&req, &|m| eprintln!("{m}")).await {
+        let endpoint = match endpoint::resolve(&req, &|m| eprintln!("{m}"), Some(&ext_supervisor)).await {
             Ok(ep) => ep,
             Err(e) => {
                 eprintln!("dex mcp-serve: no chat model available for subagents ({e}); continuing.");
@@ -1045,6 +1045,7 @@ Example: dex install gen3d");
                     base_url: Some(harness_models::LM_STUDIO_DEFAULT_URL.to_string()),
                     label: "LM Studio".to_string(),
                     local: true,
+                    native: None,
                 }
             }
         };
@@ -1055,7 +1056,7 @@ Example: dex install gen3d");
     }
 
     let status = |m: &str| eprintln!("{}", style.dim(m));
-    let endpoint = match endpoint::resolve(&req, &status).await {
+    let endpoint = match endpoint::resolve(&req, &status, Some(&ext_supervisor)).await {
         Ok(ep) => ep,
         Err(e) => {
             eprintln!("{} {e}", style.red("✗"));
@@ -1087,7 +1088,7 @@ Example: dex install gen3d");
                 "{}",
                 style.dim(&format!(
                     "dex · {} ({}) · {}",
-                    parts.endpoint.model,
+                    parts.endpoint.display_model(),
                     parts.endpoint.label,
                     session::mode_label(mode)
                 ))
@@ -1098,7 +1099,7 @@ Example: dex install gen3d");
             }
         }
         Some(Commands::Daemon) => {
-            println!("Dex scheduler daemon started ({}).", parts.endpoint.model);
+            println!("Dex scheduler daemon started ({}).", parts.endpoint.display_model());
             let mut reg = ScheduleRegistry::load_or_default(ScheduleRegistry::DEFAULT_PATH).await;
             let provider = parts.endpoint.build_provider();
             let tools = (parts.make_tools)(provider.clone());

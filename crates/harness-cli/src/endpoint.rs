@@ -1,19 +1,23 @@
 //! Zero-config model endpoint resolution for the `dex` CLI.
 //!
-//! `dex` with no flags should "just work" against whatever local server is running
-//! (LM Studio on :1234/:1235, Ollama, Dex MLX, llama.cpp), like `claude` just works.
+//! `dex` with no flags should "just work": it runs a downloaded local model with Dex's own
+//! MLX / llama.cpp runtime, sized to this machine, without needing any other app.
 //! Explicit flags / env vars / `~/.dex/cli.json` always win over auto-detection.
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
-use harness_core::{find_executable_in_enriched_path, home_dex_dir, LlmProvider};
+use harness_core::{home_dex_dir, LlmProvider};
+use harness_extensions::ExtensionSupervisor;
 use harness_llm::{OllamaProvider, OpenAiProvider};
-use harness_models::{detect_local_servers, is_chat_model_id, pick_chat_endpoint, LocalServerInfo};
+use harness_models::{
+    detect_local_servers, discover_native_chat_models, find_local_model, is_chat_model_id,
+    load_native_chat_model, pick_chat_endpoint, pick_default_chat_model, total_ram_bytes,
+    ActiveLoadedModel, DiscoveredModel, LocalServerInfo, NativeReloadProvider,
+};
 
 /// Persistent CLI preferences (`~/.dex/cli.json`), written by `/model` and `/mode` in the REPL.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -54,6 +58,19 @@ impl CliConfig {
     }
 }
 
+/// Dex's own chat runtime backing an endpoint (the model reloads by itself when unloaded).
+#[derive(Clone)]
+pub struct NativeHandle {
+    pub supervisor: Arc<ExtensionSupervisor>,
+    pub model: ActiveLoadedModel,
+}
+
+impl std::fmt::Debug for NativeHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeHandle").field("model", &self.model.name).finish()
+    }
+}
+
 /// A fully resolved chat endpoint.
 #[derive(Debug, Clone)]
 pub struct Endpoint {
@@ -61,15 +78,25 @@ pub struct Endpoint {
     pub kind: String,
     pub model: String,
     pub base_url: Option<String>,
-    /// Human label, e.g. "LM Studio · 127.0.0.1:1235".
+    /// Human label, e.g. "Dex runtime · Qwen3.5 35B".
     pub label: String,
     /// Whether this points at a local server (no API key needed).
     pub local: bool,
+    /// Set when the model runs in Dex's own runtime (loaded by this process).
+    pub native: Option<NativeHandle>,
 }
 
 impl Endpoint {
+    /// Short model name for display (Dex's runtime addresses models by their full path).
+    pub fn display_model(&self) -> &str {
+        match &self.native {
+            Some(native) => &native.model.name,
+            None => &self.model,
+        }
+    }
+
     pub fn build_provider(&self) -> Arc<dyn LlmProvider> {
-        match self.kind.as_str() {
+        let base: Arc<dyn LlmProvider> = match self.kind.as_str() {
             "ollama" => {
                 let mut p = OllamaProvider::new(&self.model);
                 if let Some(ref base) = self.base_url {
@@ -88,6 +115,14 @@ impl Endpoint {
                 }
                 Arc::new(p)
             }
+        };
+        match &self.native {
+            Some(native) => Arc::new(NativeReloadProvider::new(
+                base,
+                native.supervisor.clone(),
+                native.model.sidecar_id.clone(),
+            )),
+            None => base,
         }
     }
 }
@@ -116,29 +151,8 @@ fn from_server(srv: &LocalServerInfo, model: String) -> Endpoint {
         base_url: Some(srv.base_url.clone()),
         label: format!("{} · {}", srv.name, host_of(&srv.base_url)),
         local: true,
+        native: None,
     }
-}
-
-/// Tries to start the LM Studio headless server if the `lms` CLI is installed.
-async fn try_start_lm_studio(status: &dyn Fn(&str)) -> bool {
-    let lms = find_executable_in_enriched_path("lms")
-        .or_else(|| dirs_lms().filter(|p| p.exists()));
-    let Some(lms) = lms else { return false };
-    status("Starting LM Studio server (lms server start)…");
-    let mut cmd = tokio::process::Command::new(lms);
-    cmd.args(["server", "start"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true);
-    matches!(
-        tokio::time::timeout(Duration::from_secs(30), cmd.status()).await,
-        Ok(Ok(s)) if s.success()
-    )
-}
-
-fn dirs_lms() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".lmstudio/bin/lms"))
 }
 
 fn is_local_url(url: &str) -> bool {
@@ -146,9 +160,51 @@ fn is_local_url(url: &str) -> bool {
     host.starts_with("127.0.0.1") || host.starts_with("localhost") || host.starts_with("[::1]")
 }
 
+/// Model id to send to Dex's runtime: mlx_lm serves the model by its path, llama-server by file.
+fn native_request_model(active: &ActiveLoadedModel) -> String {
+    if active.runtime == "mlx" {
+        active.path.clone()
+    } else {
+        std::path::Path::new(&active.path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(&active.name)
+            .to_string()
+    }
+}
+
+/// Picks the local model to run in Dex's runtime: the preferred one if it exists on disk,
+/// otherwise the best fit for this machine's RAM.
+pub async fn choose_native_model(
+    preferred: Option<&str>,
+    status: &dyn Fn(&str),
+) -> Option<DiscoveredModel> {
+    let models = discover_native_chat_models().await;
+    if let Some(pref) = preferred {
+        if let Some(m) = find_local_model(&models, pref) {
+            return Some(m.clone());
+        }
+    }
+    let ram = total_ram_bytes().await;
+    let picked = pick_default_chat_model(&models, ram).cloned();
+    if let (Some(pref), Some(m)) = (preferred, picked.as_ref()) {
+        status(&format!("Model '{pref}' is not on this Mac; using {} instead.", m.name));
+    }
+    picked
+}
+
 /// Resolves the endpoint to chat with. `status` receives short progress lines (write them to
 /// stderr so `dex mcp-serve` keeps stdout clean).
-pub async fn resolve(req: &EndpointRequest, status: &dyn Fn(&str)) -> Result<Endpoint> {
+///
+/// Local-first and self-contained: Dex runs your downloaded MLX/GGUF models with its own
+/// runtime. Other apps' servers (LM Studio, Ollama) are only used when you pick them with
+/// `--provider`, or as a last resort when they are already running — Dex never launches them.
+/// With `supervisor = None` (e.g. `dex doctor`) the chosen model is reported but not loaded.
+pub async fn resolve(
+    req: &EndpointRequest,
+    status: &dyn Fn(&str),
+    supervisor: Option<&Arc<ExtensionSupervisor>>,
+) -> Result<Endpoint> {
     let provider = req
         .provider
         .as_deref()
@@ -168,6 +224,7 @@ pub async fn resolve(req: &EndpointRequest, status: &dyn Fn(&str)) -> Result<End
             label: host_of(&base),
             local: is_local_url(&base),
             base_url: Some(base),
+            native: None,
         });
     }
 
@@ -181,43 +238,68 @@ pub async fn resolve(req: &EndpointRequest, status: &dyn Fn(&str)) -> Result<End
             base_url: None,
             label: "OpenAI API".to_string(),
             local: false,
+            native: None,
         });
     }
 
-    let wanted: &[&str] = match provider.as_str() {
-        "auto" => &[],
-        "ollama" => &["ollama"],
-        "lmstudio" | "lm_studio" | "lm-studio" => &["lmstudio"],
-        "mlx" | "mlx-lm" | "dex-local" => &["mlx-lm"],
-        "llamacpp" | "llama.cpp" | "llama-cpp" => &["llamacpp"],
+    let (native_allowed, wanted): (bool, &[&str]) = match provider.as_str() {
+        "auto" | "dex" | "dex-local" | "native" | "local" => (true, &[]),
+        "mlx" | "mlx-lm" => (true, &["mlx-lm"]),
+        "llamacpp" | "llama.cpp" | "llama-cpp" => (true, &["llamacpp"]),
+        "ollama" => (false, &["ollama"]),
+        "lmstudio" | "lm_studio" | "lm-studio" => (false, &["lmstudio"]),
         other => bail!(
-            "Unknown provider '{other}'. Use one of: auto, lmstudio, ollama, mlx, llamacpp, openai."
+            "Unknown provider '{other}'. Use one of: auto, mlx, llamacpp, ollama, lmstudio, openai."
         ),
     };
 
-    let mut servers = detect_local_servers().await;
-    let filter = |all: Vec<LocalServerInfo>| -> Vec<LocalServerInfo> {
-        if wanted.is_empty() {
-            all
-        } else {
-            all.into_iter().filter(|s| wanted.contains(&s.id.as_str())).collect()
-        }
-    };
-
-    if !servers.iter().any(|s| s.reachable)
-        && (wanted.is_empty() || wanted.contains(&"lmstudio"))
-        && try_start_lm_studio(status).await
-    {
-        for _ in 0..10 {
-            servers = detect_local_servers().await;
-            if servers.iter().any(|s| s.reachable) {
-                break;
+    let mut native_error: Option<String> = None;
+    if native_allowed {
+        if let Some(chosen) = choose_native_model(model.as_deref(), status).await {
+            let Some(sup) = supervisor else {
+                return Ok(Endpoint {
+                    kind: "openai".to_string(),
+                    model: chosen.path.clone().unwrap_or_default(),
+                    base_url: None,
+                    label: format!("Dex runtime · {} (loads on first use)", chosen.name),
+                    local: true,
+                    native: None,
+                });
+            };
+            status(&format!(
+                "Loading {} ({:.1} GB) with Dex's runtime…",
+                chosen.name,
+                chosen.size_bytes as f64 / 1e9
+            ));
+            match load_native_chat_model(sup, &chosen, None).await {
+                Ok(active) => {
+                    return Ok(Endpoint {
+                        kind: "openai".to_string(),
+                        model: native_request_model(&active),
+                        base_url: Some(active.base_url.clone()),
+                        label: "Dex runtime".to_string(),
+                        local: true,
+                        native: Some(NativeHandle {
+                            supervisor: sup.clone(),
+                            model: active,
+                        }),
+                    });
+                }
+                Err(e) => {
+                    status(&format!("Could not load {}: {e}", chosen.name));
+                    native_error = Some(e.to_string());
+                }
             }
-            tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
 
-    let candidates = filter(servers);
+    // Servers that are already running (never launched by Dex).
+    let servers = detect_local_servers().await;
+    let candidates: Vec<LocalServerInfo> = if wanted.is_empty() {
+        servers
+    } else {
+        servers.into_iter().filter(|s| wanted.contains(&s.id.as_str())).collect()
+    };
     if let Some((srv, chosen)) = pick_chat_endpoint(&candidates, model.as_deref()) {
         if let Some(ref pref) = model {
             if pref != &chosen {
@@ -232,15 +314,17 @@ pub async fn resolve(req: &EndpointRequest, status: &dyn Fn(&str)) -> Result<End
         return Ok(from_server(srv, model));
     }
 
-    let reachable: Vec<&LocalServerInfo> = candidates.iter().filter(|s| s.reachable).collect();
-    if let Some(srv) = reachable.first() {
+    if let Some(err) = native_error {
+        bail!("Dex could not start your local model: {err}\nRun `dex doctor` for a full diagnosis.");
+    }
+    if !native_allowed {
         bail!(
-            "{} is running but serves no chat model. Load one (e.g. `lms load <model>` or `ollama pull qwen3:8b`) and retry.",
-            srv.name
+            "{} is not running. Start it yourself, or drop `--provider` and Dex will run a local model with its own runtime.",
+            if wanted.contains(&"ollama") { "Ollama" } else { "LM Studio" }
         );
     }
     bail!(
-        "No local model server found.\n  • LM Studio: open it, or run `lms server start`\n  • Ollama:    `ollama serve`\n  • Or point Dex at any OpenAI-compatible server: `dex --api-base http://127.0.0.1:8080/v1 --model <id>`\nRun `dex doctor` for a full diagnosis."
+        "No local chat model found on this Mac.\n  • Download one: `dex models pull mlx-community/Qwen3-8B-4bit`\n  • Or add a folder with models: `dex models dirs add <path>`\n  • Or point Dex at any OpenAI-compatible server: `dex --api-base http://127.0.0.1:8080/v1 --model <id>`\nRun `dex doctor` for a full diagnosis."
     )
 }
 
@@ -265,14 +349,14 @@ mod tests {
             api_base: Some("http://127.0.0.1:9/v1".into()),
             ..Default::default()
         };
-        assert!(resolve(&req, &|_| {}).await.is_err());
+        assert!(resolve(&req, &|_| {}, None).await.is_err());
 
         let req = EndpointRequest {
             api_base: Some("http://127.0.0.1:9/v1".into()),
             model: Some("m".into()),
             ..Default::default()
         };
-        let ep = resolve(&req, &|_| {}).await.expect("endpoint");
+        let ep = resolve(&req, &|_| {}, None).await.expect("endpoint");
         assert_eq!(ep.kind, "openai");
         assert!(ep.local);
         assert_eq!(ep.label, "127.0.0.1:9");
@@ -284,7 +368,7 @@ mod tests {
             provider: Some("nope".into()),
             ..Default::default()
         };
-        let err = resolve(&req, &|_| {}).await.expect_err("should fail");
+        let err = resolve(&req, &|_| {}, None).await.expect_err("should fail");
         assert!(err.to_string().contains("Unknown provider"));
     }
 }

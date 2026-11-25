@@ -20,7 +20,7 @@ pub use agent::{Agent, AgentStep, ReActAgent, StepObserver};
 pub use audiogen::{
     audiogen_default_base_url, audiogen_launch_args, audiogen_server_script_path,
     detect_audiogen_python, ensure_audiogen_server_script, managed_venv_python,
-    AUDIOGEN_PIP_PACKAGES, DEFAULT_MUSICGEN_MODEL, DEX_AUDIOGEN_PORT, DEX_AUDIOGEN_SIDECAR_ID,
+    AUDIOGEN_PIP_PACKAGES, musicgen_model_for_ram, DEFAULT_MUSICGEN_MODEL, DEX_AUDIOGEN_PORT, DEX_AUDIOGEN_SIDECAR_ID,
 };
 pub use compaction::{ContextCompactor, ToolOutputCompactor};
 pub use cookbook::{parse_macos_vm_stat, HardwareProfile, MemorySnapshot, ModelRecommendation};

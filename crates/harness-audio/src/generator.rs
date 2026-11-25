@@ -53,8 +53,10 @@ fn backend_not_installed(kind: &str, tool: &str, base_url: &str, detail: &str) -
 }
 
 /// Builds the `LocalSidecar` manifest for Dex's managed MusicGen music/SFX server.
-pub fn audiogen_sidecar_manifest(python: &Path, script: &Path) -> ExtensionManifest {
+/// The MusicGen size is picked from `total_ram_gb` (see [`harness_core::musicgen_model_for_ram`]).
+pub fn audiogen_sidecar_manifest(python: &Path, script: &Path, total_ram_gb: f64) -> ExtensionManifest {
     let port = harness_core::DEX_AUDIOGEN_PORT;
+    let (musicgen_model, ram_mb) = harness_core::musicgen_model_for_ram(total_ram_gb);
     ExtensionManifest {
         id: harness_core::DEX_AUDIOGEN_SIDECAR_ID.to_string(),
         name: "Dex Music & SFX Gen (MusicGen)".to_string(),
@@ -68,9 +70,10 @@ pub fn audiogen_sidecar_manifest(python: &Path, script: &Path) -> ExtensionManif
             env: HashMap::from([
                 ("PYTHONUNBUFFERED".to_string(), "1".to_string()),
                 ("PATH".to_string(), harness_core::enriched_path_env()),
+                ("DEX_MUSICGEN_MODEL".to_string(), musicgen_model),
             ]),
         },
-        estimated_ram_mb: AUDIOGEN_RAM_MB,
+        estimated_ram_mb: ram_mb.max(AUDIOGEN_RAM_MB / 2),
         idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
         install_hint: "Install the `audiogen` runtime (torch + transformers MusicGen) into ~/.dex/runtimes/mlx-venv.".to_string(),
         enabled: true,
@@ -111,7 +114,11 @@ async fn ensure_audio_sidecar(
             source: e,
         })?;
 
-    sup.add_custom_extension(audiogen_sidecar_manifest(&python, &script))
+    let total_ram_gb = tokio::task::spawn_blocking(harness_core::HardwareProfile::detect_live_memory)
+        .await
+        .map(|m| m.total_memory_gb)
+        .unwrap_or(0.0);
+    sup.add_custom_extension(audiogen_sidecar_manifest(&python, &script, total_ram_gb))
         .await
         .map_err(|e| AudioError::GenerationFailed {
             kind: kind.to_string(),

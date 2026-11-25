@@ -47,7 +47,7 @@ pub async fn run(style: Style) -> Result<()> {
         api_base: cfg.api_base.clone(),
     };
     println!("\n{}", style.bold("Default chat endpoint"));
-    match resolve(&req, &|_| {}).await {
+    match resolve(&req, &|_| {}, None).await {
         Ok(ep) => row(style, true, &truncate_chars(&ep.model, 22), &ep.label),
         Err(e) => {
             row(style, false, "none", "");

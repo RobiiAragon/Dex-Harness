@@ -91,6 +91,20 @@ impl ManagedRuntime {
     }
 }
 
+/// Share of physical RAM Dex may fill with its own local models (chat, image, music, 3D…).
+const MODEL_MEMORY_FRACTION: f64 = 0.80;
+/// Free memory to keep on top of a model's estimate before loading it.
+const MEMORY_HEADROOM_MB: u64 = 2048;
+
+/// Share of RAM local models may use together (`DEX_MODEL_MEMORY_FRACTION`, 0.2–0.95, overrides).
+fn model_memory_fraction() -> f64 {
+    std::env::var("DEX_MODEL_MEMORY_FRACTION")
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .map(|f| f.clamp(0.2, 0.95))
+        .unwrap_or(MODEL_MEMORY_FRACTION)
+}
+
 /// Supervises external MCP servers and local sidecar processes,
 /// providing on-demand startup, health probing, and idle auto-unload to reclaim RAM.
 pub struct ExtensionSupervisor {
@@ -241,6 +255,7 @@ impl ExtensionSupervisor {
                 env,
                 ..
             } => {
+                self.make_room_for(&manifest).await;
                 let mut cmd = Command::new(command);
                 harness_core::apply_enriched_path(&mut cmd);
                 cmd.args(args)
@@ -475,6 +490,7 @@ impl ExtensionSupervisor {
                 entry.terminate().await;
             }
         }
+        self.make_room_for(&manifest).await;
 
         info!(
             id = %manifest.id,
@@ -760,6 +776,87 @@ impl ExtensionSupervisor {
     }
 
     /// Updates `last_used_at` timestamp whenever a tool belonging to `id` is invoked.
+    /// Memory manager: before a local model sidecar starts, unloads the least recently used
+    /// running sidecars until the new one fits — both Dex's model budget
+    /// ([`MODEL_MEMORY_FRACTION`] of RAM, by manifest estimates) and the memory the OS reports as
+    /// available. Unloaded models restart on demand the next time they are used, so heavy
+    /// models (chat LLM, FLUX, MusicGen, 3D) can take turns on machines that cannot hold all.
+    async fn make_room_for(&self, manifest: &ExtensionManifest) {
+        if !matches!(manifest.kind, ExtensionKind::LocalSidecar { .. }) {
+            return;
+        }
+        self.make_room(&manifest.id, &manifest.name, manifest.estimated_ram_mb)
+            .await;
+    }
+
+    /// Frees memory for a model that is about to load (`need_mb`), unloading least recently
+    /// used local sidecars. Also used by one-shot model processes (e.g. FLUX via `mflux`) that
+    /// are not supervised sidecars. `for_id` is never unloaded.
+    pub async fn make_room(&self, for_id: &str, for_name: &str, need_mb: u64) {
+        let need = need_mb;
+        if need == 0 {
+            return;
+        }
+        let reg = self.load_registry().await;
+        for _ in 0..8 {
+            let snapshot = tokio::task::spawn_blocking(harness_core::HardwareProfile::detect_live_memory)
+                .await
+                .ok();
+            let (total_mb, avail_mb) = snapshot
+                .map(|s| {
+                    (
+                        (s.total_memory_gb * 1024.0) as u64,
+                        (s.available_memory_gb * 1024.0) as u64,
+                    )
+                })
+                .unwrap_or((0, u64::MAX));
+            let mut running: Vec<(String, u64, Instant)> = {
+                let rt = self.runtime.lock().await;
+                rt.iter()
+                    .filter(|(rid, e)| {
+                        rid.as_str() != for_id
+                            && e.status == ExtensionStatus::Running
+                            && matches!(e.handle, Some(ManagedHandle::Sidecar(_)))
+                    })
+                    .map(|(rid, e)| {
+                        let est = reg.get(rid).map(|m| m.estimated_ram_mb).unwrap_or(0);
+                        (rid.clone(), est, e.last_used_at)
+                    })
+                    .collect()
+            };
+            let used: u64 = running.iter().map(|r| r.1).sum();
+            let budget = (total_mb as f64 * model_memory_fraction()) as u64;
+            let over_budget = total_mb > 0 && used + need > budget;
+            let low_memory = avail_mb < need.saturating_add(MEMORY_HEADROOM_MB);
+            if !(over_budget || low_memory) || running.is_empty() {
+                return;
+            }
+            running.sort_by_key(|r| r.2);
+            let (victim, freed, _) = running.remove(0);
+            info!(
+                unloading = %victim,
+                freed_mb = freed,
+                for_id = %for_id,
+                need_mb = need,
+                available_mb = avail_mb,
+                "Unloading least recently used model to make room"
+            );
+            self.event_bus.publish(DexEvent::RuntimeProgress {
+                runtime: victim.clone(),
+                stage: "unloaded".to_string(),
+                message: format!(
+                    "Unloaded '{victim}' (~{} GB) to make room for {} — it reloads automatically when needed",
+                    freed / 1024,
+                    for_name
+                ),
+                done: true,
+                is_error: false,
+            });
+            let _ = self.stop_extension(&victim).await;
+            tokio::time::sleep(Duration::from_millis(600)).await;
+        }
+    }
+
     pub async fn touch_last_used(&self, id: &str) {
         let mut rt = self.runtime.lock().await;
         if let Some(entry) = rt.get_mut(id) {

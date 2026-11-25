@@ -586,8 +586,41 @@ pub async fn run_goal(
                 };
             }
         } else if effective_api_base.is_none() {
-            // Nothing mounted in Dex's own runtime: reuse any running local server (LM Studio,
-            // Ollama, MLX, llama.cpp) before asking the user to load a model.
+            // Nothing mounted yet: load the best local model for this Mac into Dex's own
+            // runtime (no LM Studio / Ollama needed). Already-running servers are a fallback.
+            let models = harness_models::discover_native_chat_models().await;
+            let preferred = harness_models::find_local_model(&models, &model_name).cloned();
+            let ram = harness_models::total_ram_bytes().await;
+            let chosen =
+                preferred.or_else(|| harness_models::pick_default_chat_model(&models, ram).cloned());
+            if let Some(chosen) = chosen {
+                match harness_models::load_native_chat_model(
+                    &state.extension_supervisor,
+                    &chosen,
+                    Some(&state.event_bus),
+                )
+                .await
+                {
+                    Ok(active) => {
+                        active_local_runtime = Some(active.runtime.clone());
+                        active_sidecar_id = Some(active.sidecar_id.clone());
+                        effective_api_base = Some(active.base_url.clone());
+                        model_name = if active.runtime == "mlx" {
+                            active.path.clone()
+                        } else {
+                            Path::new(&active.path)
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or(&active.name)
+                                .to_string()
+                        };
+                        *state.active_loaded_model.write().await = Some(active);
+                    }
+                    Err(e) => tracing::warn!(error = %e, model = %chosen.name, "Auto-loading the local chat model failed"),
+                }
+            }
+        }
+        if effective_api_base.is_none() {
             let servers = harness_models::detect_local_servers().await;
             let preferred = (!model_name.trim().is_empty()).then(|| model_name.clone());
             match harness_models::pick_chat_endpoint(&servers, preferred.as_deref()) {
@@ -598,7 +631,7 @@ pub async fn run_goal(
                 }
                 None => {
                     return Err(
-                        "RuntimeMissing (llm): No local model is loaded yet. Click 'Load Recommended Local Model', pick one in the Model Picker, or start LM Studio / Ollama."
+                        "RuntimeMissing (llm): No local chat model found on this Mac. Click 'Load Recommended Local Model' to download one, or pick one in the Model Picker."
                             .to_string(),
                     );
                 }
@@ -649,8 +682,17 @@ pub async fn run_goal(
         }
     }
 
-    let provider_instance =
+    let mut provider_instance =
         build_provider(&provider_name, &model_name, effective_api_base.as_deref())?;
+    // Dex's own runtime: reload the model by itself if it was unloaded (idle, or to make room
+    // for an image / music / 3D model).
+    if let Some(ref sidecar) = active_sidecar_id {
+        provider_instance = Arc::new(harness_models::NativeReloadProvider::new(
+            provider_instance,
+            state.extension_supervisor.clone(),
+            sidecar.clone(),
+        ));
+    }
 
     let workspace_dir = state.active_workspace_dir.read().await.clone();
 
@@ -1287,7 +1329,15 @@ pub async fn get_active_loaded_model(
             .extension_supervisor
             .status_of(&model.sidecar_id)
             .await;
-        if status != ExtensionStatus::Running {
+        // A model unloaded to free memory (or after idling) stays mounted: Dex reloads it
+        // on the next message. Forget it only if its runtime entry is gone or broken.
+        let registered = state
+            .extension_supervisor
+            .load_registry()
+            .await
+            .get(&model.sidecar_id)
+            .is_some();
+        if status == ExtensionStatus::Error || !registered {
             let mut lock = state.active_loaded_model.write().await;
             *lock = None;
             return Ok(None);

@@ -89,7 +89,13 @@ def _load_musicgen():
         log(f"loading MusicGen '{MUSICGEN_MODEL}' on {dev} (first run downloads weights)")
         t0 = time.time()
         processor = AutoProcessor.from_pretrained(MUSICGEN_MODEL)
-        model = MusicgenForConditionalGeneration.from_pretrained(MUSICGEN_MODEL).to(dev)
+        import torch
+
+        # fp16 halves memory on Apple Silicon / CUDA (stereo-large: ~8 GB instead of ~17 GB)
+        # with the same output quality; DEX_MUSICGEN_DTYPE=fp32 forces full precision.
+        want_fp32 = os.environ.get("DEX_MUSICGEN_DTYPE", "").strip().lower() == "fp32"
+        dtype = torch.float32 if (dev == "cpu" or want_fp32) else torch.float16
+        model = MusicgenForConditionalGeneration.from_pretrained(MUSICGEN_MODEL, torch_dtype=dtype).to(dev)
         model.eval()
         _musicgen = (processor, model, dev)
         log(f"MusicGen ready in {time.time() - t0:.1f}s")

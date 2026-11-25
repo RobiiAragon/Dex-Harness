@@ -15,6 +15,24 @@ pub const DEX_AUDIOGEN_SIDECAR_ID: &str = "dex-audiogen";
 pub const DEX_AUDIOGEN_PORT: u16 = 8189;
 /// Default Hugging Face model used for music generation.
 pub const DEFAULT_MUSICGEN_MODEL: &str = "facebook/musicgen-small";
+/// MusicGen checkpoint (and its fp16 peak memory in MB) that suits a machine with
+/// `total_ram_gb` of RAM: stereo-large on 32 GB+, stereo-medium on 16 GB+, small otherwise.
+/// `DEX_MUSICGEN_MODEL` always wins.
+pub fn musicgen_model_for_ram(total_ram_gb: f64) -> (String, u64) {
+    if let Ok(m) = std::env::var("DEX_MUSICGEN_MODEL") {
+        if !m.trim().is_empty() {
+            return (m.trim().to_string(), 8 * 1024);
+        }
+    }
+    if total_ram_gb >= 31.5 {
+        ("facebook/musicgen-stereo-large".to_string(), 8 * 1024 + 512)
+    } else if total_ram_gb >= 15.5 {
+        ("facebook/musicgen-stereo-medium".to_string(), 5 * 1024)
+    } else {
+        (DEFAULT_MUSICGEN_MODEL.to_string(), 2 * 1024)
+    }
+}
+
 /// Python packages installed into the managed venv by the 1-click `audiogen` runtime installer.
 /// (AudioLDM via `diffusers` is opt-in with `DEX_SFX_BACKEND=audioldm` and not installed by default.)
 pub const AUDIOGEN_PIP_PACKAGES: &[&str] = &["torch", "transformers", "soundfile", "numpy", "scipy"];

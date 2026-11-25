@@ -315,6 +315,44 @@ pub struct MfluxInvocation {
     pub display_model: String,
 }
 
+/// Default local image model for this Mac: Z-Image Turbo (best quality, ~4.5 GB peak) when
+/// there are at least 16 GB of RAM, otherwise FLUX.1-schnell 4-bit.
+pub async fn default_mflux_model() -> &'static str {
+    let total_gb = tokio::task::spawn_blocking(harness_core::HardwareProfile::detect_live_memory)
+        .await
+        .map(|s| s.total_memory_gb)
+        .unwrap_or(0.0);
+    if total_gb >= 15.5 {
+        "z-image-turbo"
+    } else {
+        "flux-schnell-4bit"
+    }
+}
+
+/// Peak memory estimate (MB) of an `mflux` run, used to unload other models first if needed.
+pub fn mflux_ram_estimate_mb(display_model: &str) -> u64 {
+    let lower = display_model.to_lowercase();
+    if lower.contains("qwen-image") {
+        24 * 1024
+    } else if lower.contains("dev") || lower.contains("flux.2") || lower.contains("klein") {
+        12 * 1024
+    } else {
+        7 * 1024
+    }
+}
+
+/// Distilled models need only a few steps; more just costs time (and can hurt quality).
+fn distilled_step_cap(display_model: &str) -> Option<u32> {
+    let lower = display_model.to_lowercase();
+    if lower.contains("schnell") {
+        Some(4)
+    } else if lower.contains("z-image turbo") {
+        Some(9)
+    } else {
+        None
+    }
+}
+
 /// Builds an `mflux` CLI invocation aligned with `mflux 0.23+` capabilities:
 /// - Defaults to `dhairyashil/FLUX.1-schnell-mflux-4bit` (`--base-model schnell`, open ungated 4-bit, zero HF token required).
 /// - Never forwards `--negative-prompt` to FLUX / Z-Image Turbo models where `mflux` ignores it.
@@ -436,8 +474,12 @@ pub fn resolve_mflux_invocation(
     args.push(req.width.to_string());
     args.push("--height".to_string());
     args.push(req.height.to_string());
+    let steps = match distilled_step_cap(&display_model) {
+        Some(cap) => req.steps.clamp(1, cap),
+        None => req.steps.max(1),
+    };
     args.push("--steps".to_string());
-    args.push(req.steps.max(1).to_string());
+    args.push(steps.to_string());
     args.push("--seed".to_string());
     args.push(seed.to_string());
     args.push("--output".to_string());
@@ -478,9 +520,26 @@ async fn generate_via_mlx(
         .await;
     }
 
+    // No model picked: use the best one this Mac can run.
+    let defaulted;
+    let req = if req.model.as_deref().map(str::trim).filter(|m| !m.is_empty()).is_none() {
+        let mut r = req.clone();
+        r.model = Some(default_mflux_model().await.to_string());
+        defaulted = r;
+        &defaulted
+    } else {
+        req
+    };
+
     let ts = current_epoch_millis();
     let dest = out_dir.join(format!("mlx_{ts}.png"));
     let spec = resolve_mflux_invocation(req, prompt, seed, &dest);
+
+    // Unload idle models (e.g. the chat model) if this one would not fit in memory alongside them.
+    if let Some(sup) = supervisor {
+        sup.make_room("mflux", &spec.display_model, mflux_ram_estimate_mb(&spec.display_model))
+            .await;
+    }
 
     let Some(mflux_bin) = harness_core::find_executable_in_enriched_path(spec.binary)
         .or_else(|| harness_core::find_executable_in_enriched_path("mflux-generate"))
@@ -513,7 +572,13 @@ async fn generate_via_mlx(
         message: e.to_string(),
     })?;
 
-    let total_steps = req.steps.max(1);
+    let total_steps = spec
+        .args
+        .iter()
+        .position(|a| a == "--steps")
+        .and_then(|i| spec.args.get(i + 1))
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or_else(|| req.steps.max(1));
     let bus_out = event_bus.cloned();
     let bus_err = event_bus.cloned();
     let tid_out = task_id.to_string();
@@ -1131,5 +1196,16 @@ mod tests {
         assert_eq!(inv_z.binary, "mflux-generate-z-image-turbo");
         assert!(inv_z.args.contains(&"filipstrand/Z-Image-Turbo-mflux-4bit".to_string()));
         assert!(!inv_z.args.contains(&"--negative-prompt".to_string()));
+
+        // 4. Distilled models cap the default 20 steps (Z-Image Turbo → 9, schnell → 4).
+        let req_z20 = ImageGenRequest {
+            steps: 20,
+            model: Some("z-image-turbo".to_string()),
+            ..ImageGenRequest::default()
+        };
+        let inv_z20 = resolve_mflux_invocation(&req_z20, "owl", 1, dest);
+        let steps_at = inv_z20.args.iter().position(|a| a == "--steps").expect("steps flag");
+        assert_eq!(inv_z20.args[steps_at + 1], "9");
+        assert_eq!(mflux_ram_estimate_mb(&inv_z20.display_model), 7 * 1024);
     }
 }

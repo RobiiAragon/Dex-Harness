@@ -4,6 +4,7 @@ pub mod error;
 pub mod huggingface;
 pub mod importer;
 pub mod local_servers;
+pub mod native;
 pub mod ollama_bridge;
 pub mod registry;
 pub mod runtime;
@@ -22,6 +23,11 @@ pub use local_servers::{
     detect_local_servers, is_chat_model_id, pick_chat_endpoint, LocalServerInfo,
     LLAMA_SERVER_DEFAULT_PORT, LM_STUDIO_CANDIDATE_PORTS, LM_STUDIO_DEFAULT_URL,
     MLX_LM_DEFAULT_PORT,
+};
+pub use native::{
+    discover_native_chat_models, ensure_native_runtime_running, estimated_runtime_ram_mb,
+    find_local_model, is_native_chat_candidate, load_native_chat_model, pick_default_chat_model,
+    total_ram_bytes, NativeReloadProvider, CHAT_MODEL_MAX_RAM_FRACTION,
 };
 pub use ollama_bridge::{OllamaBridge, OllamaModelDetails, OllamaModelTag};
 pub use registry::{ModelMetadata, ModelRegistry, ModelSource};

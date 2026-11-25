@@ -9,6 +9,8 @@ description = "Dex-Harness Local Model Hub and Hugging Face / Ollama Manager"
 
 [dependencies]
 harness-core = { workspace = true }
+harness-extensions = { workspace = true }
+async-trait = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 reqwest = { workspace = true }

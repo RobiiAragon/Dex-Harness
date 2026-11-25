@@ -393,7 +393,7 @@ pub fn print_banner(parts: &SessionParts, mode: ExecutionMode) {
     println!(
         "  {} {}  {}",
         style.dim("model"),
-        parts.endpoint.model,
+        parts.endpoint.display_model(),
         style.dim(&format!("({})", parts.endpoint.label))
     );
     println!("  {} {}  {} {}", style.dim("mode "), mode_label(mode), style.dim("cwd"), cwd);
@@ -461,36 +461,92 @@ pub async fn repl(mut parts: SessionParts, initial_goal: Option<String>) -> Resu
                         None => println!("  {}", style.red("Unknown mode. Use safe, plan or autopilot.")),
                     },
                 },
-                "model" | "models" => match arg {
-                    None => {
-                        let models = list_chat_models(&parts.endpoint).await;
-                        if models.is_empty() {
-                            println!("  {}", style.dim("No model list available from this server."));
+                "model" | "models" => {
+                    if let Some(native) = parts.endpoint.native.clone() {
+                        let models = harness_models::discover_native_chat_models().await;
+                        match arg {
+                            None => {
+                                for m in &models {
+                                    let current = m.path.as_deref() == Some(native.model.path.as_str());
+                                    let mark = if current { style.green("●") } else { " ".to_string() };
+                                    println!(
+                                        "  {mark} {}  {}",
+                                        m.name,
+                                        style.dim(&format!("{:.1} GB · {}", m.size_bytes as f64 / 1e9, m.format))
+                                    );
+                                }
+                                println!("  {}", style.dim("Switch with /model <name> (Dex unloads the current one first)"));
+                            }
+                            Some(query) => {
+                                let Some(chosen) = harness_models::find_local_model(&models, query).cloned() else {
+                                    println!("  {} No local model matches '{query}'. List them with /model.", style.red("✗"));
+                                    continue;
+                                };
+                                println!("  {}", style.dim(&format!("Loading {}…", chosen.name)));
+                                match harness_models::load_native_chat_model(&native.supervisor, &chosen, None).await {
+                                    Ok(active) => {
+                                        let history: Vec<_> = agent.context().messages().to_vec();
+                                        parts.endpoint.model = if active.runtime == "mlx" {
+                                            active.path.clone()
+                                        } else {
+                                            std::path::Path::new(&active.path)
+                                                .file_name()
+                                                .and_then(|n| n.to_str())
+                                                .unwrap_or(&active.name)
+                                                .to_string()
+                                        };
+                                        parts.endpoint.base_url = Some(active.base_url.clone());
+                                        parts.endpoint.label = format!("Dex runtime · {}", active.name);
+                                        parts.endpoint.native = Some(crate::endpoint::NativeHandle {
+                                            supervisor: native.supervisor.clone(),
+                                            model: active.clone(),
+                                        });
+                                        agent = parts.build_agent();
+                                        for m in history {
+                                            agent.context_mut().push(m);
+                                        }
+                                        let mut cfg = CliConfig::load().await;
+                                        cfg.model = Some(active.name.clone());
+                                        let _ = cfg.save().await;
+                                        println!("  {} model → {}", style.green("✓"), active.name);
+                                    }
+                                    Err(e) => println!("  {} {e}", style.red("✗")),
+                                }
+                            }
                         }
-                        for m in models {
-                            let mark = if m == parts.endpoint.model { style.green("●") } else { " ".to_string() };
-                            println!("  {mark} {m}");
-                        }
-                        println!("  {}", style.dim("Switch with /model <id>"));
+                        continue;
                     }
-                    Some(id) => {
-                        let available = list_chat_models(&parts.endpoint).await;
-                        if !available.is_empty() && !available.iter().any(|m| m == id) {
-                            println!("  {} '{id}' is not served by {}.", style.red("✗"), parts.endpoint.label);
-                            continue;
+                    match arg {
+                        None => {
+                            let models = list_chat_models(&parts.endpoint).await;
+                            if models.is_empty() {
+                                println!("  {}", style.dim("No model list available from this server."));
+                            }
+                            for m in models {
+                                let mark = if m == parts.endpoint.model { style.green("●") } else { " ".to_string() };
+                                println!("  {mark} {m}");
+                            }
+                            println!("  {}", style.dim("Switch with /model <id>"));
                         }
-                        let history: Vec<_> = agent.context().messages().to_vec();
-                        parts.endpoint.model = id.to_string();
-                        agent = parts.build_agent();
-                        for m in history {
-                            agent.context_mut().push(m);
+                        Some(id) => {
+                            let available = list_chat_models(&parts.endpoint).await;
+                            if !available.is_empty() && !available.iter().any(|m| m == id) {
+                                println!("  {} '{id}' is not served by {}.", style.red("✗"), parts.endpoint.label);
+                                continue;
+                            }
+                            let history: Vec<_> = agent.context().messages().to_vec();
+                            parts.endpoint.model = id.to_string();
+                            agent = parts.build_agent();
+                            for m in history {
+                                agent.context_mut().push(m);
+                            }
+                            let mut cfg = CliConfig::load().await;
+                            cfg.model = Some(id.to_string());
+                            let _ = cfg.save().await;
+                            println!("  {} model → {id}", style.green("✓"));
                         }
-                        let mut cfg = CliConfig::load().await;
-                        cfg.model = Some(id.to_string());
-                        let _ = cfg.save().await;
-                        println!("  {} model → {id}", style.green("✓"));
                     }
-                },
+                }
                 "tools" => {
                     let mut names: Vec<String> = agent_tool_names(&agent);
                     names.sort();
