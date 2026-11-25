@@ -42,8 +42,12 @@ pub enum AgentEvent {
 pub enum HookAction {
     /// Proceed with normal execution.
     Continue,
-    /// Halt agent execution immediately with the given reason.
+    /// Halt agent execution immediately with the given reason (e.g. the user rejected a tool
+    /// and wants to give new instructions). Conversation history is kept valid.
     Halt(String),
+    /// Skip this tool call and report the reason back to the model as an error tool result,
+    /// letting the agent adapt (e.g. a write attempted in read-only Plan mode).
+    Deny(String),
     /// Replace the tool arguments before execution proceeds.
     ModifyArguments(serde_json::Value),
 }
@@ -76,6 +80,10 @@ impl HookRegistry {
                 HookAction::Halt(reason) => {
                     debug!(reason = %reason, "Hook instructed agent to halt");
                     return Ok(HookAction::Halt(reason));
+                }
+                HookAction::Deny(reason) => {
+                    debug!(reason = %reason, "Hook denied tool call");
+                    return Ok(HookAction::Deny(reason));
                 }
                 HookAction::ModifyArguments(new_args) => {
                     return Ok(HookAction::ModifyArguments(new_args));

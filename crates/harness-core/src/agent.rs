@@ -118,12 +118,52 @@ Solve the user's objective thoroughly:
         self
     }
 
+    /// Tool definitions currently exposed to the model (core + activated deferred tools).
+    pub fn tool_definitions(&self) -> Vec<crate::tool::ToolDefinition> {
+        self.tools.active_definitions()
+    }
+
     pub fn context(&self) -> &ConversationContext {
         &self.context
     }
 
     pub fn context_mut(&mut self) -> &mut ConversationContext {
         &mut self.context
+    }
+
+    /// Closes out any assistant tool calls that never received a tool result (e.g. the run was
+    /// cancelled with Ctrl-C mid-tool), so the next request is accepted by strict
+    /// OpenAI-compatible servers. Returns how many placeholder results were appended.
+    pub fn repair_history(&mut self) -> usize {
+        let messages = self.context.messages();
+        let Some(last_call_idx) = messages
+            .iter()
+            .rposition(|m| m.tool_calls.as_ref().is_some_and(|c| !c.is_empty()))
+        else {
+            return 0;
+        };
+        let answered: std::collections::HashSet<String> = messages[last_call_idx + 1..]
+            .iter()
+            .filter_map(|m| m.tool_call_id.clone())
+            .collect();
+        let missing: Vec<(String, String)> = messages[last_call_idx]
+            .tool_calls
+            .iter()
+            .flatten()
+            .filter(|c| !answered.contains(&c.id))
+            .map(|c| (c.id.clone(), c.name.clone()))
+            .collect();
+        for (id, name) in &missing {
+            self.context
+                .push(Message::tool_result(id, name, "Cancelled by the user before completion."));
+        }
+        missing.len()
+    }
+
+    /// Clears the conversation (keeping the system prompt) for a fresh session.
+    pub fn reset_conversation(&mut self) {
+        self.context.clear_history();
+        self.current_step = 0;
     }
 
     /// Executes a user goal with optional multimodal image data URLs attached to the user turn.
@@ -241,7 +281,7 @@ impl Agent for ReActAgent {
 
         // Execute each requested tool call, running lifecycle hooks
         let mut tool_results = Vec::with_capacity(tool_calls.len());
-        for mut call in tool_calls.clone() {
+        for (index, mut call) in tool_calls.clone().into_iter().enumerate() {
             // Trigger PreToolUse hook
             let pre_event = AgentEvent::PreToolUse {
                 tool_name: call.name.clone(),
@@ -257,7 +297,39 @@ impl Agent for ReActAgent {
                             reason: reason.clone(),
                         });
                     }
+                    // Every assistant tool call must be answered by a tool message, otherwise
+                    // OpenAI-compatible servers reject the *next* turn. Close them all out.
+                    for pending in &tool_calls[index..] {
+                        self.context.push(Message::tool_result(
+                            &pending.id,
+                            &pending.name,
+                            format!("Not executed: {reason}"),
+                        ));
+                    }
                     return Err(CoreError::AgentHalted { reason });
+                }
+                HookAction::Deny(reason) => {
+                    if let Some(ref bus) = self.event_bus {
+                        bus.publish(DexEvent::SecurityBlocked {
+                            tool_name: call.name.clone(),
+                            reason: reason.clone(),
+                        });
+                    }
+                    let result = ToolResult::error(&call.id, &call.name, format!("Denied: {reason}"));
+                    // Let observers (UI, audit hooks) see the denial like any other result.
+                    self.hooks
+                        .trigger(&AgentEvent::PostToolUse {
+                            tool_name: call.name.clone(),
+                            result: result.clone(),
+                        })
+                        .await?;
+                    self.context.push(Message::tool_result(
+                        &result.call_id,
+                        &result.tool_name,
+                        &result.output,
+                    ));
+                    tool_results.push(result);
+                    continue;
                 }
                 HookAction::ModifyArguments(new_args) => {
                     call.arguments = new_args;
@@ -399,6 +471,75 @@ mod tests {
         async fn execute(&self, _args: serde_json::Value) -> Result<String, crate::error::ToolError> {
             Ok("Tool executed successfully".to_string())
         }
+    }
+
+    struct HaltHook(HookAction);
+
+    #[async_trait]
+    impl crate::hook::Hook for HaltHook {
+        async fn on_event(&self, event: &AgentEvent) -> Result<HookAction, CoreError> {
+            match event {
+                AgentEvent::PreToolUse { .. } => Ok(self.0.clone()),
+                _ => Ok(HookAction::Continue),
+            }
+        }
+    }
+
+    fn every_tool_call_answered(agent: &ReActAgent) -> bool {
+        let msgs = agent.context().messages();
+        msgs.iter().enumerate().all(|(i, m)| {
+            m.tool_calls.iter().flatten().all(|c| {
+                msgs[i + 1..]
+                    .iter()
+                    .any(|r| r.tool_call_id.as_deref() == Some(c.id.as_str()))
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn halt_keeps_history_valid_for_next_turn() {
+        let provider = Arc::new(MockProvider { call_count: AtomicUsize::new(0) });
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(MockTool));
+        let mut hooks = HookRegistry::new();
+        hooks.register(Arc::new(HaltHook(HookAction::Halt("user said no".into()))));
+        let mut agent = ReActAgent::new(provider, tools).with_hooks(hooks);
+
+        let err = agent.run("Run test").await;
+        assert!(matches!(err, Err(CoreError::AgentHalted { .. })));
+        assert!(every_tool_call_answered(&agent));
+    }
+
+    #[tokio::test]
+    async fn deny_feeds_reason_back_and_continues() {
+        let provider = Arc::new(MockProvider { call_count: AtomicUsize::new(0) });
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(MockTool));
+        let mut hooks = HookRegistry::new();
+        hooks.register(Arc::new(HaltHook(HookAction::Deny("plan mode".into()))));
+        let mut agent = ReActAgent::new(provider, tools).with_hooks(hooks);
+
+        let answer = agent.run("Run test").await.expect("deny should not abort the run");
+        assert!(answer.contains("Denied: plan mode"), "got: {answer}");
+        assert!(every_tool_call_answered(&agent));
+    }
+
+    #[test]
+    fn repair_history_closes_dangling_tool_calls() {
+        let provider = Arc::new(MockProvider { call_count: AtomicUsize::new(0) });
+        let mut agent = ReActAgent::new(provider, ToolRegistry::new());
+        agent.context_mut().push(Message::user("hi"));
+        agent.context_mut().push(Message::assistant(
+            None,
+            Some(vec![ToolCall {
+                id: "c1".into(),
+                name: "test_tool".into(),
+                arguments: serde_json::json!({}),
+            }]),
+        ));
+        assert_eq!(agent.repair_history(), 1);
+        assert_eq!(agent.repair_history(), 0);
+        assert!(every_tool_call_answered(&agent));
     }
 
     #[tokio::test]

@@ -12,7 +12,7 @@ use crate::error::ExtensionError;
 use crate::manifest::ExtensionKind;
 use crate::supervisor::ExtensionSupervisor;
 
-const MCP_HANDSHAKE_TIMEOUT_SECS: u64 = 15;
+const MCP_HANDSHAKE_TIMEOUT_SECS: u64 = 8;
 const MCP_TOOL_CALL_TIMEOUT_SECS: u64 = 60;
 
 static REQUEST_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -301,34 +301,63 @@ pub async fn connect_mcp_extension(
     Ok(registered_names)
 }
 
-/// Connects all enabled `McpStdio` extensions and registers their tools as `Deferred`.
-/// Unavailable servers are logged as warnings without aborting agent startup.
+/// Outcome of connecting all enabled MCP extensions at agent startup.
+#[derive(Debug, Default, Clone)]
+pub struct McpStartupReport {
+    /// Names of the deferred tools that were registered.
+    pub registered_tools: Vec<String>,
+    /// `(extension_id, error)` pairs for extensions that could not be reached.
+    pub failed: Vec<(String, String)>,
+}
+
+/// Connects all enabled `McpStdio` extensions **concurrently** and registers their tools as
+/// `Deferred`. A slow or broken server can no longer stall startup for every other one: each
+/// handshake is bounded by `MCP_HANDSHAKE_TIMEOUT_SECS` and they all run in parallel.
+/// Unreachable servers are reported (and logged at `debug`) without aborting agent startup.
 pub async fn register_enabled_mcp_extensions(
     supervisor: Arc<ExtensionSupervisor>,
     registry: &mut ToolRegistry,
 ) -> Vec<String> {
+    connect_enabled_mcp_extensions(supervisor, registry)
+        .await
+        .registered_tools
+}
+
+/// Same as [`register_enabled_mcp_extensions`] but also returns which extensions failed.
+pub async fn connect_enabled_mcp_extensions(
+    supervisor: Arc<ExtensionSupervisor>,
+    registry: &mut ToolRegistry,
+) -> McpStartupReport {
     let reg = supervisor.load_registry().await;
-    let mut all_registered = Vec::new();
+    let mut set = tokio::task::JoinSet::new();
 
     for manifest in reg.extensions {
-        if !manifest.enabled {
+        if !manifest.enabled || !matches!(manifest.kind, ExtensionKind::McpStdio { .. }) {
             continue;
         }
-        if !matches!(manifest.kind, ExtensionKind::McpStdio { .. }) {
-            continue;
-        }
+        let sup = Arc::clone(&supervisor);
+        // `ToolRegistry` clones share the same inner registry, so tools land in `registry`.
+        let mut shared = registry.clone();
+        set.spawn(async move {
+            let id = manifest.id.clone();
+            let res = connect_mcp_extension(sup, &id, &mut shared).await;
+            (id, res)
+        });
+    }
 
-        match connect_mcp_extension(Arc::clone(&supervisor), &manifest.id, registry).await {
-            Ok(names) => all_registered.extend(names),
-            Err(e) => {
-                warn!(
-                    extension = %manifest.id,
-                    error = %e,
-                    "Skipping enabled MCP extension that failed to connect"
-                );
+    let mut report = McpStartupReport::default();
+    while let Some(joined) = set.join_next().await {
+        match joined {
+            Ok((_, Ok(names))) => report.registered_tools.extend(names),
+            Ok((id, Err(e))) => {
+                debug!(extension = %id, error = %e, "Skipping enabled MCP extension that failed to connect");
+                report.failed.push((id, e.to_string()));
+            }
+            Err(join_err) => {
+                warn!(error = %join_err, "MCP extension connect task panicked or was cancelled");
             }
         }
     }
-
-    all_registered
+    report.failed.sort();
+    report
 }

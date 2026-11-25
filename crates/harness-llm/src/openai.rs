@@ -19,6 +19,22 @@ pub struct OpenAiProvider {
     client: Client,
 }
 
+/// HTTP client with a bounded connect phase but **no total request timeout**: a whole-request
+/// timeout would cut off long streamed generations. Liveness is enforced per chunk instead
+/// (`FIRST_TOKEN_TIMEOUT_SECS` / `STREAM_IDLE_TIMEOUT_SECS`).
+fn streaming_client() -> Client {
+    Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .unwrap_or_else(|_| Client::new())
+}
+
+/// Time allowed for the first byte/token. Generous because local servers (LM Studio JIT,
+/// MLX) may need to load multi-GB weights and prefill long prompts before answering.
+const FIRST_TOKEN_TIMEOUT_SECS: u64 = 300;
+/// Maximum silence between streamed chunks once generation has started.
+const STREAM_IDLE_TIMEOUT_SECS: u64 = 120;
+
 impl OpenAiProvider {
     pub const DEFAULT_BASE_URL: &'static str = "https://api.openai.com/v1";
     pub const LM_STUDIO_BASE_URL: &'static str = "http://127.0.0.1:1234/v1";
@@ -28,10 +44,7 @@ impl OpenAiProvider {
             base_url: Self::DEFAULT_BASE_URL.to_string(),
             api_key: std::env::var("OPENAI_API_KEY").ok(),
             model: model.into(),
-            client: Client::builder()
-                .timeout(Duration::from_secs(120))
-                .build()
-                .unwrap_or_else(|_| Client::new()),
+            client: streaming_client(),
         }
     }
 
@@ -41,10 +54,7 @@ impl OpenAiProvider {
             base_url: Self::LM_STUDIO_BASE_URL.to_string(),
             api_key: Some("lm-studio".to_string()),
             model: model.into(),
-            client: Client::builder()
-                .timeout(Duration::from_secs(180))
-                .build()
-                .unwrap_or_else(|_| Client::new()),
+            client: streaming_client(),
         }
     }
 
@@ -145,6 +155,9 @@ struct ChatStreamChoice {
 #[derive(Deserialize)]
 struct ChatStreamDelta {
     content: Option<String>,
+    /// Reasoning tokens (LM Studio / vLLM / DeepSeek use `reasoning_content`, others `reasoning`).
+    #[serde(default, alias = "reasoning")]
+    reasoning_content: Option<String>,
     tool_calls: Option<Vec<ChatStreamToolCall>>,
 }
 
@@ -201,10 +214,26 @@ impl LlmProvider for OpenAiProvider {
                     }
                     Some(serde_json::Value::Array(parts))
                 };
+                let tool_calls = m.tool_calls.filter(|c| !c.is_empty()).map(|calls| {
+                    calls
+                        .into_iter()
+                        .map(|c| ChatToolCall {
+                            id: c.id,
+                            call_type: "function".to_string(),
+                            function: ChatCallFunction {
+                                name: c.name,
+                                arguments: match c.arguments {
+                                    serde_json::Value::String(raw) => raw,
+                                    other => other.to_string(),
+                                },
+                            },
+                        })
+                        .collect()
+                });
                 ChatMessage {
                     role: role.to_string(),
                     content,
-                    tool_calls: None,
+                    tool_calls,
                     tool_call_id: m.tool_call_id,
                 }
             })
@@ -243,9 +272,6 @@ impl LlmProvider for OpenAiProvider {
 
         debug!(url = %url, streaming = is_streaming, "Sending request to OpenAI chat completions");
 
-        const FIRST_TOKEN_TIMEOUT_SECS: u64 = 60;
-        const STREAM_IDLE_TIMEOUT_SECS: u64 = 60;
-
         let response = tokio::time::timeout(
             Duration::from_secs(FIRST_TOKEN_TIMEOUT_SECS),
             self.client.post(&url).headers(headers).json(&payload).send(),
@@ -271,7 +297,8 @@ impl LlmProvider for OpenAiProvider {
         // Handle SSE streaming with bounded first-token and inter-chunk timeouts
         if is_streaming {
             let mut byte_stream = response.bytes_stream();
-            let mut line_buffer = String::new();
+            let mut line_buffer: Vec<u8> = Vec::new();
+            let mut in_reasoning = false;
             let mut accumulated_content = String::new();
             let mut tool_calls_map: HashMap<usize, (String, String, String)> = HashMap::new(); // index -> (id, name, args)
             let mut finish_reason = None;
@@ -303,11 +330,13 @@ impl LlmProvider for OpenAiProvider {
                     break;
                 };
                 let chunk = chunk_result.map_err(|e| ProviderError::Http(e.to_string()))?;
-                line_buffer.push_str(&String::from_utf8_lossy(&chunk));
+                // Split on raw bytes so multi-byte UTF-8 characters (á, ñ, emoji) that straddle
+                // chunk boundaries are never decoded half-way into U+FFFD.
+                line_buffer.extend_from_slice(&chunk);
 
-                while let Some(pos) = line_buffer.find('\n') {
-                    let line = line_buffer[..pos].trim().to_string();
-                    line_buffer = line_buffer[pos + 1..].to_string();
+                while let Some(pos) = line_buffer.iter().position(|b| *b == b'\n') {
+                    let raw_line: Vec<u8> = line_buffer.drain(..=pos).collect();
+                    let line = String::from_utf8_lossy(&raw_line).trim().to_string();
 
                     if line.is_empty() {
                         continue;
@@ -325,9 +354,28 @@ impl LlmProvider for OpenAiProvider {
                                     finish_reason = Some(reason.clone());
                                 }
 
+                                if let Some(ref reasoning) = choice.delta.reasoning_content {
+                                    if !reasoning.is_empty() {
+                                        received_any_token = true;
+                                        if let Some(ref cb) = token_callback {
+                                            if !in_reasoning {
+                                                cb("<think>");
+                                                in_reasoning = true;
+                                            }
+                                            cb(reasoning);
+                                        }
+                                    }
+                                }
+
                                 if let Some(ref content) = choice.delta.content {
                                     if !content.is_empty() {
                                         received_any_token = true;
+                                        if in_reasoning {
+                                            if let Some(ref cb) = token_callback {
+                                                cb("</think>");
+                                            }
+                                            in_reasoning = false;
+                                        }
                                         if let Some(ref cb) = token_callback {
                                             cb(content);
                                         }
@@ -362,6 +410,12 @@ impl LlmProvider for OpenAiProvider {
                             }
                         }
                     }
+                }
+            }
+
+            if in_reasoning {
+                if let Some(ref cb) = token_callback {
+                    cb("</think>");
                 }
             }
 

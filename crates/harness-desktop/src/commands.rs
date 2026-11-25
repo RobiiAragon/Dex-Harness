@@ -492,6 +492,34 @@ async fn build_host_capabilities_manifest(workspace_dir: &Path) -> String {
     )
 }
 
+/// One prior chat turn sent by the UI so each new run continues the same conversation.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChatHistoryTurn {
+    pub role: String,
+    pub content: String,
+}
+
+/// Maximum number of prior turns replayed into a new agent run (older turns are dropped first;
+/// the context compactor handles the rest).
+const MAX_HISTORY_TURNS: usize = 40;
+
+fn replay_history(agent: &mut ReActAgent, history: &[ChatHistoryTurn]) {
+    let start = history.len().saturating_sub(MAX_HISTORY_TURNS);
+    for turn in &history[start..] {
+        let content = turn.content.trim();
+        if content.is_empty() {
+            continue;
+        }
+        match turn.role.as_str() {
+            "user" => agent.context_mut().push(harness_core::Message::user(content)),
+            "assistant" => agent
+                .context_mut()
+                .push(harness_core::Message::assistant(Some(content.to_string()), None)),
+            _ => {}
+        }
+    }
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn run_goal(
@@ -503,8 +531,10 @@ pub async fn run_goal(
     model: Option<String>,
     api_base: Option<String>,
     attachments: Option<Vec<String>>,
+    history: Option<Vec<ChatHistoryTurn>>,
 ) -> Result<String, String> {
     let attachment_list = attachments.unwrap_or_default();
+    let history = history.unwrap_or_default();
     if goal.trim().is_empty() && attachment_list.is_empty() {
         return Err("Goal cannot be empty".to_string());
     }
@@ -550,17 +580,49 @@ pub async fn run_goal(
                 };
             }
         } else if effective_api_base.is_none() {
-            return Err(
-                "RuntimeMissing (llm): No local model is loaded in Dex Native Runtime yet. Click 'Load Recommended Local Model' or select a model in the Model Picker."
-                    .to_string(),
-            );
+            // Nothing mounted in Dex's own runtime: reuse any running local server (LM Studio,
+            // Ollama, MLX, llama.cpp) before asking the user to load a model.
+            let servers = harness_models::detect_local_servers().await;
+            let preferred = (!model_name.trim().is_empty()).then(|| model_name.clone());
+            match harness_models::pick_chat_endpoint(&servers, preferred.as_deref()) {
+                Some((srv, picked)) => {
+                    provider_name = if srv.provider == "ollama" { "ollama" } else { "lmstudio" }.to_string();
+                    model_name = picked;
+                    effective_api_base = Some(srv.base_url.clone());
+                }
+                None => {
+                    return Err(
+                        "RuntimeMissing (llm): No local model is loaded yet. Click 'Load Recommended Local Model', pick one in the Model Picker, or start LM Studio / Ollama."
+                            .to_string(),
+                    );
+                }
+            }
         }
-    } else if model_name.trim().is_empty() {
-        if provider_name.eq_ignore_ascii_case("ollama") {
-            model_name = "qwen2.5:7b".to_string();
-        } else {
-            provider_name = "openai".to_string();
-            model_name = "gpt-4o".to_string();
+    } else if model_name.trim().is_empty() && effective_api_base.is_none() {
+        // Local-first: pick whatever chat model a running local server (LM Studio on
+        // :1234/:1235, Ollama, MLX, llama.cpp) is serving instead of silently using a cloud API.
+        let servers = harness_models::detect_local_servers().await;
+        let wanted = provider_name.to_lowercase();
+        let candidates: Vec<_> = servers
+            .into_iter()
+            .filter(|s| match wanted.as_str() {
+                "ollama" => s.id == "ollama",
+                "lmstudio" | "lm_studio" => s.id == "lmstudio",
+                _ => true,
+            })
+            .collect();
+        match harness_models::pick_chat_endpoint(&candidates, None) {
+            Some((srv, picked)) => {
+                provider_name = if srv.provider == "ollama" { "ollama" } else { "lmstudio" }.to_string();
+                model_name = picked;
+                effective_api_base = Some(srv.base_url.clone());
+            }
+            None => {
+                return Err(
+                    "RuntimeMissing (llm): No local model server is running. Load a model in the Model Picker, open LM Studio (`lms server start`), or run `ollama serve`."
+                        .to_string(),
+                );
+            }
         }
     }
 
@@ -611,6 +673,7 @@ pub async fn run_goal(
         ));
     }
     agent = agent.with_system_prompt(sys_prompt);
+    replay_history(&mut agent, &history);
 
     let vision_enabled = runtime_supports_vision_payload(
         &provider_name,
@@ -2801,6 +2864,33 @@ pub async fn qa_exit_app(app: AppHandle) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replay_history_restores_prior_turns_in_order() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(OpenAiProvider::lm_studio("m"));
+        let mut agent = ReActAgent::new(provider, ToolRegistry::new());
+        let turn = |role: &str, content: &str| ChatHistoryTurn {
+            role: role.to_string(),
+            content: content.to_string(),
+        };
+        let history = vec![
+            turn("user", "me llamo Robii"),
+            turn("assistant", "¡Hola Robii!"),
+            turn("system", "ignored"),
+            turn("user", "   "),
+        ];
+        replay_history(&mut agent, &history);
+        let msgs = agent.context().messages();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].content.as_deref(), Some("me llamo Robii"));
+        assert_eq!(msgs[1].content.as_deref(), Some("¡Hola Robii!"));
+
+        let long: Vec<_> = (0..100).map(|i| turn("user", &format!("t{i}"))).collect();
+        let mut agent2 = ReActAgent::new(Arc::new(OpenAiProvider::lm_studio("m")), ToolRegistry::new());
+        replay_history(&mut agent2, &long);
+        assert_eq!(agent2.context().messages().len(), MAX_HISTORY_TURNS);
+        assert_eq!(agent2.context().messages()[0].content.as_deref(), Some("t60"));
+    }
 
     #[test]
     fn test_to_base64_standard() {
