@@ -398,7 +398,13 @@ impl ToolRegistry {
             })
             .collect();
 
-        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
+        // On equal scores, built-in Dex tools come before MCP extension tools: the latter only
+        // work while their host app (Unity Editor, ComfyUI, Blender…) is running.
+        scored.sort_by(|a, b| {
+            b.0.cmp(&a.0)
+                .then_with(|| is_mcp_extension(&a.1).cmp(&is_mcp_extension(&b.1)))
+                .then_with(|| a.1.name.cmp(&b.1.name))
+        });
         scored.into_iter().map(|(_, info)| info).collect()
     }
 
@@ -456,6 +462,13 @@ pub struct SearchToolsArgs {
     /// When true (default), activates matched tools so their schemas are exposed on the next step.
     #[serde(default = "default_activate_true")]
     pub activate: bool,
+}
+
+/// Tag carried by every tool bridged from an external MCP server.
+pub const MCP_EXTENSION_TAG: &str = "mcp-extension";
+
+fn is_mcp_extension(info: &DeferredToolInfo) -> bool {
+    info.tags.iter().any(|t| t == MCP_EXTENSION_TAG)
 }
 
 /// Meta-tool that discovers deferred extension tools and dynamically activates them into the LLM context.
@@ -539,8 +552,13 @@ impl Tool for SearchToolsTool {
             };
 
             let status = if now_active { "ACTIVE" } else { "DEFERRED" };
+            let source = if is_mcp_extension(m) {
+                "MCP extension — needs its app/server running; prefer a built-in tool when one fits"
+            } else {
+                "built-in"
+            };
             lines.push(format!(
-                "- {} [{}] (category: {}, tags: [{}]): {}",
+                "- {} [{}] ({source}; category: {}, tags: [{}]): {}",
                 m.name,
                 status,
                 m.category,
@@ -593,6 +611,33 @@ mod tests {
         async fn execute(&self, _args: serde_json::Value) -> Result<String, ToolError> {
             Ok(format!("ran {}", self.name))
         }
+    }
+
+    #[test]
+    fn search_lists_builtin_tools_before_mcp_extension_tools() {
+        let mut registry = ToolRegistry::new();
+        registry.register_deferred(
+            Arc::new(DummyTool {
+                name: "generate_image".to_string(),
+                desc: "Unity: generate an image asset".to_string(),
+            }),
+            "gamedev",
+            vec!["unity".to_string(), MCP_EXTENSION_TAG.to_string()],
+        );
+        registry.register_deferred(
+            Arc::new(DummyTool {
+                name: "image_generate".to_string(),
+                desc: "Generate an image locally".to_string(),
+            }),
+            "image",
+            vec!["image".to_string()],
+        );
+        let names: Vec<String> = registry
+            .search_deferred("*", None)
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(names, vec!["image_generate", "generate_image"]);
     }
 
     #[tokio::test]

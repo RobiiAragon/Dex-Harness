@@ -244,6 +244,9 @@ enum MediaCommands {
         /// Optional ComfyUI workflow JSON inside .dex/workflows/
         #[arg(long)]
         workflow: Option<String>,
+        /// Output file path (defaults to .dex/media/images/)
+        #[arg(long)]
+        out: Option<String>,
     },
     /// Upscale an image (neural MLX/ComfyUI or deterministic pure-Rust Lanczos3 fallback)
     Upscale {
@@ -626,6 +629,7 @@ fn system_prompt(skills_index: &str) -> String {
          - Prefer `edit_file` for surgical changes; verify with tests or commands when possible.\n\
          - If a tool is denied, do not retry it; explain or ask the user.\n\
          - Use `search_tools` to discover specialized tools (audio, image, video, 3D, OCR, MCP extensions).\n\
+         - Prefer Dex's built-in tools (e.g. `image_generate`, `audio_*`, `mesh_*`, `docs_*`) over MCP extension tools; those only work while their app (Unity Editor, ComfyUI, Blender) is running.\n\
          - Track long multi-step work with `manage_tasks`; delegate focused research with `spawn_subagent`.\n\
          {skills_index}",
         os = std::env::consts::OS,
@@ -878,9 +882,10 @@ async fn main() -> Result<()> {
                     steps,
                     backend,
                     workflow,
+                    out,
                 } => {
                     media_cli::imagine(
-                        &prompt, negative, width, height, steps, &backend, workflow, event_bus,
+                        &prompt, negative, width, height, steps, &backend, workflow, out, event_bus,
                     )
                     .await?;
                 }

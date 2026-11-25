@@ -18,6 +18,7 @@ pub async fn imagine(
     steps: u32,
     backend: &str,
     workflow: Option<String>,
+    out: Option<String>,
     event_bus: EventBus,
 ) -> Result<()> {
     let parsed_backend = ImageBackend::from_str_loose(backend);
@@ -35,7 +36,7 @@ pub async fn imagine(
         backend: parsed_backend,
         workflow,
         model: None,
-        output_path: None,
+        output_path: out.map(std::path::PathBuf::from),
     };
 
     let res = generate_image(req, Some(supervisor), Some(&event_bus))

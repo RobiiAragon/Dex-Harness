@@ -39,5 +39,5 @@ pub use subagent::{SpawnSubagentArgs, SpawnSubagentTool};
 pub use task::{ManageTasksArgs, ManageTasksTool, TaskAction, TaskBoard, TaskItem, TaskStatus};
 pub use tool::{
     DeferredToolInfo, SearchToolsArgs, SearchToolsTool, Tool, ToolCall, ToolDefinition,
-    ToolRegistry, ToolResult, ToolVisibility, WeakToolRegistry,
+    ToolRegistry, ToolResult, ToolVisibility, WeakToolRegistry, MCP_EXTENSION_TAG,
 };

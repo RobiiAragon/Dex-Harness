@@ -275,6 +275,7 @@ pub async fn connect_mcp_extension(
     let mut base_tags = manifest.tags.clone();
     base_tags.push(manifest.id.clone());
     base_tags.push(manifest.name.to_lowercase());
+    base_tags.push(harness_core::MCP_EXTENSION_TAG.to_string());
 
     for info in tool_infos {
         let tool_name = info.name.clone();
