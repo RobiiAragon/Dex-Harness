@@ -1106,6 +1106,17 @@
       });
     }
 
+    if (lower.includes('dex-audiogen') || (lower.includes('backendnotinstalled') && (lower.includes('(music)') || lower.includes('(sfx)')))) {
+      return showGlobalToast({
+        title: 'Music & SFX Engine Not Installed',
+        message: msg,
+        variant: 'warn',
+        actions: [
+          { label: 'Install Music & SFX Gen (1-click)', icon: 'download', primary: true, onClick: (tid) => installRuntimeInline('audiogen', tid) },
+        ],
+      });
+    }
+
     if (lower.includes('mlx-audio') || lower.includes('mlx-whisper') || lower.includes('parakeet') || lower.includes('sttunavailable') || (lower.includes('backendnotinstalled') && (lower.includes('tts') || lower.includes('stt') || view === 'view-audio'))) {
       return showGlobalToast({
         title: 'Voice Engine Not Installed',
@@ -1952,6 +1963,7 @@
         'mlx-audio': 'Install mlx-audio (1-click)',
         'parakeet-mlx': 'Install Parakeet (1-click)',
         'faster-whisper': 'Install Faster-Whisper',
+        audiogen: 'Install Music & SFX Gen (1-click)',
       };
       const btnLabel = btnLabelMap[rt.id] || `Install ${rt.id} (1-click)`;
       const statusBadge = rt.available

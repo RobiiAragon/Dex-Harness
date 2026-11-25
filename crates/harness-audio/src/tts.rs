@@ -74,7 +74,7 @@ pub async fn synthesize_speech(
 pub async fn synthesize_speech_with_options(
     text: &str,
     mut opts: TtsOptions,
-    supervisor: Option<Arc<ExtensionSupervisor>>,
+    _supervisor: Option<Arc<ExtensionSupervisor>>,
     event_bus: Option<&EventBus>,
 ) -> Result<TtsResult, AudioError> {
     let trimmed = text.trim();
@@ -290,16 +290,8 @@ pub async fn synthesize_speech_with_options(
         }
     }
 
-    // 2. Wake soundbox-mcp if installed & enabled in ExtensionSupervisor
-    if let Some(ref sup) = supervisor {
-        let reg = sup.load_registry().await;
-        if reg.get("soundbox-mcp").is_some_and(|m| m.enabled) {
-            let _ = sup.start_extension("soundbox-mcp").await;
-            sup.touch_last_used("soundbox-mcp").await;
-        }
-    }
-
-    // 3. Try configured HTTP TTS sidecar (`sidecar_url`, `DEX_TTS_URL`, or local soundbox endpoint)
+    // 2. Try configured HTTP TTS sidecar (`sidecar_url`, `DEX_TTS_URL`, or a known local TTS port).
+    // Port 8189 is reserved for the music/SFX sidecar (`dex-audiogen`) and is never probed for TTS.
     let http_endpoint = match effective_sidecar {
         Some(url) => Some(url),
         None => resolve_tts_http_endpoint().await,
@@ -327,7 +319,7 @@ pub async fn synthesize_speech_with_options(
         }
     }
 
-    // 4. Native macOS fallback (`say` + `afconvert`)
+    // 3. Native macOS fallback (`say` + `afconvert`)
     #[cfg(target_os = "macos")]
     {
         let mac_voice = resolve_macos_voice(opts.voice.as_deref(), effective_lang.as_deref());
@@ -619,7 +611,6 @@ async fn resolve_tts_http_endpoint() -> Option<String> {
         .unwrap_or_else(|_| reqwest::Client::new());
 
     for base in [
-        "http://127.0.0.1:8189",
         "http://127.0.0.1:8880",
         "http://127.0.0.1:8192",
         "http://127.0.0.1:8193",

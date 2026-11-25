@@ -8,7 +8,7 @@ pub mod voices;
 
 pub use error::AudioError;
 pub use generator::{
-    generate_music, generate_sfx, GeneratedAudio, DEFAULT_MUSIC_DIR, DEFAULT_SFX_DIR,
+    audiogen_sidecar_manifest, generate_music, generate_sfx, GeneratedAudio, DEFAULT_MUSIC_DIR, DEFAULT_SFX_DIR,
 };
 pub use recorder::{
     compute_rms_db, downmix_and_resample_to_16k_mono, preprocess_speech_pcm16,

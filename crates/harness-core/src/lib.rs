@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod audiogen;
 pub mod compaction;
 pub mod cookbook;
 pub mod error;
@@ -14,6 +15,11 @@ pub mod task;
 pub mod tool;
 
 pub use agent::{Agent, AgentStep, ReActAgent, StepObserver};
+pub use audiogen::{
+    audiogen_default_base_url, audiogen_launch_args, audiogen_server_script_path,
+    detect_audiogen_python, ensure_audiogen_server_script, managed_venv_python,
+    AUDIOGEN_PIP_PACKAGES, DEFAULT_MUSICGEN_MODEL, DEX_AUDIOGEN_PORT, DEX_AUDIOGEN_SIDECAR_ID,
+};
 pub use compaction::{ContextCompactor, ToolOutputCompactor};
 pub use cookbook::{parse_macos_vm_stat, HardwareProfile, MemorySnapshot, ModelRecommendation};
 pub use error::{CoreError, ProviderError, ToolError};

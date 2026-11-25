@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 use anyhow::{Context, Result};
 use harness_audio::{
-    record_fixed_duration, synthesize_speech_with_options, AutoSttEngine, SttOptions, TtsOptions,
+    generate_music, generate_sfx, record_fixed_duration, GeneratedAudio, synthesize_speech_with_options, AutoSttEngine, SttOptions, TtsOptions,
     DEFAULT_RECORDINGS_DIR,
 };
 use harness_core::EventBus;
@@ -95,5 +95,60 @@ pub async fn speak_text(
         result.backend, dur
     );
     println!("   Saved to: {}", result.path.display());
+    Ok(())
+}
+
+fn print_generated(label: &str, result: &GeneratedAudio) {
+    let dur = result
+        .duration_secs
+        .map(|d| format!("{d:.2}s"))
+        .unwrap_or_else(|| "unknown".to_string());
+    println!("{label} generated (backend: {}, duration: {dur})", result.backend);
+    println!("   Saved to: {}", result.path.display());
+}
+
+pub async fn generate_music_clip(
+    prompt: &str,
+    lyrics: Option<&str>,
+    duration: f64,
+    out: Option<&str>,
+    event_bus: EventBus,
+) -> Result<()> {
+    println!("Generating {duration:.0}s of music locally (first run downloads MusicGen weights)...");
+    let supervisor = Arc::new(ExtensionSupervisor::new(event_bus.clone()));
+    let result = generate_music(
+        prompt,
+        lyrics,
+        duration,
+        out.map(Path::new),
+        Some(Arc::clone(&supervisor)),
+        Some(&event_bus),
+    )
+    .await;
+    let _ = supervisor.stop_extension(harness_core::DEX_AUDIOGEN_SIDECAR_ID).await;
+    let result = result.context("Music generation failed")?;
+    print_generated("Music", &result);
+    Ok(())
+}
+
+pub async fn generate_sfx_clip(
+    prompt: &str,
+    duration: f64,
+    out: Option<&str>,
+    event_bus: EventBus,
+) -> Result<()> {
+    println!("Generating a {duration:.1}s sound effect locally...");
+    let supervisor = Arc::new(ExtensionSupervisor::new(event_bus.clone()));
+    let result = generate_sfx(
+        prompt,
+        duration,
+        out.map(Path::new),
+        Some(Arc::clone(&supervisor)),
+        Some(&event_bus),
+    )
+    .await;
+    let _ = supervisor.stop_extension(harness_core::DEX_AUDIOGEN_SIDECAR_ID).await;
+    let result = result.context("SFX generation failed")?;
+    print_generated("SFX", &result);
     Ok(())
 }

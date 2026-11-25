@@ -26,6 +26,7 @@ pub enum RuntimeKind {
     MlxAudio,
     ParakeetMlx,
     FasterWhisper,
+    AudioGen,
 }
 
 impl RuntimeKind {
@@ -38,6 +39,7 @@ impl RuntimeKind {
             Self::MlxAudio => "mlx-audio",
             Self::ParakeetMlx => "parakeet-mlx",
             Self::FasterWhisper => "faster-whisper",
+            Self::AudioGen => "audiogen",
         }
     }
 
@@ -50,6 +52,7 @@ impl RuntimeKind {
             Self::MlxAudio => "Voice Studio Engine (mlx-audio)",
             Self::ParakeetMlx => "Parakeet TDT v3 ASR (MLX)",
             Self::FasterWhisper => "Faster-Whisper (CPU Fallback)",
+            Self::AudioGen => "Music & SFX Gen (MusicGen + AudioLDM)",
         }
     }
 
@@ -62,6 +65,9 @@ impl RuntimeKind {
             "mlx-audio" | "mlx_audio" | "audio" | "tts" | "voice-engine" => Some(Self::MlxAudio),
             "parakeet-mlx" | "parakeet_mlx" | "parakeet" => Some(Self::ParakeetMlx),
             "faster-whisper" | "faster_whisper" => Some(Self::FasterWhisper),
+            "audiogen" | "audio-gen" | "musicgen" | "music" | "sfx" | "dex-audiogen" => {
+                Some(Self::AudioGen)
+            }
             _ => None,
         }
     }
@@ -88,6 +94,9 @@ impl RuntimeKind {
             }
             Self::FasterWhisper => {
                 "Click 'Install Faster-Whisper (1-click)' for cross-platform CPU/CTranslate2 Whisper transcription."
+            }
+            Self::AudioGen => {
+                "Click 'Install Music & SFX Gen (1-click)' (or run `dex models install-runtime audiogen`) to install torch + transformers MusicGen + diffusers AudioLDM into ~/.dex/runtimes/mlx-venv."
             }
         }
     }
@@ -270,6 +279,7 @@ pub fn detect_runtimes() -> Vec<RuntimeStatus> {
     let parakeet_bin = harness_core::find_executable_in_enriched_path("parakeet-mlx")
         .or_else(|| check_mlx_venv_python_module("parakeet_mlx"));
     let faster_whisper_bin = check_mlx_venv_python_module("faster_whisper");
+    let audiogen_bin = harness_core::detect_audiogen_python();
 
     vec![
         RuntimeStatus {
@@ -335,6 +345,15 @@ pub fn detect_runtimes() -> Vec<RuntimeStatus> {
             install_hint: RuntimeKind::FasterWhisper.install_hint().to_string(),
             managed_dir: mlx_venv_dir().to_string_lossy().to_string(),
         },
+        RuntimeStatus {
+            id: RuntimeKind::AudioGen.as_id().to_string(),
+            name: RuntimeKind::AudioGen.display_name().to_string(),
+            kind: RuntimeKind::AudioGen,
+            available: audiogen_bin.is_some(),
+            binary_path: audiogen_bin.map(|p| p.to_string_lossy().to_string()),
+            install_hint: RuntimeKind::AudioGen.install_hint().to_string(),
+            managed_dir: mlx_venv_dir().to_string_lossy().to_string(),
+        },
     ]
 }
 
@@ -352,6 +371,7 @@ pub fn detect_runtime_binary(kind: RuntimeKind) -> Option<PathBuf> {
         RuntimeKind::ParakeetMlx => harness_core::find_executable_in_enriched_path("parakeet-mlx")
             .or_else(|| check_mlx_venv_python_module("parakeet_mlx")),
         RuntimeKind::FasterWhisper => check_mlx_venv_python_module("faster_whisper"),
+        RuntimeKind::AudioGen => harness_core::detect_audiogen_python(),
     }
 }
 
@@ -591,16 +611,27 @@ pub async fn install_runtime(
         | RuntimeKind::Mflux
         | RuntimeKind::MlxAudio
         | RuntimeKind::ParakeetMlx
-        | RuntimeKind::FasterWhisper => {
-            let (pkg_name, expected_bin) = match kind {
-                RuntimeKind::Mlx => ("mlx-lm", "mlx_lm.server"),
-                RuntimeKind::MlxWhisper => ("mlx-whisper", "mlx_whisper"),
-                RuntimeKind::Mflux => ("mflux", "mflux-generate"),
-                RuntimeKind::MlxAudio => ("mlx-audio", "mlx_audio"),
-                RuntimeKind::ParakeetMlx => ("parakeet-mlx", "parakeet-mlx"),
-                RuntimeKind::FasterWhisper => ("faster-whisper", "faster_whisper"),
-                RuntimeKind::LlamaCpp => unreachable!(),
+        | RuntimeKind::FasterWhisper
+        | RuntimeKind::AudioGen => {
+            let (packages, expected_bin): (Vec<&str>, &str) = match kind {
+                RuntimeKind::Mlx => (vec!["mlx-lm"], "mlx_lm.server"),
+                RuntimeKind::MlxWhisper => (vec!["mlx-whisper"], "mlx_whisper"),
+                RuntimeKind::Mflux => (vec!["mflux"], "mflux-generate"),
+                RuntimeKind::MlxAudio => (vec!["mlx-audio"], "mlx_audio"),
+                RuntimeKind::ParakeetMlx => (vec!["parakeet-mlx"], "parakeet-mlx"),
+                RuntimeKind::FasterWhisper => (vec!["faster-whisper"], "faster_whisper"),
+                RuntimeKind::AudioGen => (
+                    harness_core::AUDIOGEN_PIP_PACKAGES.to_vec(),
+                    "python (torch + transformers MusicGen)",
+                ),
+                RuntimeKind::LlamaCpp => {
+                    return Err(ModelError::RuntimeFailed {
+                        runtime: rt_id.to_string(),
+                        message: "llama.cpp is not a Python venv runtime".to_string(),
+                    });
+                }
             };
+            let pkg_name = packages.join(" ");
             let venv_dir = mlx_venv_dir();
             let venv_str = venv_dir.to_string_lossy().to_string();
             let venv_python = venv_dir.join("bin").join("python");
@@ -630,14 +661,9 @@ pub async fn install_runtime(
                     run_streaming_command(&uv, &["venv", &venv_str], rt_id, "install", event_bus).await?;
                 }
                 let venv_py_str = venv_python.to_string_lossy().to_string();
-                run_streaming_command(
-                    &uv,
-                    &["pip", "install", "--python", &venv_py_str, pkg_name],
-                    rt_id,
-                    "install",
-                    event_bus,
-                )
-                .await?;
+                let mut uv_args = vec!["pip", "install", "--python", venv_py_str.as_str()];
+                uv_args.extend(packages.iter().copied());
+                run_streaming_command(&uv, &uv_args, rt_id, "install", event_bus).await?;
             } else {
                 if !venv_exists {
                     let python_bin = find_binary_in_candidates(
@@ -679,14 +705,28 @@ pub async fn install_runtime(
                 }
 
                 let pip_bin = venv_dir.join("bin").join("pip");
-                run_streaming_command(
-                    &pip_bin,
-                    &["install", "--upgrade", "pip", pkg_name],
+                let mut pip_args = vec!["install", "--upgrade", "pip"];
+                pip_args.extend(packages.iter().copied());
+                run_streaming_command(&pip_bin, &pip_args, rt_id, "install", event_bus).await?;
+            }
+
+            if kind == RuntimeKind::AudioGen {
+                let script = harness_core::ensure_audiogen_server_script()
+                    .await
+                    .map_err(|e| ModelError::Io {
+                        path: harness_core::audiogen_server_script_path()
+                            .to_string_lossy()
+                            .to_string(),
+                        source: e,
+                    })?;
+                emit_progress(
+                    event_bus,
                     rt_id,
                     "install",
-                    event_bus,
-                )
-                .await?;
+                    format!("Wrote music/SFX sidecar server to {}", script.display()),
+                    false,
+                    false,
+                );
             }
 
             let status = detect_runtimes()

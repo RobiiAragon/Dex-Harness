@@ -182,12 +182,15 @@ pub struct AudioGenerateMusicArgs {
     /// Optional song lyrics.
     #[serde(default)]
     pub lyrics: Option<String>,
-    /// Target duration in seconds (default: 15.0).
+    /// Target duration in seconds (default: 15.0, max 120).
     #[serde(default = "default_music_duration")]
     pub duration_secs: f64,
+    /// Optional output .wav path (absolute paths are honored; default: `.dex/media/audio/music/`).
+    #[serde(default)]
+    pub output_path: Option<String>,
 }
 
-/// Generates music tracks via a local audio sidecar (`soundbox` / `acestep-cpp`).
+/// Generates instrumental music tracks via Dex's local MusicGen sidecar (or `DEX_AUDIO_GEN_URL`).
 pub struct AudioGenerateMusicTool {
     supervisor: Option<Arc<ExtensionSupervisor>>,
     event_bus: Option<EventBus>,
@@ -209,7 +212,7 @@ impl Tool for AudioGenerateMusicTool {
     }
 
     fn description(&self) -> &str {
-        "Generates an original music clip from a style/genre prompt and optional lyrics using a local audio generation sidecar."
+        "Generates an original instrumental music clip (.wav) from a style/genre/mood/tempo prompt using local Meta MusicGen on Apple Silicon. Lyrics are used only as mood context (not sung)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -228,6 +231,7 @@ impl Tool for AudioGenerateMusicTool {
             &args.prompt,
             args.lyrics.as_deref(),
             args.duration_secs,
+            args.output_path.as_deref().map(std::path::Path::new),
             self.supervisor.clone(),
             self.event_bus.as_ref(),
         )
@@ -238,9 +242,10 @@ impl Tool for AudioGenerateMusicTool {
         })?;
 
         Ok(format!(
-            "Music generated and saved to: {} (duration: {:?}s)",
+            "Music generated and saved to: {} (duration: {}s, backend: {})",
             result.path.display(),
-            result.duration_secs
+            result.duration_secs.map(|d| format!("{d:.1}")).unwrap_or_else(|| "?".to_string()),
+            result.backend
         ))
     }
 }
@@ -254,9 +259,12 @@ fn default_sfx_duration() -> f64 {
 pub struct AudioGenerateSfxArgs {
     /// Sound effect description (e.g. "futuristic laser blast", "rain on window").
     pub prompt: String,
-    /// Target duration in seconds (default: 4.0).
+    /// Target duration in seconds (default: 4.0, max 30).
     #[serde(default = "default_sfx_duration")]
     pub duration_secs: f64,
+    /// Optional output .wav path (absolute paths are honored; default: `.dex/media/audio/sfx/`).
+    #[serde(default)]
+    pub output_path: Option<String>,
 }
 
 /// Generates sound effects (SFX) via a local audio generation sidecar.
@@ -281,7 +289,7 @@ impl Tool for AudioGenerateSfxTool {
     }
 
     fn description(&self) -> &str {
-        "Generates a sound effect (SFX) audio file from a text description and duration via a local audio sidecar."
+        "Generates a sound effect (.wav) from a text description and duration using local AudioLDM on Apple Silicon (with an automatic local fallback model)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -299,6 +307,7 @@ impl Tool for AudioGenerateSfxTool {
         let result = generate_sfx(
             &args.prompt,
             args.duration_secs,
+            args.output_path.as_deref().map(std::path::Path::new),
             self.supervisor.clone(),
             self.event_bus.as_ref(),
         )
@@ -309,9 +318,10 @@ impl Tool for AudioGenerateSfxTool {
         })?;
 
         Ok(format!(
-            "SFX generated and saved to: {} (duration: {:?}s)",
+            "SFX generated and saved to: {} (duration: {}s, backend: {})",
             result.path.display(),
-            result.duration_secs
+            result.duration_secs.map(|d| format!("{d:.1}")).unwrap_or_else(|| "?".to_string()),
+            result.backend
         ))
     }
 }
@@ -355,7 +365,8 @@ pub fn register_audio_tools(
         vec![
             "audio".to_string(),
             "music".to_string(),
-            "soundbox".to_string(),
+            "musicgen".to_string(),
+            "song".to_string(),
             "generate".to_string(),
         ],
     );
@@ -367,7 +378,7 @@ pub fn register_audio_tools(
             "audio".to_string(),
             "sfx".to_string(),
             "sound".to_string(),
-            "soundbox".to_string(),
+            "audioldm".to_string(),
             "effects".to_string(),
         ],
     );

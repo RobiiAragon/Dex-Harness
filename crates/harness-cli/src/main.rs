@@ -130,7 +130,7 @@ enum Commands {
         #[command(subcommand)]
         action: ExtCommands,
     },
-    /// Audio & Voice tools: Record microphone, transcribe speech (STT), and synthesize voice (TTS)
+    /// Audio & Voice tools: record, transcribe (STT), speak (TTS), and generate music / SFX
     Audio {
         #[command(subcommand)]
         action: AudioCommands,
@@ -340,6 +340,31 @@ enum AudioCommands {
         #[arg(short, long)]
         out: Option<String>,
     },
+    /// Generate an instrumental music clip (.wav) locally with MusicGen (auto-starts the sidecar)
+    Music {
+        /// Style / genre / mood / instruments / tempo prompt
+        prompt: String,
+        /// Target duration in seconds (2-120)
+        #[arg(short, long, default_value_t = 15.0)]
+        duration: f64,
+        /// Optional lyrics (MusicGen is instrumental: used as mood context only)
+        #[arg(long)]
+        lyrics: Option<String>,
+        /// Optional output .wav path
+        #[arg(short, long)]
+        out: Option<String>,
+    },
+    /// Generate a sound effect (.wav) locally (AudioLDM, or MusicGen fallback)
+    Sfx {
+        /// Sound effect description (e.g. "glass shattering on a stone floor")
+        prompt: String,
+        /// Target duration in seconds (0.5-30)
+        #[arg(short, long, default_value_t = 4.0)]
+        duration: f64,
+        /// Optional output .wav path
+        #[arg(short, long)]
+        out: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -459,6 +484,13 @@ enum ModelCommands {
     Rm {
         /// Model identifier to remove (e.g. local:my-model, hf:..., or ollama:...)
         model_id: String,
+    },
+    /// List Dex-managed local runtimes (MLX, llama.cpp, Whisper, mflux, mlx-audio, MusicGen) and their status
+    Runtimes,
+    /// 1-click install of a managed runtime into ~/.dex/runtimes (e.g. audiogen, mlx, mflux, mlx-audio)
+    InstallRuntime {
+        /// Runtime ID (mlx, llamacpp, mlx-whisper, mflux, mlx-audio, parakeet-mlx, faster-whisper, audiogen)
+        runtime: String,
     },
 }
 
@@ -696,6 +728,12 @@ async fn main() -> Result<()> {
                 ModelCommands::Rm { model_id } => {
                     models_cli::remove_model(&model_id).await?;
                 }
+                ModelCommands::Runtimes => {
+                    models_cli::list_runtimes();
+                }
+                ModelCommands::InstallRuntime { runtime } => {
+                    models_cli::install_runtime_cli(&runtime, event_bus).await?;
+                }
             }
             return Ok(());
         }
@@ -789,6 +827,29 @@ async fn main() -> Result<()> {
                         event_bus,
                     )
                     .await?;
+                }
+                AudioCommands::Music {
+                    prompt,
+                    duration,
+                    lyrics,
+                    out,
+                } => {
+                    audio_cli::generate_music_clip(
+                        &prompt,
+                        lyrics.as_deref(),
+                        duration,
+                        out.as_deref(),
+                        event_bus,
+                    )
+                    .await?;
+                }
+                AudioCommands::Sfx {
+                    prompt,
+                    duration,
+                    out,
+                } => {
+                    audio_cli::generate_sfx_clip(&prompt, duration, out.as_deref(), event_bus)
+                        .await?;
                 }
             }
             return Ok(());

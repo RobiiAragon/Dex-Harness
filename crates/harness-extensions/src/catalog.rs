@@ -3,31 +3,42 @@ use crate::manifest::{
     ExtensionCategory, ExtensionKind, ExtensionManifest, DEFAULT_IDLE_TIMEOUT_SECS,
 };
 
+/// Dex-managed local music & SFX sidecar (Meta MusicGen via transformers + AudioLDM via diffusers),
+/// executed with the managed `~/.dex/runtimes/mlx-venv` interpreter. The server script is written by the
+/// `audiogen` runtime installer (and on demand by `harness-audio` before launch).
+fn audiogen_recipe() -> ExtensionManifest {
+    let port = harness_core::DEX_AUDIOGEN_PORT;
+    let script = harness_core::audiogen_server_script_path();
+    ExtensionManifest {
+        id: harness_core::DEX_AUDIOGEN_SIDECAR_ID.to_string(),
+        name: "Dex Music & SFX Gen (MusicGen)".to_string(),
+        category: ExtensionCategory::Audio,
+        description: "Generación local de música instrumental (Meta MusicGen) y efectos de sonido (AudioLDM) en GPU Apple Silicon (MPS), servida en http://127.0.0.1:8189.".to_string(),
+        kind: ExtensionKind::LocalSidecar {
+            command: harness_core::managed_venv_python().to_string_lossy().to_string(),
+            args: harness_core::audiogen_launch_args(&script, port),
+            port,
+            healthcheck_url: format!("http://127.0.0.1:{port}/health"),
+            env: HashMap::from([("PYTHONUNBUFFERED".to_string(), "1".to_string())]),
+        },
+        estimated_ram_mb: 4096,
+        idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
+        install_hint: "Instala el runtime 'Music & SFX Gen' con 1 clic (Models Hub › Runtimes) o `dex models install-runtime audiogen` (torch + transformers MusicGen + diffusers AudioLDM en ~/.dex/runtimes/mlx-venv). Modelos: `DEX_MUSICGEN_MODEL` (por defecto facebook/musicgen-small), `DEX_SFX_MODEL`.".to_string(),
+        enabled: false,
+        tags: vec![
+            "audio".to_string(),
+            "music".to_string(),
+            "sfx".to_string(),
+            "musicgen".to_string(),
+            "audioldm".to_string(),
+        ],
+    }
+}
+
 /// Returns the built-in curated catalog of MCP servers and local creative/engineering sidecars.
 pub fn builtin_catalog() -> Vec<ExtensionManifest> {
     vec![
-        ExtensionManifest {
-            id: "soundbox-mcp".to_string(),
-            name: "Soundbox MCP".to_string(),
-            category: ExtensionCategory::Audio,
-            description: "Generación de música, efectos de sonido (SFX), síntesis de voz (TTS) y clonación de voz.".to_string(),
-            kind: ExtensionKind::McpStdio {
-                command: "uvx".to_string(),
-                args: vec!["soundbox-mcp".to_string()],
-                env: HashMap::new(),
-            },
-            estimated_ram_mb: 2560,
-            idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
-            install_hint: "Experimental: no hay un paquete público `soundbox-mcp`. Apunta `DEX_AUDIO_GEN_URL` a tu servidor local de música/SFX (p. ej. ACE-Step) o registra tu propio MCP con `dex ext add-mcp`.".to_string(),
-            enabled: false,
-            tags: vec![
-                "audio".to_string(),
-                "music".to_string(),
-                "sfx".to_string(),
-                "tts".to_string(),
-                "voice".to_string(),
-            ],
-        },
+        audiogen_recipe(),
         ExtensionManifest {
             id: "docling-mcp".to_string(),
             name: "Docling MCP".to_string(),
@@ -267,7 +278,7 @@ mod tests {
         assert_eq!(catalog.len(), 10);
 
         let expected_ids = [
-            "soundbox-mcp",
+            "dex-audiogen",
             "docling-mcp",
             "mlx-gen",
             "comfyui-mcp",
@@ -289,6 +300,24 @@ mod tests {
 
         for id in expected_ids {
             assert!(find_catalog_recipe(id).is_some(), "Missing expected recipe: {id}");
+        }
+        assert!(find_catalog_recipe("soundbox-mcp").is_none());
+    }
+
+    #[test]
+    fn test_audiogen_recipe_uses_managed_venv_and_embedded_server() {
+        let recipe = find_catalog_recipe("dex-audiogen");
+        let Some(recipe) = recipe else {
+            panic!("dex-audiogen recipe missing");
+        };
+        match recipe.kind {
+            ExtensionKind::LocalSidecar { command, args, port, healthcheck_url, .. } => {
+                assert!(command.ends_with("runtimes/mlx-venv/bin/python"));
+                assert!(args[0].ends_with("runtimes/audiogen/dex_audiogen_server.py"));
+                assert_eq!(port, 8189);
+                assert_eq!(healthcheck_url, "http://127.0.0.1:8189/health");
+            }
+            other => panic!("unexpected kind: {other:?}"),
         }
     }
 }

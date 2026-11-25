@@ -220,7 +220,7 @@ pub trait SttBackend: Send + Sync {
 }
 
 /// HTTP Whisper backend compatible with OpenAI `/v1/audio/transcriptions`,
-/// `whisper-server`, `mlx-audio`, and `soundbox`.
+/// `whisper-server`, and `mlx-audio`.
 pub struct HttpWhisperBackend {
     client: reqwest::Client,
     base_url: String,
@@ -1011,14 +1011,14 @@ impl AutoSttEngine {
             return Ok(Box::new(CliWhisperBackend::whisper_cpp()));
         }
 
-        // 3. Probe common local HTTP whisper / mlx-audio / soundbox ports quickly
+        // 3. Probe common local HTTP whisper / mlx-audio ports quickly
+        //    (8189 belongs to the `dex-audiogen` music sidecar and is intentionally excluded)
         let probe_client = reqwest::Client::builder()
             .timeout(Duration::from_millis(350))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 
         for candidate in [
-            "http://127.0.0.1:8189",
             "http://127.0.0.1:8000",
         ] {
             if probe_client.get(candidate).send().await.is_ok() {

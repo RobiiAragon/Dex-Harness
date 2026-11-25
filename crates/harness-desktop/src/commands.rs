@@ -368,13 +368,15 @@ async fn build_host_capabilities_manifest(workspace_dir: &Path) -> String {
         .await
         .unwrap_or_else(|_| HardwareProfile::detect());
 
-    let (blender_status, has_mlx_gen, has_comfy, has_3d_sidecar, has_soundbox) = tokio::join!(
+    let (blender_status, has_mlx_gen, has_comfy, has_3d_sidecar, has_audiogen_sidecar) = tokio::join!(
         check_blender_impl(),
         probe_local_port(8190),
         probe_local_port(8188),
         probe_local_port(8195),
-        probe_local_port(8189),
+        probe_local_port(harness_core::DEX_AUDIOGEN_PORT),
     );
+    // MusicGen runtime installed in the managed venv => sidecar auto-launches on first use.
+    let has_audiogen_runtime = harness_core::detect_audiogen_python().is_some();
 
     let has_mflux = harness_core::find_executable_in_enriched_path("mflux-generate").is_some();
     let has_http_img = std::env::var("DEX_IMAGE_URL")
@@ -435,10 +437,14 @@ async fn build_host_capabilities_manifest(workspace_dir: &Path) -> String {
         "NOT INSTALLED (`trellis-3d` / Hunyuan3D sidecar in Extensions)".to_string()
     };
 
-    let music_line = if has_soundbox || has_audio_env {
-        "READY (`soundbox-mcp`)".to_string()
+    let music_line = if has_audio_env {
+        "READY (external music/SFX server via `DEX_AUDIO_GEN_URL`)".to_string()
+    } else if has_audiogen_sidecar {
+        "READY (`dex-audiogen` MusicGen/AudioLDM sidecar running on :8189; instrumental only, lyrics are not sung)".to_string()
+    } else if has_audiogen_runtime {
+        "READY (`dex-audiogen` MusicGen/AudioLDM; sidecar auto-starts on first call, first run downloads weights; instrumental only, lyrics are not sung)".to_string()
     } else {
-        "NOT INSTALLED (`soundbox-mcp` in Extensions)".to_string()
+        "NOT INSTALLED (install 'Music & SFX Gen (MusicGen)' with 1 click in Models Hub -> Runtimes, runtime id `audiogen`)".to_string()
     };
 
     let ocr_line = if cfg!(target_os = "macos") {

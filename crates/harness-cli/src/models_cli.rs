@@ -2,8 +2,9 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{bail, Context, Result};
 use harness_core::cookbook::HardwareProfile;
+use harness_core::{DexEvent, EventBus};
 use harness_models::{
-    detect_local_servers, import_local_model, scan_model_dirs, HfClient, MemoryFit,
+    detect_local_servers, detect_runtimes, install_runtime, RuntimeKind, import_local_model, scan_model_dirs, HfClient, MemoryFit,
     ModelDirsConfig, ModelDownloader, ModelMetadata, ModelRegistry, ModelSource, OllamaBridge,
 };
 use tokio_util::sync::CancellationToken;
@@ -356,4 +357,51 @@ fn truncate_str(s: &str, max_len: usize) -> String {
     } else {
         s.to_string()
     }
+}
+
+pub fn list_runtimes() {
+    println!("Dex-managed local runtimes:");
+    for rt in detect_runtimes() {
+        let mark = if rt.available { "Ready        " } else { "Not installed" };
+        println!("  [{mark}] {:<15} {}", rt.id, rt.name);
+        match (&rt.binary_path, rt.available) {
+            (Some(bin), true) => println!("                    {bin}"),
+            _ => println!("                    {}", rt.install_hint),
+        }
+    }
+}
+
+pub async fn install_runtime_cli(runtime: &str, event_bus: EventBus) -> Result<()> {
+    let Some(kind) = RuntimeKind::from_str_loose(runtime) else {
+        bail!(
+            "Unknown runtime '{runtime}'. Valid: mlx, llamacpp, mlx-whisper, mflux, mlx-audio, parakeet-mlx, faster-whisper, audiogen"
+        );
+    };
+    println!("Installing {} ...", kind.display_name());
+    let mut rx = event_bus.subscribe();
+    let mut printer = tokio::spawn(async move {
+        while let Ok(ev) = rx.recv().await {
+            if let DexEvent::RuntimeProgress { message, done, .. } = ev {
+                println!("  {message}");
+                if done {
+                    break;
+                }
+            }
+        }
+    });
+    let result = install_runtime(kind, Some(&event_bus)).await;
+    // Let the printer flush the final progress line, then stop it.
+    if tokio::time::timeout(std::time::Duration::from_millis(300), &mut printer)
+        .await
+        .is_err()
+    {
+        printer.abort();
+    }
+    let status = result.with_context(|| format!("Installing runtime '{}' failed", kind.as_id()))?;
+    println!(
+        "{} ready: {}",
+        status.name,
+        status.binary_path.as_deref().unwrap_or(&status.managed_dir)
+    );
+    Ok(())
 }

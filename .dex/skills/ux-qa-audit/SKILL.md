@@ -43,7 +43,7 @@ Every feature, phase, and release targeting `Dex.app` or any `harness-*` crate *
 
 ## 5. Honest Capability Routing & Pre-Flight Checks
 
-- The Agent system prompt must carry a live **Host & Capabilities Manifest**: exact host chip (`sysctl -n machdep.cpu.brand_string`), macOS version (`sw_vers`), Unified Memory, active workspace, and explicit `READY` vs. `NOT INSTALLED` status for every multimodal engine (Blender, Apple Vision OCR, macOS TTS, Image Gen `mflux`/ComfyUI, Voice STT `mlx-whisper`/Apple Speech, 3D Gen TRELLIS/Hunyuan3D, Music/SFX Soundbox).
+- The Agent system prompt must carry a live **Host & Capabilities Manifest**: exact host chip (`sysctl -n machdep.cpu.brand_string`), macOS version (`sw_vers`), Unified Memory, active workspace, and explicit `READY` vs. `NOT INSTALLED` status for every multimodal engine (Blender, Apple Vision OCR, macOS TTS, Image Gen `mflux`/ComfyUI, Voice STT `mlx-whisper`/Apple Speech, 3D Gen TRELLIS/Hunyuan3D, Music/SFX `dex-audiogen` MusicGen/AudioLDM).
 - Creative tools (`image_generate`, `video_generate`, `mesh_generate_3d`, `audio_generate_music`) must fail fast with an actionable `BackendNotInstalled` error (never loop-retry) naming the missing backend and 1-click install action, while guiding the agent to offer available installed alternatives (e.g., procedural 3D via Blender + `mesh_inspect`).
 
 ---
