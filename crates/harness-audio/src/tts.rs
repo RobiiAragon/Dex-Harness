@@ -15,6 +15,61 @@ use crate::voices::{
 
 pub const DEFAULT_TTS_DIR: &str = ".dex/media/audio/tts";
 const TTS_TIMEOUT_SECS: u64 = 180;
+/// Budget when the model's weights still have to be fetched from Hugging Face on first use.
+const TTS_DOWNLOAD_TIMEOUT_SECS: u64 = 1800;
+
+/// Root of the Hugging Face hub cache (`HF_HUB_CACHE`, `HF_HOME/hub`, or `~/.cache/huggingface/hub`).
+fn hf_hub_cache_root() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("HF_HUB_CACHE").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(p));
+    }
+    if let Some(p) = std::env::var_os("HF_HOME").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(p).join("hub"));
+    }
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache/huggingface/hub"))
+}
+
+/// Whether a Hugging Face repo id (`org/name`) is missing from the local cache or only
+/// partially downloaded (`.incomplete` blobs, or a snapshot without any weight file).
+/// Local paths and non-repo ids return `false`.
+async fn hf_model_needs_download(cache_root: &Path, model: &str) -> bool {
+    let model = model.trim();
+    if model.is_empty()
+        || model.starts_with('/')
+        || model.starts_with('.')
+        || model.matches('/').count() != 1
+        || tokio::fs::try_exists(model).await.unwrap_or(false)
+    {
+        return false;
+    }
+    let repo_dir = cache_root.join(format!("models--{}", model.replace('/', "--")));
+    if !tokio::fs::try_exists(&repo_dir).await.unwrap_or(false) {
+        return true;
+    }
+    if let Ok(mut blobs) = tokio::fs::read_dir(repo_dir.join("blobs")).await {
+        while let Ok(Some(entry)) = blobs.next_entry().await {
+            if entry.file_name().to_string_lossy().ends_with(".incomplete") {
+                return true;
+            }
+        }
+    }
+    let Ok(mut snapshots) = tokio::fs::read_dir(repo_dir.join("snapshots")).await else {
+        return true;
+    };
+    while let Ok(Some(snap)) = snapshots.next_entry().await {
+        if let Ok(mut files) = tokio::fs::read_dir(snap.path()).await {
+            while let Ok(Some(f)) = files.next_entry().await {
+                let name = f.file_name().to_string_lossy().to_string();
+                let is_weight = name.ends_with(".safetensors") || name.ends_with(".bin");
+                // `metadata` follows the snapshot symlink, so a dangling link does not count.
+                if is_weight && tokio::fs::metadata(f.path()).await.is_ok() {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TtsResult {
@@ -113,13 +168,11 @@ pub async fn synthesize_speech_with_options(
             .as_deref()
             .or(Some(settings.language.as_str())),
     );
-    let effective_engine = opts
+    let explicit_engine = opts
         .engine
         .as_deref()
         .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(settings.tts_engine.as_str())
-        .to_lowercase();
+        .filter(|s| !s.is_empty());
     let effective_model = opts
         .model
         .as_deref()
@@ -131,6 +184,13 @@ pub async fn synthesize_speech_with_options(
             settings.tts_model.as_str()
         })
         .to_string();
+    // The native macOS voice is a "model" in the picker: choosing it must not be routed through
+    // the saved neural engine (which would try to load `apple/macos-say` as weights).
+    let effective_engine = match explicit_engine {
+        Some(engine) => engine.to_lowercase(),
+        None if effective_model.eq_ignore_ascii_case("apple/macos-say") => "macos-say".to_string(),
+        None => settings.tts_engine.to_lowercase(),
+    };
     let effective_sidecar = opts
         .sidecar_url
         .as_deref()
@@ -483,11 +543,34 @@ async fn synthesize_via_mlx_audio(
         "Running mlx-audio local neural TTS"
     );
 
-    let output = tokio::time::timeout(Duration::from_secs(TTS_TIMEOUT_SECS), cmd.output())
+    let needs_download = match hf_hub_cache_root() {
+        Some(root) => hf_model_needs_download(&root, model).await,
+        None => false,
+    };
+    let timeout_secs = if needs_download {
+        info!(model = %model, "TTS weights not fully cached; first run downloads them from Hugging Face");
+        TTS_DOWNLOAD_TIMEOUT_SECS
+    } else {
+        TTS_TIMEOUT_SECS
+    };
+
+    let output = tokio::time::timeout(Duration::from_secs(timeout_secs), cmd.output())
         .await
-        .map_err(|_| AudioError::Timeout {
-            operation: "mlx-audio TTS synthesis".to_string(),
-            timeout_secs: TTS_TIMEOUT_SECS,
+        .map_err(|_| {
+            if needs_download {
+                AudioError::TtsFailed {
+                    reason: format!(
+                        "Downloading '{model}' from Hugging Face did not finish within {timeout_secs}s. \
+                         Check your connection and retry (partial downloads resume), or pick an \
+                         already-downloaded voice model."
+                    ),
+                }
+            } else {
+                AudioError::Timeout {
+                    operation: "mlx-audio TTS synthesis".to_string(),
+                    timeout_secs,
+                }
+            }
         })?
         .map_err(|e| AudioError::Subprocess {
             command: bin.to_string_lossy().to_string(),
@@ -863,5 +946,32 @@ mod tests {
         assert!(res.duration_secs.unwrap_or(0.0) > 0.1);
 
         let _ = tokio::fs::remove_file(&out_path).await;
+    }
+
+    #[tokio::test]
+    async fn hf_snapshot_detection_flags_missing_and_partial_weights() {
+        let root = std::env::temp_dir().join(format!("dex_hf_cache_test_{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&root).await;
+        let repo = root.join("models--org--voice");
+        let snap = repo.join("snapshots/abc");
+        tokio::fs::create_dir_all(&snap).await.unwrap();
+        tokio::fs::create_dir_all(repo.join("blobs")).await.unwrap();
+
+        // Not cached at all, and a snapshot with only config files.
+        assert!(hf_model_needs_download(&root, "org/other").await);
+        tokio::fs::write(snap.join("config.json"), b"{}").await.unwrap();
+        assert!(hf_model_needs_download(&root, "org/voice").await);
+
+        // Weights present but another blob still downloading.
+        tokio::fs::write(snap.join("model.safetensors"), b"w").await.unwrap();
+        tokio::fs::write(repo.join("blobs/x.incomplete"), b"").await.unwrap();
+        assert!(hf_model_needs_download(&root, "org/voice").await);
+
+        tokio::fs::remove_file(repo.join("blobs/x.incomplete")).await.unwrap();
+        assert!(!hf_model_needs_download(&root, "org/voice").await);
+        // Non-repo ids are never treated as downloads.
+        assert!(!hf_model_needs_download(&root, "apple/macos-say/x").await);
+        assert!(!hf_model_needs_download(&root, "").await);
+        let _ = tokio::fs::remove_dir_all(&root).await;
     }
 }

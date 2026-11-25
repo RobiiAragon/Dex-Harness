@@ -376,6 +376,33 @@ pub fn detect_runtime_binary(kind: RuntimeKind) -> Option<PathBuf> {
 }
 
 /// Builds a launch specification for an MLX folder or GGUF file using the detected runtime binary.
+/// Python shim that runs `mlx_lm.server` after registering model-type aliases that the
+/// installed `mlx-lm` does not know yet. Example: text-only Qwen3.5 exports declare
+/// `model_type = "qwen3_5_text"`, which loads fine with the `qwen3_5` implementation but makes
+/// stock `mlx_lm.server` fail with "Model type qwen3_5_text not supported".
+pub const MLX_SERVER_SHIM: &str = "import sys\n\
+import mlx_lm.utils as _u\n\
+for _k, _v in {'qwen3_5_text': 'qwen3_5'}.items():\n    _u.MODEL_REMAPPING.setdefault(_k, _v)\n\
+from mlx_lm.server import main\n\
+sys.argv = ['mlx_lm.server'] + sys.argv[1:]\n\
+main()\n";
+
+/// Returns `(command, leading_args)` used to launch the MLX server. When `binary` lives in a
+/// virtualenv `bin/` next to its `python`, the shim above runs through that interpreter;
+/// otherwise the plain `mlx_lm.server` entry point is used.
+pub fn mlx_server_command(binary: &Path, python_exists: impl Fn(&Path) -> bool) -> (String, Vec<String>) {
+    if let Some(bin_dir) = binary.parent() {
+        let python = bin_dir.join("python");
+        if python_exists(&python) {
+            return (
+                python.to_string_lossy().to_string(),
+                vec!["-c".to_string(), MLX_SERVER_SHIM.to_string()],
+            );
+        }
+    }
+    (binary.to_string_lossy().to_string(), Vec::new())
+}
+
 pub fn build_launch_spec(
     format: &str,
     model_path: &str,
@@ -387,17 +414,19 @@ pub fn build_launch_spec(
     if fmt == "mlx" {
         let port = DEX_MLX_PORT;
         let base_url = format!("http://127.0.0.1:{port}/v1");
+        let (command, mut args) = mlx_server_command(binary_path, |p| p.exists());
+        args.extend([
+            "--model".to_string(),
+            model_path.to_string(),
+            "--host".to_string(),
+            "127.0.0.1".to_string(),
+            "--port".to_string(),
+            port.to_string(),
+        ]);
         return Ok(RuntimeLaunchSpec {
             runtime: RuntimeKind::Mlx,
-            command: bin_str,
-            args: vec![
-                "--model".to_string(),
-                model_path.to_string(),
-                "--host".to_string(),
-                "127.0.0.1".to_string(),
-                "--port".to_string(),
-                port.to_string(),
-            ],
+            command,
+            args,
             port,
             base_url: base_url.clone(),
             healthcheck_url: format!("{base_url}/models"),
@@ -920,5 +949,19 @@ mod tests {
         assert!(gguf_spec.args.contains(&"99".to_string()));
 
         assert!(build_launch_spec("pt", "/tmp/model", Path::new("/bin/true")).is_err());
+    }
+
+    #[test]
+    fn mlx_server_uses_venv_python_shim_when_available() {
+        let bin = Path::new("/v/bin/mlx_lm.server");
+        let (cmd, args) = mlx_server_command(bin, |_| true);
+        assert_eq!(cmd, "/v/bin/python");
+        assert_eq!(args[0], "-c");
+        assert!(args[1].contains("'qwen3_5_text': 'qwen3_5'"));
+        assert!(args[1].contains("from mlx_lm.server import main"));
+
+        let (cmd, args) = mlx_server_command(bin, |_| false);
+        assert_eq!(cmd, "/v/bin/mlx_lm.server");
+        assert!(args.is_empty());
     }
 }

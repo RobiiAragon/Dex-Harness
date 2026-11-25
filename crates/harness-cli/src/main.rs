@@ -255,6 +255,9 @@ enum MediaCommands {
         /// Backend selector: auto, mlx, comfyui
         #[arg(long, default_value = "auto")]
         backend: String,
+        /// Output file path (defaults to .dex/media/images/)
+        #[arg(long)]
+        out: Option<String>,
     },
     /// Fast pure-Rust image resize and format conversion (PNG/JPG/WebP)
     Process {
@@ -885,8 +888,9 @@ async fn main() -> Result<()> {
                     path,
                     scale,
                     backend,
+                    out,
                 } => {
-                    media_cli::upscale(&path, scale, &backend, event_bus).await?;
+                    media_cli::upscale(&path, scale, &backend, out, event_bus).await?;
                 }
                 MediaCommands::Process {
                     path,

@@ -50,7 +50,13 @@ pub async fn imagine(
     Ok(())
 }
 
-pub async fn upscale(path: &str, scale: u32, backend: &str, event_bus: EventBus) -> Result<()> {
+pub async fn upscale(
+    path: &str,
+    scale: u32,
+    backend: &str,
+    out: Option<String>,
+    event_bus: EventBus,
+) -> Result<()> {
     let parsed_backend = ImageBackend::from_str_loose(backend);
     println!("🔍 Upscaling '{path}' by {scale}x (backend: {parsed_backend:?})...");
     let supervisor = Arc::new(ExtensionSupervisor::new(event_bus.clone()));
@@ -69,7 +75,26 @@ pub async fn upscale(path: &str, scale: u32, backend: &str, event_bus: EventBus)
         "✅ Upscaled to {}x{} ({}, {} bytes, backend: {})",
         res.width, res.height, res.format, res.size_bytes, res.backend
     );
-    println!("   Saved to: {}", res.output_path.display());
+    let saved = match out {
+        Some(dest) => {
+            let dest = std::path::PathBuf::from(dest);
+            if let Some(parent) = dest.parent().filter(|p| !p.as_os_str().is_empty()) {
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .with_context(|| format!("Failed to create '{}'", parent.display()))?;
+            }
+            // `rename` fails across volumes; fall back to copy + remove.
+            if tokio::fs::rename(&res.output_path, &dest).await.is_err() {
+                tokio::fs::copy(&res.output_path, &dest)
+                    .await
+                    .with_context(|| format!("Failed to write '{}'", dest.display()))?;
+                let _ = tokio::fs::remove_file(&res.output_path).await;
+            }
+            dest
+        }
+        None => res.output_path.clone(),
+    };
+    println!("   Saved to: {}", saved.display());
     Ok(())
 }
 

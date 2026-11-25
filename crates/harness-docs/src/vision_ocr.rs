@@ -61,9 +61,24 @@ guard let nsImage = NSImage(contentsOfFile: imagePath) else {
 }
 
 var proposedRect = NSRect(origin: .zero, size: nsImage.size)
-guard let cgImage = nsImage.cgImage(forProposedRect: &proposedRect, context: nil, hints: nil) else {
+guard let rawImage = nsImage.cgImage(forProposedRect: &proposedRect, context: nil, hints: nil) else {
     fputs("Failed to convert NSImage to CGImage\n", stderr)
     exit(4)
+}
+
+// Flatten transparency onto white: dark text on a transparent background (PDF exports,
+// screenshots of web pages) is otherwise invisible to Vision.
+var cgImage = rawImage
+let alpha = rawImage.alphaInfo
+if alpha != .none && alpha != .noneSkipFirst && alpha != .noneSkipLast,
+   let ctx = CGContext(data: nil, width: rawImage.width, height: rawImage.height, bitsPerComponent: 8,
+                       bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                       bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) {
+    let rect = CGRect(x: 0, y: 0, width: rawImage.width, height: rawImage.height)
+    ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+    ctx.fill(rect)
+    ctx.draw(rawImage, in: rect)
+    if let flat = ctx.makeImage() { cgImage = flat }
 }
 
 let request = VNRecognizeTextRequest()
@@ -161,7 +176,8 @@ pub async fn run_ocr_on_image(
 #[cfg(target_os = "macos")]
 async fn ensure_vision_binary() -> Result<PathBuf, DocsError> {
     let bin_dir = harness_core::home_dex_dir().join("bin");
-    let bin_path = bin_dir.join("dex-vision-ocr");
+    // Versioned name: bump when the Swift source changes so stale cached builds are rebuilt.
+    let bin_path = bin_dir.join("dex-vision-ocr-v2");
 
     if tokio::fs::try_exists(&bin_path).await.unwrap_or(false) {
         return Ok(bin_path);

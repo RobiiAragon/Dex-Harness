@@ -242,11 +242,12 @@ impl ExtensionSupervisor {
                 ..
             } => {
                 let mut cmd = Command::new(command);
+                harness_core::apply_enriched_path(&mut cmd);
                 cmd.args(args)
                     .envs(env)
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
-                    .stderr(Stdio::null())
+                    .stderr(Stdio::piped())
                     .kill_on_drop(true);
 
                 let mut child = cmd.spawn().map_err(|e| ExtensionError::ProcessSpawn {
@@ -257,13 +258,54 @@ impl ExtensionSupervisor {
 
                 let pid = child.id();
 
-                // Brief startup check: verify process didn't crash immediately and probe healthcheck if configured
-                tokio::time::sleep(Duration::from_millis(80)).await;
-                if let Ok(Some(exit_status)) = child.try_wait() {
+                // Keep draining stderr for the process lifetime (a full pipe would block the
+                // sidecar) and remember the tail so startup failures are actionable.
+                let stderr_tail: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+                if let Some(stderr) = child.stderr.take() {
+                    let tail_ref = Arc::clone(&stderr_tail);
+                    let rt_id = manifest.id.clone();
+                    tokio::spawn(async move {
+                        let mut lines = BufReader::new(stderr).lines();
+                        while let Ok(Some(line)) = lines.next_line().await {
+                            let clean = line.trim().to_string();
+                            if clean.is_empty() {
+                                continue;
+                            }
+                            debug!(sidecar = %rt_id, stderr = %clean, "Sidecar stderr");
+                            let mut guard = tail_ref.lock().await;
+                            if guard.len() >= 12 {
+                                guard.remove(0);
+                            }
+                            guard.push(clean);
+                        }
+                    });
+                }
+
+                // Brief startup check: verify the process didn't crash on launch (missing module,
+                // bad args) before probing the healthcheck.
+                let mut exited = None;
+                for _ in 0..10 {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    if let Ok(Some(status)) = child.try_wait() {
+                        exited = Some(status);
+                        break;
+                    }
+                }
+                if let Some(exit_status) = exited {
+                    tokio::time::sleep(Duration::from_millis(120)).await;
+                    let tail = stderr_tail.lock().await.join("\n");
+                    let mut reason = format!("Sidecar process exited prematurely with {exit_status}");
+                    if !tail.is_empty() {
+                        reason.push_str(&format!(":\n{tail}"));
+                    }
+                    if !manifest.install_hint.trim().is_empty() {
+                        reason.push_str(&format!("\nFix: {}", manifest.install_hint.trim()));
+                    }
+                    self.record_start_error(&manifest, &reason).await;
                     return Err(ExtensionError::HealthcheckFailed {
                         id: manifest.id.clone(),
                         url: healthcheck_url.clone(),
-                        reason: format!("Sidecar process exited prematurely with {exit_status}"),
+                        reason,
                     });
                 }
 
