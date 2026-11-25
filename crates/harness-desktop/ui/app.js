@@ -934,18 +934,69 @@
     box.scrollTop = box.scrollHeight;
   }
 
+  // ---------------------------------------------------------------------------
+  // 1-click install markers: backend errors embed `[dex-install:<runtime-id>]` so any
+  // "not installed" failure becomes an Install button (no install guides for users).
+  // ---------------------------------------------------------------------------
+  const INSTALL_LABELS = {
+    gen3d: '3D Gen (Shap-E)',
+    ffmpeg: 'FFmpeg',
+    blender: 'Blender',
+    uv: 'uv (Python extensions)',
+    node: 'Node.js',
+    mflux: 'Image Gen (FLUX)',
+    'mlx-audio': 'Voice Engine',
+    'mlx-whisper': 'Speech-to-Text',
+    'parakeet-mlx': 'Parakeet Speech-to-Text',
+    'faster-whisper': 'Faster-Whisper',
+    audiogen: 'Music & SFX Gen',
+    mlx: 'MLX Runtime',
+    llamacpp: 'llama.cpp',
+  };
+  const BREW_RUNTIMES = new Set(['ffmpeg', 'blender', 'uv', 'node', 'llamacpp']);
+
+  function parseInstallMarkers(text) {
+    const ids = [];
+    const re = /\[dex-install:([A-Za-z0-9_-]+)\]/g;
+    let m;
+    const src = String(text || '');
+    while ((m = re.exec(src)) !== null) {
+      if (!ids.includes(m[1])) ids.push(m[1]);
+    }
+    return ids;
+  }
+
+  function stripInstallMarkers(text) {
+    return String(text || '').replace(/\s*\[dex-install:[A-Za-z0-9_-]+\]/g, '');
+  }
+
+  function installLabel(id) {
+    return INSTALL_LABELS[id] || id;
+  }
+
+  /** Installs every runtime in `ids` (in order). Resolves true only if all succeeded. */
+  async function installRuntimesInOrder(ids, toastId) {
+    for (const id of ids) {
+      const ok = await installRuntimeInline(id, toastId);
+      if (!ok) return false;
+    }
+    return true;
+  }
+
   async function installRuntimeInline(runtimeId, toastId) {
     if (state.installingRuntime) {
       showGlobalToast({
         title: 'Installation In Progress',
-        message: `Already installing ${state.installingRuntime}. Please wait for it to finish.`,
+        message: `Already installing ${installLabel(state.installingRuntime)}. Please wait for it to finish.`,
         variant: 'warn',
       });
-      return;
+      return false;
     }
     const activeToast = toastId || showGlobalToast({
-      title: `Installing ${runtimeId}...`,
-      message: 'Installing into isolated ~/.dex/runtimes/mlx-venv (system Python untouched).',
+      title: `Installing ${installLabel(runtimeId)}...`,
+      message: BREW_RUNTIMES.has(runtimeId)
+        ? 'Installing with Homebrew. This can take a few minutes.'
+        : 'Installing into Dex\'s private Python environment (your system Python is untouched).',
       variant: 'ok',
       autoHideMs: 0,
     });
@@ -968,15 +1019,18 @@
         autoHideMs: 5000,
       });
       setTimeout(() => dismissGlobalToast(activeToast), 2500);
+      renderRuntimesPanel();
+      return true;
     } catch (err) {
       state.installingRuntime = null;
       appendToastInstallProgress(activeToast, `Error: ${err}`);
       renderRuntimesPanel();
       showGlobalToast({
-        title: `Install Failed (${runtimeId})`,
+        title: `Couldn't install ${installLabel(runtimeId)}`,
         message: String(err),
         variant: 'error',
       });
+      return false;
     }
   }
 
@@ -1057,10 +1111,40 @@
     );
   }
 
-  function presentActionableError(err, contextView) {
+  function presentActionableError(err, contextView, retry) {
     const msg = String(err || 'Unknown error');
     const lower = msg.toLowerCase();
     const view = contextView || state.activeView;
+
+    const missing = parseInstallMarkers(msg);
+    if (missing.length > 0) {
+      const names = missing.map(installLabel).join(' + ');
+      return showGlobalToast({
+        title: `${names} is not installed yet`,
+        message: `Dex needs ${names} for this. Click Install and it is set up automatically${typeof retry === 'function' ? ', then Dex tries again' : ''}.`,
+        variant: 'warn',
+        autoHideMs: 0,
+        actions: [
+          {
+            label: `Install ${names}`,
+            icon: 'download',
+            primary: true,
+            onClick: async (tid) => {
+              const ok = await installRuntimesInOrder(missing, tid);
+              if (ok && typeof retry === 'function') retry();
+            },
+          },
+          {
+            label: 'Details',
+            icon: 'fileText',
+            onClick: (tid) => {
+              dismissGlobalToast(tid);
+              showGlobalToast({ title: 'Details', message: stripInstallMarkers(msg), variant: 'warn' });
+            },
+          },
+        ],
+      });
+    }
 
     if (lower.includes('modelintegrityerror') || lower.includes('incomplete model') || lower.includes('incomplete weights')) {
       return showGlobalToast({
@@ -1434,6 +1518,13 @@
 
     const rec = state.activeToolCards.splice(idx, 1)[0];
     rec.finished = true;
+    if (isError && state.activeTurn) {
+      const turn = state.activeTurn;
+      turn.missingRuntimes = turn.missingRuntimes || [];
+      for (const id of parseInstallMarkers(output)) {
+        if (!turn.missingRuntimes.includes(id)) turn.missingRuntimes.push(id);
+      }
+    }
     const elapsed = performance.now() - rec.startedAt;
     const row = rec.el;
 
@@ -1472,13 +1563,58 @@
       turn.thinkEl.textContent = turn.thinkText;
     }
 
-    const cleanAnswer = incoming.answer || splitThinkAndAnswer(turn.rawStream).answer || 'Done.';
+    const cleanAnswer = stripInstallMarkers(
+      incoming.answer || splitThinkAndAnswer(turn.rawStream).answer || 'Done.'
+    );
     turn.answerEl.innerHTML = renderSafeMarkdown(cleanAnswer);
+    if (turn.missingRuntimes && turn.missingRuntimes.length > 0) {
+      appendInstallBar(turn.wrapEl, turn.missingRuntimes, state.lastGoal);
+    }
     updateActiveTurnSummary(turn);
     state.activeTurn = null;
     state.currentThoughtEl = null;
     scrollFeedToBottom();
     return cleanAnswer;
+  }
+
+  /** Inline "Dex needs X → Install → Retry" bar under an assistant answer. */
+  function appendInstallBar(container, ids, retryGoal) {
+    if (!container || !ids.length) return;
+    const names = ids.map(installLabel).join(' + ');
+    const bar = document.createElement('div');
+    bar.className = 'turn-install-bar';
+    bar.innerHTML = `
+      <span class="turn-install-icon">${icon('download', 14)}</span>
+      <span class="turn-install-text">Dex needs <b>${escapeHtml(names)}</b> for this. It installs automatically.</span>
+      <button type="button" class="btn btn-sm btn-primary turn-install-btn">${icon('download', 12)} <span>Install ${escapeHtml(names)}</span></button>
+    `;
+    const btn = bar.querySelector('.turn-install-btn');
+    const text = bar.querySelector('.turn-install-text');
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      btn.innerHTML = `${icon('clock', 12)} <span>Installing…</span>`;
+      const ok = await installRuntimesInOrder(ids, null);
+      if (!ok) {
+        btn.disabled = false;
+        btn.innerHTML = `${icon('refresh', 12)} <span>Try installing again</span>`;
+        return;
+      }
+      text.innerHTML = `<b>${escapeHtml(names)}</b> is installed.`;
+      if (retryGoal) {
+        btn.disabled = false;
+        btn.innerHTML = `${icon('play', 12)} <span>Retry</span>`;
+        btn.onclick = () => {
+          bar.remove();
+          const ta = el('input-goal');
+          if (ta) ta.value = retryGoal;
+          runGoal();
+        };
+      } else {
+        btn.remove();
+      }
+    });
+    container.appendChild(bar);
+    scrollFeedToBottom();
   }
 
   function appendAssistantMarkdown(markdownText) {
@@ -1571,6 +1707,7 @@
       .filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content)
       .map((m) => ({ role: m.role, content: String(m.content) }));
     appendUserMessage(goal, pendingAttachments);
+    state.lastGoal = goal;
     state.sessionMessages.push({
       role: 'user',
       content: goal || '(Attached files)',
@@ -3831,8 +3968,8 @@
       if (note) note.textContent = `Saved via ${res.backend} (${res.duration_secs || '?'}s)`;
       refreshAudioMedia();
     } catch (err) {
-      if (note) note.textContent = `Error: ${err}`;
-      presentActionableError(err, 'view-audio');
+      if (note) note.textContent = `Error: ${stripInstallMarkers(err)}`;
+      presentActionableError(err, 'view-audio', () => speakTextFromUi());
     } finally {
       if (btn) btn.disabled = false;
     }
@@ -4004,8 +4141,8 @@
       refreshVisualMedia();
       showGlobalToast({ title: 'Image Generated', message: `Saved ${res.width}x${res.height} via ${res.backend}.`, variant: 'ok', autoHideMs: 4500 });
     } catch (err) {
-      statusEl.textContent = `Error: ${err}`;
-      presentActionableError(err, 'view-media');
+      statusEl.textContent = `Error: ${stripInstallMarkers(err)}`;
+      presentActionableError(err, 'view-media', () => generateImageFromUi());
     } finally {
       btn.disabled = false;
     }
@@ -4344,8 +4481,8 @@
       await refresh3dModels();
       await load3dModelIntoViewer(res.path);
     } catch (err) {
-      statusEl.textContent = `Error: ${err}`;
-      presentActionableError(err, 'view-3d');
+      statusEl.textContent = `Error: ${stripInstallMarkers(err)}`;
+      presentActionableError(err, 'view-3d', () => generate3dFromUi());
     } finally {
       btn.disabled = false;
     }

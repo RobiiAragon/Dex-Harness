@@ -47,7 +47,7 @@ fn backend_not_installed(kind: &str, tool: &str, base_url: &str, detail: &str) -
         kind: kind.to_string(),
         backend: harness_core::DEX_AUDIOGEN_SIDECAR_ID.to_string(),
         install_hint: format!(
-            "No music/SFX sidecar reachable at '{base_url}' ({detail}). Install the 'Music & SFX Gen (MusicGen)' runtime with 1 click (`dex models install-runtime audiogen`, or Models Hub -> Runtimes), or point `DEX_AUDIO_GEN_URL` at a compatible server. Do NOT retry `{tool}`."
+            "No music/SFX sidecar reachable at '{base_url}' ({detail}). Install the 'Music & SFX Gen (MusicGen)' runtime with 1 click (`dex models install-runtime audiogen`, or Models Hub -> Runtimes), or point `DEX_AUDIO_GEN_URL` at a compatible server. Do NOT retry `{tool}`. [dex-install:audiogen]"
         ),
     }
 }

@@ -32,6 +32,7 @@ mod docs_cli;
 mod doctor;
 mod endpoint;
 mod ext_cli;
+mod install_cli;
 mod media_cli;
 mod models_cli;
 mod session;
@@ -107,6 +108,11 @@ enum Commands {
     Repl,
     /// Diagnose model servers, models, runtimes and extensions
     Doctor,
+    /// Install a component with one command (e.g. `dex install gen3d ffmpeg`); no args lists them
+    Install {
+        /// Component ids: gen3d, ffmpeg, blender, uv, node, mflux, mlx-audio, audiogen, …
+        names: Vec<String>,
+    },
     /// Start as a native Model Context Protocol (MCP) server over stdio
     McpServe,
     /// Live terminal dashboard of agent events and tasks
@@ -495,7 +501,7 @@ enum ModelCommands {
     Runtimes,
     /// 1-click install of a managed runtime into ~/.dex/runtimes (e.g. audiogen, mlx, mflux, mlx-audio)
     InstallRuntime {
-        /// Runtime ID (mlx, llamacpp, mlx-whisper, mflux, mlx-audio, parakeet-mlx, faster-whisper, audiogen)
+        /// Runtime ID (see `dex install` for the full list)
         runtime: String,
     },
 }
@@ -629,6 +635,7 @@ fn system_prompt(skills_index: &str) -> String {
          - Prefer `edit_file` for surgical changes; verify with tests or commands when possible.\n\
          - If a tool is denied, do not retry it; explain or ask the user.\n\
          - Use `search_tools` to discover specialized tools (audio, image, video, 3D, OCR, MCP extensions).\n\
+         - If a tool error contains `[dex-install:<id>]`, tell the user in one short sentence which component is missing; Dex offers to install it automatically, so never list manual install steps.\n\
          - Prefer Dex's built-in tools (e.g. `image_generate`, `audio_*`, `mesh_*`, `docs_*`) over MCP extension tools; those only work while their app (Unity Editor, ComfyUI, Blender) is running.\n\
          - Track long multi-step work with `manage_tasks`; delegate focused research with `spawn_subagent`.\n\
          {skills_index}",
@@ -652,7 +659,14 @@ fn connect_extensions_in_background(supervisor: Arc<ExtensionSupervisor>, regist
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
+    match run_cli(Cli::parse()).await {
+        Ok(()) => Ok(()),
+        // Missing backends become "Install now? [Y/n]" + automatic retry.
+        Err(err) => install_cli::recover_from_error(err).await,
+    }
+}
+
+async fn run_cli(cli: Cli) -> Result<()> {
 
     // Structured tracing goes to stderr and is quiet unless --verbose / RUST_LOG.
     let default_filter = if cli.verbose { "debug" } else { "error" };
@@ -679,6 +693,25 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Doctor) => {
             doctor::run(Style::detect()).await?;
+            return Ok(());
+        }
+        Some(Commands::Install { names }) => {
+            if names.is_empty() {
+                println!("Installable components:");
+                for kind in harness_models::ALL_RUNTIMES {
+                    let ready = harness_models::detect_runtime_binary(*kind).is_some();
+                    println!(
+                        "  {} {:<16} {}",
+                        if ready { "✓" } else { " " },
+                        kind.as_id(),
+                        kind.display_name()
+                    );
+                }
+                println!("
+Example: dex install gen3d");
+                return Ok(());
+            }
+            install_cli::install_all(&names).await?;
             return Ok(());
         }
         Some(Commands::Schedule { action }) => {
@@ -1043,6 +1076,7 @@ async fn main() -> Result<()> {
         style,
         always_allowed: Arc::new(Mutex::new(HashSet::new())),
         printer: StreamPrinter::new(style),
+        missing_runtimes: Arc::new(std::sync::Mutex::new(Vec::new())),
         make_tools,
     };
 

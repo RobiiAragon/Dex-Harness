@@ -1,8 +1,12 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use harness_core::{DexEvent, EventBus};
-use harness_extensions::{ExtensionKind, ExtensionSupervisor};
+use harness_extensions::{
+    ExtensionCategory, ExtensionKind, ExtensionManifest, ExtensionSupervisor,
+    DEFAULT_IDLE_TIMEOUT_SECS,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
@@ -11,6 +15,10 @@ use crate::error::ThreeDError;
 use crate::mesh_ops::{inspect_mesh, MeshReport, DEFAULT_3D_DIR};
 
 const GEN3D_TIMEOUT_SECS: u64 = 600;
+/// The managed Shap-E sidecar downloads ~3.6 GB of weights on its first request.
+const GEN3D_FIRST_RUN_TIMEOUT_SECS: u64 = 1800;
+const GEN3D_STARTUP_TIMEOUT_SECS: u64 = 60;
+const GEN3D_RAM_MB: u64 = 6144;
 
 /// Local or HTTP 3D mesh generation backend selector.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -21,6 +29,8 @@ pub enum Gen3dBackend {
     Trellis,
     Hunyuan3d,
     TripoSr,
+    /// Dex-managed OpenAI Shap-E sidecar (`dex-gen3d`): 1-click install, no CUDA.
+    ShapE,
     Http,
 }
 
@@ -30,6 +40,7 @@ impl Gen3dBackend {
             "trellis" | "trellis2" | "trellis-3d" => Self::Trellis,
             "hunyuan" | "hunyuan3d" | "hunyuan-3d" => Self::Hunyuan3d,
             "triposr" | "tripo" | "tripo-sr" => Self::TripoSr,
+            "shap-e" | "shape" | "shap_e" | "dex-gen3d" | "gen3d" => Self::ShapE,
             "http" | "custom" => Self::Http,
             _ => Self::Auto,
         }
@@ -41,6 +52,7 @@ impl Gen3dBackend {
             Self::Trellis => "trellis",
             Self::Hunyuan3d => "hunyuan3d",
             Self::TripoSr => "triposr",
+            Self::ShapE => "shap-e",
             Self::Http => "http",
         }
     }
@@ -50,6 +62,7 @@ impl Gen3dBackend {
             Self::Auto | Self::Trellis | Self::Http => "http://127.0.0.1:8195",
             Self::Hunyuan3d => "http://127.0.0.1:8196",
             Self::TripoSr => "http://127.0.0.1:8197",
+            Self::ShapE => "http://127.0.0.1:8198",
         }
     }
 }
@@ -91,19 +104,69 @@ fn current_epoch_millis() -> u128 {
         .unwrap_or(0)
 }
 
-async fn resolve_endpoint_and_wake(
+/// Builds the `LocalSidecar` manifest for Dex's managed Shap-E text/image-to-3D server.
+pub fn gen3d_sidecar_manifest(python: &Path, script: &Path) -> ExtensionManifest {
+    let port = harness_core::DEX_GEN3D_PORT;
+    ExtensionManifest {
+        id: harness_core::DEX_GEN3D_SIDECAR_ID.to_string(),
+        name: "Dex 3D Gen (Shap-E)".to_string(),
+        category: ExtensionCategory::ThreeD,
+        description: "Local text-to-3D and image-to-3D (OpenAI Shap-E) on Apple Silicon MPS, exporting game-ready .glb meshes with vertex colors.".to_string(),
+        kind: ExtensionKind::LocalSidecar {
+            command: python.to_string_lossy().to_string(),
+            args: harness_core::gen3d_launch_args(script, port),
+            port,
+            healthcheck_url: format!("http://127.0.0.1:{port}/health"),
+            env: HashMap::from([
+                ("PYTHONUNBUFFERED".to_string(), "1".to_string()),
+                ("PATH".to_string(), harness_core::enriched_path_env()),
+            ]),
+        },
+        estimated_ram_mb: GEN3D_RAM_MB,
+        idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
+        install_hint: harness_core::with_install_marker(
+            "Install the `gen3d` runtime (Shap-E) with 1 click.",
+            "gen3d",
+        ),
+        enabled: true,
+        tags: vec!["3d".to_string(), "mesh".to_string(), "shap-e".to_string(), "glb".to_string()],
+    }
+}
+
+fn not_installed(detail: String) -> ThreeDError {
+    ThreeDError::BackendNotInstalled {
+        kind: "3d".to_string(),
+        backend: "dex-gen3d (Shap-E)".to_string(),
+        install_hint: harness_core::with_install_marker(
+            format!(
+                "{detail} Install '3D Gen (Shap-E)' with 1 click (`dex models install-runtime gen3d`). Do NOT retry `mesh_generate_3d` until it is installed."
+            ),
+            "gen3d",
+        ),
+    }
+}
+
+/// Picks a reachable 3D backend, waking sidecars when possible:
+/// env override → TRELLIS (if installed & running) → explicit Hunyuan3D/TripoSR/HTTP →
+/// Dex-managed Shap-E (auto-launched when the `gen3d` runtime is installed).
+async fn resolve_backend(
     backend: Gen3dBackend,
     supervisor: Option<&Arc<ExtensionSupervisor>>,
-) -> (String, String) {
-    // 1. Explicit environment override wins
+) -> Result<(String, String), ThreeDError> {
     if let Ok(env_url) = std::env::var("DEX_3D_ENDPOINT") {
         let trimmed = env_url.trim().trim_end_matches('/').to_string();
         if !trimmed.is_empty() {
-            return (trimmed, backend.label().to_string());
+            if is_endpoint_reachable(&trimmed).await {
+                return Ok((trimmed, backend.label().to_string()));
+            }
+            return Err(ThreeDError::BackendNotInstalled {
+                kind: "3d".to_string(),
+                backend: "DEX_3D_ENDPOINT".to_string(),
+                install_hint: format!("`DEX_3D_ENDPOINT` is set to '{trimmed}' but nothing answers there. Start that server or unset the variable."),
+            });
         }
     }
 
-    // 2. Wake `trellis-3d` sidecar via ExtensionSupervisor if registered & enabled
     if matches!(backend, Gen3dBackend::Auto | Gen3dBackend::Trellis) {
         if let Some(sup) = supervisor {
             let reg = sup.load_registry().await;
@@ -112,19 +175,75 @@ async fn resolve_endpoint_and_wake(
                     ExtensionKind::LocalSidecar { port, .. } => *port,
                     _ => 8195,
                 };
-                if manifest.enabled {
-                    let _ = sup.start_extension("trellis-3d").await;
-                    sup.touch_last_used("trellis-3d").await;
+                let url = format!("http://127.0.0.1:{port}");
+                if manifest.enabled && !is_endpoint_reachable(&url).await {
+                    if let Err(e) = sup.start_extension("trellis-3d").await {
+                        debug!(error = %e, "trellis-3d did not start; trying the next 3D backend");
+                    }
                 }
-                return (format!("http://127.0.0.1:{port}"), "trellis-3d".to_string());
+                if is_endpoint_reachable(&url).await {
+                    sup.touch_last_used("trellis-3d").await;
+                    return Ok((url, "trellis-3d".to_string()));
+                }
             }
+        }
+        if backend == Gen3dBackend::Trellis {
+            return Err(ThreeDError::BackendNotInstalled {
+                kind: "3d".to_string(),
+                backend: "trellis-3d".to_string(),
+                install_hint: "TRELLIS is not running. Install/start `trellis-3d` in Extensions, or use backend `auto` / `shap-e` (1-click install). [dex-install:gen3d]".to_string(),
+            });
         }
     }
 
-    (
-        backend.default_base_url().to_string(),
-        backend.label().to_string(),
-    )
+    if matches!(backend, Gen3dBackend::Hunyuan3d | Gen3dBackend::TripoSr | Gen3dBackend::Http) {
+        let url = backend.default_base_url().to_string();
+        if is_endpoint_reachable(&url).await {
+            return Ok((url, backend.label().to_string()));
+        }
+        return Err(ThreeDError::BackendNotInstalled {
+            kind: "3d".to_string(),
+            backend: backend.label().to_string(),
+            install_hint: format!("No {} server answers at '{url}'. Start it, or use backend `auto` (Shap-E, 1-click install). [dex-install:gen3d]", backend.label()),
+        });
+    }
+
+    // Auto / ShapE: Dex-managed sidecar.
+    let url = harness_core::gen3d_default_base_url();
+    let label = harness_core::DEX_GEN3D_SIDECAR_ID.to_string();
+    if is_endpoint_reachable(&url).await {
+        if let Some(sup) = supervisor {
+            sup.touch_last_used(&label).await;
+        }
+        return Ok((url, label));
+    }
+    let Some(python) = harness_core::detect_gen3d_python() else {
+        return Err(not_installed("No local 3D generator is installed.".to_string()));
+    };
+    let Some(sup) = supervisor else {
+        return Err(not_installed("3D runtime installed but no extension supervisor to launch it.".to_string()));
+    };
+    let script = harness_core::ensure_gen3d_server_script()
+        .await
+        .map_err(|e| ThreeDError::Io {
+            path: harness_core::gen3d_server_script_path().to_string_lossy().to_string(),
+            source: e,
+        })?;
+    sup.add_custom_extension(gen3d_sidecar_manifest(&python, &script))
+        .await
+        .map_err(|e| ThreeDError::BackendUnavailable {
+            kind: "3d".to_string(),
+            reason: format!("Could not register the dex-gen3d sidecar: {e}"),
+        })?;
+    info!(python = ?python, script = ?script, "Launching managed dex-gen3d sidecar");
+    sup.start_extension_wait_ready(&label, Duration::from_secs(GEN3D_STARTUP_TIMEOUT_SECS))
+        .await
+        .map_err(|e| ThreeDError::BackendUnavailable {
+            kind: "3d".to_string(),
+            reason: format!("dex-gen3d sidecar failed to start: {e}"),
+        })?;
+    sup.touch_last_used(&label).await;
+    Ok((url, label))
 }
 
 async fn is_endpoint_reachable(base_url: &str) -> bool {
@@ -186,18 +305,12 @@ pub async fn generate_3d_mesh(
     let ts = current_epoch_millis();
     let task_id = format!("mesh3d_{ts}");
 
-    let (base_url, resolved_label) =
-        resolve_endpoint_and_wake(req.backend, supervisor.as_ref()).await;
-
-    if !is_endpoint_reachable(&base_url).await {
-        return Err(ThreeDError::BackendNotInstalled {
-            kind: "3d".to_string(),
-            backend: format!("{resolved_label} / trellis-3d / hunyuan3d"),
-            install_hint: format!(
-                "No 3D reconstruction sidecar is reachable at '{base_url}'. Install/start `trellis-3d` in Extensions (or Hunyuan3D/TripoSR), or offer procedural 3D modeling with Blender + `mesh_inspect`. Do NOT retry `mesh_generate_3d`."
-            ),
-        });
-    }
+    let (base_url, resolved_label) = resolve_backend(req.backend, supervisor.as_ref()).await?;
+    let timeout_secs = if resolved_label == harness_core::DEX_GEN3D_SIDECAR_ID {
+        GEN3D_FIRST_RUN_TIMEOUT_SECS
+    } else {
+        GEN3D_TIMEOUT_SECS
+    };
 
     let out_dir = harness_core::resolve_dex_subpath(DEFAULT_3D_DIR);
     tokio::fs::create_dir_all(&out_dir)
@@ -234,7 +347,7 @@ pub async fn generate_3d_mesh(
     }
 
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(GEN3D_TIMEOUT_SECS))
+        .timeout(Duration::from_secs(timeout_secs))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
@@ -288,11 +401,11 @@ pub async fn generate_3d_mesh(
         }
     };
 
-    let resp = tokio::time::timeout(Duration::from_secs(GEN3D_TIMEOUT_SECS), send_future)
+    let resp = tokio::time::timeout(Duration::from_secs(timeout_secs), send_future)
         .await
         .map_err(|_| ThreeDError::Timeout {
             operation: "3D mesh generation".to_string(),
-            timeout_secs: GEN3D_TIMEOUT_SECS,
+            timeout_secs,
         })??;
 
     if !resp.status().is_success() {

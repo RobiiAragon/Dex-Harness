@@ -3036,6 +3036,35 @@ button, input, select, textarea {
   margin-bottom: 0;
 }
 
+/* "Dex needs X" 1-click install bar under an assistant answer */
+.turn-install-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--warn-border);
+  background: var(--warn-bg);
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.turn-install-icon {
+  display: inline-flex;
+  color: var(--warn-fg);
+  flex-shrink: 0;
+}
+
+.turn-install-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.turn-install-btn {
+  flex-shrink: 0;
+}
+
 /* Code Block with Copy Button */
 .md-code-wrap {
   position: relative;

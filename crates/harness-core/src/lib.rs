@@ -4,7 +4,9 @@ pub mod compaction;
 pub mod cookbook;
 pub mod error;
 pub mod event;
+pub mod gen3d;
 pub mod hook;
+pub mod install;
 pub mod memory;
 pub mod provider;
 pub mod scheduler;
@@ -24,6 +26,11 @@ pub use compaction::{ContextCompactor, ToolOutputCompactor};
 pub use cookbook::{parse_macos_vm_stat, HardwareProfile, MemorySnapshot, ModelRecommendation};
 pub use error::{CoreError, ProviderError, ToolError};
 pub use event::{DexEvent, EventBus};
+pub use gen3d::{
+    detect_gen3d_python, ensure_gen3d_server_script, gen3d_default_base_url, gen3d_launch_args,
+    gen3d_server_script_path, DEX_GEN3D_PORT, DEX_GEN3D_SIDECAR_ID, GEN3D_PIP_PACKAGES,
+};
+pub use install::{install_marker, parse_install_markers, strip_install_markers, with_install_marker};
 pub use hook::{AgentEvent, ExecutionMode, Hook, HookAction, HookRegistry};
 pub use memory::ConversationContext;
 pub use provider::{CompletionRequest, CompletionResponse, LlmProvider, Message, Role, TokenCallback};

@@ -360,7 +360,7 @@ async fn run_blender_script(script_body: &str, op_label: &str) -> Result<(), Thr
     let blender_exe = detect_blender_executable().await.ok_or_else(|| {
         ThreeDError::BackendUnavailable {
             kind: "blender".to_string(),
-            reason: "Blender executable not found. Install Blender (e.g. `brew install --cask blender`) or set `BLENDER_BIN`.".to_string(),
+            reason: "Blender executable not found. Install Blender with 1 click (`brew install --cask blender`) or set `BLENDER_BIN`. [dex-install:blender]".to_string(),
         }
     })?;
 

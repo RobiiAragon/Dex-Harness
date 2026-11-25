@@ -253,6 +253,7 @@ impl ExtensionSupervisor {
                 let mut child = cmd.spawn().map_err(|e| ExtensionError::ProcessSpawn {
                     id: manifest.id.clone(),
                     command: command.clone(),
+                    hint: crate::error::missing_launcher_hint(command, &e),
                     source: e,
                 })?;
 
@@ -342,10 +343,22 @@ impl ExtensionSupervisor {
                 Ok((ManagedHandle::Sidecar(child), pid))
             }
             ExtensionKind::McpStdio { command, args, env } => {
+                // `spawn_with_env` reports a bare message; check the launcher ourselves so a
+                // missing `uvx`/`npx` becomes a 1-click install instead of a cryptic error.
+                let launcher_missing = harness_core::find_executable_in_enriched_path(command).is_none()
+                    && !std::path::Path::new(command).is_file();
                 let transport = StdioTransport::spawn_with_env(command, args, env).map_err(|e| {
+                    let hint = if launcher_missing {
+                        crate::error::missing_launcher_hint(
+                            command,
+                            &std::io::Error::new(std::io::ErrorKind::NotFound, "not found"),
+                        )
+                    } else {
+                        String::new()
+                    };
                     ExtensionError::Mcp {
                         id: manifest.id.clone(),
-                        message: format!("Failed to spawn MCP stdio server '{command}': {e}"),
+                        message: format!("Failed to spawn MCP stdio server '{command}': {e}{hint}"),
                     }
                 })?;
                 let pid = transport.pid().await;
@@ -481,6 +494,7 @@ impl ExtensionSupervisor {
         let mut child = cmd.spawn().map_err(|e| ExtensionError::ProcessSpawn {
             id: manifest.id.clone(),
             command: command.clone(),
+            hint: crate::error::missing_launcher_hint(&command, &e),
             source: e,
         })?;
 

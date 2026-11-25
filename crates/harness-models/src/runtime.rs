@@ -27,7 +27,46 @@ pub enum RuntimeKind {
     ParakeetMlx,
     FasterWhisper,
     AudioGen,
+    /// Text/image-to-3D (OpenAI Shap-E via diffusers), served by the `dex-gen3d` sidecar.
+    Gen3d,
+    /// FFmpeg (video editing, frame extraction, audio conversion) via Homebrew.
+    Ffmpeg,
+    /// Blender (3D convert / render) via Homebrew cask.
+    Blender,
+    /// `uv` (runs Python MCP extensions with `uvx`) via Homebrew.
+    Uv,
+    /// Node.js (runs Node MCP extensions with `npx`) via Homebrew.
+    Node,
 }
+
+/// Homebrew package (name, is_cask) for system-tool runtimes.
+fn brew_package(kind: RuntimeKind) -> Option<(&'static str, bool)> {
+    match kind {
+        RuntimeKind::LlamaCpp => Some(("llama.cpp", false)),
+        RuntimeKind::Ffmpeg => Some(("ffmpeg", false)),
+        RuntimeKind::Blender => Some(("blender", true)),
+        RuntimeKind::Uv => Some(("uv", false)),
+        RuntimeKind::Node => Some(("node", false)),
+        _ => None,
+    }
+}
+
+/// Every runtime Dex can install, in display order.
+pub const ALL_RUNTIMES: &[RuntimeKind] = &[
+    RuntimeKind::Mlx,
+    RuntimeKind::LlamaCpp,
+    RuntimeKind::MlxWhisper,
+    RuntimeKind::Mflux,
+    RuntimeKind::MlxAudio,
+    RuntimeKind::ParakeetMlx,
+    RuntimeKind::FasterWhisper,
+    RuntimeKind::AudioGen,
+    RuntimeKind::Gen3d,
+    RuntimeKind::Ffmpeg,
+    RuntimeKind::Blender,
+    RuntimeKind::Uv,
+    RuntimeKind::Node,
+];
 
 impl RuntimeKind {
     pub fn as_id(self) -> &'static str {
@@ -40,6 +79,11 @@ impl RuntimeKind {
             Self::ParakeetMlx => "parakeet-mlx",
             Self::FasterWhisper => "faster-whisper",
             Self::AudioGen => "audiogen",
+            Self::Gen3d => "gen3d",
+            Self::Ffmpeg => "ffmpeg",
+            Self::Blender => "blender",
+            Self::Uv => "uv",
+            Self::Node => "node",
         }
     }
 
@@ -53,6 +97,11 @@ impl RuntimeKind {
             Self::ParakeetMlx => "Parakeet TDT v3 ASR (MLX)",
             Self::FasterWhisper => "Faster-Whisper (CPU Fallback)",
             Self::AudioGen => "Music & SFX Gen (MusicGen)",
+            Self::Gen3d => "3D Gen (Shap-E)",
+            Self::Ffmpeg => "FFmpeg (video & audio)",
+            Self::Blender => "Blender (3D convert & render)",
+            Self::Uv => "uv (Python extensions)",
+            Self::Node => "Node.js (JS extensions)",
         }
     }
 
@@ -68,6 +117,11 @@ impl RuntimeKind {
             "audiogen" | "audio-gen" | "musicgen" | "music" | "sfx" | "dex-audiogen" => {
                 Some(Self::AudioGen)
             }
+            "gen3d" | "3d" | "shap-e" | "shape" | "dex-gen3d" | "mesh" => Some(Self::Gen3d),
+            "ffmpeg" | "ffprobe" | "video" => Some(Self::Ffmpeg),
+            "blender" => Some(Self::Blender),
+            "uv" | "uvx" => Some(Self::Uv),
+            "node" | "nodejs" | "npx" | "npm" => Some(Self::Node),
             _ => None,
         }
     }
@@ -98,6 +152,15 @@ impl RuntimeKind {
             Self::AudioGen => {
                 "Click 'Install Music & SFX Gen (1-click)' (or run `dex models install-runtime audiogen`) to install torch + transformers MusicGen into ~/.dex/runtimes/mlx-venv."
             }
+            Self::Gen3d => {
+                "Click 'Install 3D Gen (1-click)' (or run `dex models install-runtime gen3d`) to install Shap-E text/image-to-3D into ~/.dex/runtimes/mlx-venv."
+            }
+            Self::Ffmpeg => "Click 'Install FFmpeg (1-click)' (runs `brew install ffmpeg`).",
+            Self::Blender => {
+                "Click 'Install Blender (1-click)' (runs `brew install --cask blender`)."
+            }
+            Self::Uv => "Click 'Install uv (1-click)' (runs `brew install uv`).",
+            Self::Node => "Click 'Install Node.js (1-click)' (runs `brew install node`).",
         }
     }
 }
@@ -267,94 +330,28 @@ fn check_mlx_venv_python_module(module_dir: &str) -> Option<PathBuf> {
 
 /// Detects available local inference and multimodal runtimes.
 pub fn detect_runtimes() -> Vec<RuntimeStatus> {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let path_env = std::env::var("PATH").unwrap_or_default();
-
-    let mlx_bin = find_first_existing(&mlx_candidate_paths(&home, &path_env));
-    let llama_bin = find_first_existing(&llama_candidate_paths(&home, &path_env));
-    let whisper_bin = harness_core::find_executable_in_enriched_path("mlx_whisper");
-    let mflux_bin = harness_core::find_executable_in_enriched_path("mflux-generate");
-    let mlx_audio_bin = harness_core::find_executable_in_enriched_path("mlx_audio.tts.generate")
-        .or_else(|| check_mlx_venv_python_module("mlx_audio"));
-    let parakeet_bin = harness_core::find_executable_in_enriched_path("parakeet-mlx")
-        .or_else(|| check_mlx_venv_python_module("parakeet_mlx"));
-    let faster_whisper_bin = check_mlx_venv_python_module("faster_whisper");
-    let audiogen_bin = harness_core::detect_audiogen_python();
-
-    vec![
-        RuntimeStatus {
-            id: RuntimeKind::Mlx.as_id().to_string(),
-            name: RuntimeKind::Mlx.display_name().to_string(),
-            kind: RuntimeKind::Mlx,
-            available: mlx_bin.is_some(),
-            binary_path: mlx_bin.map(|p| p.to_string_lossy().to_string()),
-            install_hint: RuntimeKind::Mlx.install_hint().to_string(),
-            managed_dir: mlx_venv_dir().to_string_lossy().to_string(),
-        },
-        RuntimeStatus {
-            id: RuntimeKind::LlamaCpp.as_id().to_string(),
-            name: RuntimeKind::LlamaCpp.display_name().to_string(),
-            kind: RuntimeKind::LlamaCpp,
-            available: llama_bin.is_some(),
-            binary_path: llama_bin.map(|p| p.to_string_lossy().to_string()),
-            install_hint: RuntimeKind::LlamaCpp.install_hint().to_string(),
-            managed_dir: llama_runtime_dir().to_string_lossy().to_string(),
-        },
-        RuntimeStatus {
-            id: RuntimeKind::MlxWhisper.as_id().to_string(),
-            name: RuntimeKind::MlxWhisper.display_name().to_string(),
-            kind: RuntimeKind::MlxWhisper,
-            available: whisper_bin.is_some(),
-            binary_path: whisper_bin.map(|p| p.to_string_lossy().to_string()),
-            install_hint: RuntimeKind::MlxWhisper.install_hint().to_string(),
-            managed_dir: mlx_venv_dir().to_string_lossy().to_string(),
-        },
-        RuntimeStatus {
-            id: RuntimeKind::Mflux.as_id().to_string(),
-            name: RuntimeKind::Mflux.display_name().to_string(),
-            kind: RuntimeKind::Mflux,
-            available: mflux_bin.is_some(),
-            binary_path: mflux_bin.map(|p| p.to_string_lossy().to_string()),
-            install_hint: RuntimeKind::Mflux.install_hint().to_string(),
-            managed_dir: mlx_venv_dir().to_string_lossy().to_string(),
-        },
-        RuntimeStatus {
-            id: RuntimeKind::MlxAudio.as_id().to_string(),
-            name: RuntimeKind::MlxAudio.display_name().to_string(),
-            kind: RuntimeKind::MlxAudio,
-            available: mlx_audio_bin.is_some(),
-            binary_path: mlx_audio_bin.map(|p| p.to_string_lossy().to_string()),
-            install_hint: RuntimeKind::MlxAudio.install_hint().to_string(),
-            managed_dir: mlx_venv_dir().to_string_lossy().to_string(),
-        },
-        RuntimeStatus {
-            id: RuntimeKind::ParakeetMlx.as_id().to_string(),
-            name: RuntimeKind::ParakeetMlx.display_name().to_string(),
-            kind: RuntimeKind::ParakeetMlx,
-            available: parakeet_bin.is_some(),
-            binary_path: parakeet_bin.map(|p| p.to_string_lossy().to_string()),
-            install_hint: RuntimeKind::ParakeetMlx.install_hint().to_string(),
-            managed_dir: mlx_venv_dir().to_string_lossy().to_string(),
-        },
-        RuntimeStatus {
-            id: RuntimeKind::FasterWhisper.as_id().to_string(),
-            name: RuntimeKind::FasterWhisper.display_name().to_string(),
-            kind: RuntimeKind::FasterWhisper,
-            available: faster_whisper_bin.is_some(),
-            binary_path: faster_whisper_bin.map(|p| p.to_string_lossy().to_string()),
-            install_hint: RuntimeKind::FasterWhisper.install_hint().to_string(),
-            managed_dir: mlx_venv_dir().to_string_lossy().to_string(),
-        },
-        RuntimeStatus {
-            id: RuntimeKind::AudioGen.as_id().to_string(),
-            name: RuntimeKind::AudioGen.display_name().to_string(),
-            kind: RuntimeKind::AudioGen,
-            available: audiogen_bin.is_some(),
-            binary_path: audiogen_bin.map(|p| p.to_string_lossy().to_string()),
-            install_hint: RuntimeKind::AudioGen.install_hint().to_string(),
-            managed_dir: mlx_venv_dir().to_string_lossy().to_string(),
-        },
-    ]
+    ALL_RUNTIMES
+        .iter()
+        .map(|&kind| {
+            let bin = detect_runtime_binary(kind);
+            let managed_dir = match kind {
+                RuntimeKind::LlamaCpp => llama_runtime_dir(),
+                RuntimeKind::Ffmpeg | RuntimeKind::Blender | RuntimeKind::Uv | RuntimeKind::Node => {
+                    PathBuf::from(if cfg!(target_arch = "aarch64") { "/opt/homebrew" } else { "/usr/local" })
+                }
+                _ => mlx_venv_dir(),
+            };
+            RuntimeStatus {
+                id: kind.as_id().to_string(),
+                name: kind.display_name().to_string(),
+                kind,
+                available: bin.is_some(),
+                binary_path: bin.map(|p| p.to_string_lossy().to_string()),
+                install_hint: kind.install_hint().to_string(),
+                managed_dir: managed_dir.to_string_lossy().to_string(),
+            }
+        })
+        .collect()
 }
 
 /// Detects the binary for a specific `RuntimeKind`.
@@ -372,6 +369,14 @@ pub fn detect_runtime_binary(kind: RuntimeKind) -> Option<PathBuf> {
             .or_else(|| check_mlx_venv_python_module("parakeet_mlx")),
         RuntimeKind::FasterWhisper => check_mlx_venv_python_module("faster_whisper"),
         RuntimeKind::AudioGen => harness_core::detect_audiogen_python(),
+        RuntimeKind::Gen3d => harness_core::detect_gen3d_python(),
+        RuntimeKind::Ffmpeg => harness_core::find_executable_in_enriched_path("ffmpeg"),
+        RuntimeKind::Blender => harness_core::find_executable_in_enriched_path("blender").or_else(|| {
+            let app = PathBuf::from("/Applications/Blender.app/Contents/MacOS/Blender");
+            app.is_file().then_some(app)
+        }),
+        RuntimeKind::Uv => harness_core::find_executable_in_enriched_path("uvx"),
+        RuntimeKind::Node => harness_core::find_executable_in_enriched_path("npx"),
     }
 }
 
@@ -641,7 +646,8 @@ pub async fn install_runtime(
         | RuntimeKind::MlxAudio
         | RuntimeKind::ParakeetMlx
         | RuntimeKind::FasterWhisper
-        | RuntimeKind::AudioGen => {
+        | RuntimeKind::AudioGen
+        | RuntimeKind::Gen3d => {
             let (packages, expected_bin): (Vec<&str>, &str) = match kind {
                 RuntimeKind::Mlx => (vec!["mlx-lm"], "mlx_lm.server"),
                 RuntimeKind::MlxWhisper => (vec!["mlx-whisper"], "mlx_whisper"),
@@ -653,10 +659,18 @@ pub async fn install_runtime(
                     harness_core::AUDIOGEN_PIP_PACKAGES.to_vec(),
                     "python (torch + transformers MusicGen)",
                 ),
-                RuntimeKind::LlamaCpp => {
+                RuntimeKind::Gen3d => (
+                    harness_core::GEN3D_PIP_PACKAGES.to_vec(),
+                    "python (torch + diffusers Shap-E + trimesh)",
+                ),
+                RuntimeKind::LlamaCpp
+                | RuntimeKind::Ffmpeg
+                | RuntimeKind::Blender
+                | RuntimeKind::Uv
+                | RuntimeKind::Node => {
                     return Err(ModelError::RuntimeFailed {
                         runtime: rt_id.to_string(),
-                        message: "llama.cpp is not a Python venv runtime".to_string(),
+                        message: format!("{rt_id} is not a Python venv runtime"),
                     });
                 }
             };
@@ -757,6 +771,27 @@ pub async fn install_runtime(
                     false,
                 );
             }
+            if kind == RuntimeKind::Gen3d {
+                let script = harness_core::ensure_gen3d_server_script()
+                    .await
+                    .map_err(|e| ModelError::Io {
+                        path: harness_core::gen3d_server_script_path()
+                            .to_string_lossy()
+                            .to_string(),
+                        source: e,
+                    })?;
+                emit_progress(
+                    event_bus,
+                    rt_id,
+                    "install",
+                    format!(
+                        "Wrote 3D sidecar server to {} (Shap-E weights download on first use, ~3.6 GB)",
+                        script.display()
+                    ),
+                    false,
+                    false,
+                );
+            }
 
             let status = detect_runtimes()
                 .into_iter()
@@ -791,84 +826,87 @@ pub async fn install_runtime(
             );
             Ok(status)
         }
-        RuntimeKind::LlamaCpp => {
-            #[cfg(target_os = "macos")]
-            {
-                let brew_bin = find_binary_in_candidates(
-                    "brew",
-                    &[
-                        PathBuf::from("/opt/homebrew/bin/brew"),
-                        PathBuf::from("/usr/local/bin/brew"),
-                    ],
-                )
-                .ok_or_else(|| {
-                    let msg = "Homebrew (`brew`) was not found. Install Homebrew from https://brew.sh or place `llama-server` in ~/.dex/runtimes/llama/.".to_string();
-                    emit_progress(event_bus, rt_id, "error", msg.clone(), true, true);
-                    ModelError::RuntimeFailed {
-                        runtime: rt_id.to_string(),
-                        message: msg,
-                    }
-                })?;
-
-                emit_progress(
-                    event_bus,
-                    rt_id,
-                    "install",
-                    "Installing llama.cpp via Homebrew (`brew install llama.cpp`)...",
-                    false,
-                    false,
-                );
-                run_streaming_command(
-                    &brew_bin,
-                    &["install", "llama.cpp"],
-                    rt_id,
-                    "install",
-                    event_bus,
-                )
-                .await?;
-
-                let status = detect_runtimes()
-                    .into_iter()
-                    .find(|r| r.kind == RuntimeKind::LlamaCpp)
-                    .ok_or_else(|| ModelError::RuntimeFailed {
-                        runtime: rt_id.to_string(),
-                        message: "llama.cpp installation finished but runtime status could not be refreshed".to_string(),
-                    })?;
-
-                if !status.available {
-                    let msg = "Homebrew finished, but `llama-server` was not detected in /opt/homebrew/bin or PATH.".to_string();
-                    emit_progress(event_bus, rt_id, "error", msg.clone(), true, true);
-                    return Err(ModelError::RuntimeFailed {
-                        runtime: rt_id.to_string(),
-                        message: msg,
-                    });
-                }
-
-                emit_progress(
-                    event_bus,
-                    rt_id,
-                    "installed",
-                    format!(
-                        "llama.cpp Server ready at {}",
-                        status.binary_path.as_deref().unwrap_or("llama-server")
-                    ),
-                    true,
-                    false,
-                );
-                Ok(status)
-            }
-
-            #[cfg(not(target_os = "macos"))]
-            {
-                let msg = "1-click llama.cpp installation uses Homebrew on macOS. On this platform, install `llama-server` into ~/.dex/runtimes/llama/llama-server or $PATH.".to_string();
-                emit_progress(event_bus, rt_id, "error", msg.clone(), true, true);
-                Err(ModelError::RuntimeFailed {
-                    runtime: rt_id.to_string(),
-                    message: msg,
-                })
-            }
-        }
+        RuntimeKind::LlamaCpp
+        | RuntimeKind::Ffmpeg
+        | RuntimeKind::Blender
+        | RuntimeKind::Uv
+        | RuntimeKind::Node => install_with_homebrew(kind, event_bus).await,
     }
+}
+
+/// Installs a system tool with Homebrew (`brew install [--cask] <pkg>`) and verifies it.
+async fn install_with_homebrew(
+    kind: RuntimeKind,
+    event_bus: Option<&EventBus>,
+) -> Result<RuntimeStatus, ModelError> {
+    let rt_id = kind.as_id();
+    let fail = |msg: String| {
+        emit_progress(event_bus, rt_id, "error", msg.clone(), true, true);
+        ModelError::RuntimeFailed {
+            runtime: rt_id.to_string(),
+            message: msg,
+        }
+    };
+    let (package, cask) = brew_package(kind)
+        .ok_or_else(|| fail(format!("{rt_id} has no Homebrew package")))?;
+    if !cfg!(target_os = "macos") {
+        return Err(fail(format!(
+            "1-click {} installation uses Homebrew on macOS. On this platform install `{package}` with your package manager.",
+            kind.display_name()
+        )));
+    }
+    let brew_bin = find_binary_in_candidates(
+        "brew",
+        &[
+            PathBuf::from("/opt/homebrew/bin/brew"),
+            PathBuf::from("/usr/local/bin/brew"),
+        ],
+    )
+    .ok_or_else(|| {
+        fail(
+            "Homebrew is not installed. Open Terminal and paste the one-line installer from https://brew.sh (it asks for your Mac password), then press Install again."
+                .to_string(),
+        )
+    })?;
+
+    let mut args = vec!["install"];
+    if cask {
+        args.push("--cask");
+    }
+    args.push(package);
+    emit_progress(
+        event_bus,
+        rt_id,
+        "install",
+        format!("Installing {} via Homebrew (`brew {}`)...", kind.display_name(), args.join(" ")),
+        false,
+        false,
+    );
+    run_streaming_command(&brew_bin, &args, rt_id, "install", event_bus).await?;
+
+    let status = detect_runtimes()
+        .into_iter()
+        .find(|r| r.kind == kind)
+        .ok_or_else(|| fail(format!("{package} installed but runtime status could not be refreshed")))?;
+    if !status.available {
+        return Err(fail(format!(
+            "Homebrew finished, but {} was not detected in /opt/homebrew/bin, /usr/local/bin or /Applications.",
+            kind.display_name()
+        )));
+    }
+    emit_progress(
+        event_bus,
+        rt_id,
+        "installed",
+        format!(
+            "{} ready at {}",
+            kind.display_name(),
+            status.binary_path.as_deref().unwrap_or(package)
+        ),
+        true,
+        false,
+    );
+    Ok(status)
 }
 
 #[cfg(test)]

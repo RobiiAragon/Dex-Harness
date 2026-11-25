@@ -174,7 +174,7 @@ pub async fn generate_image(
             return Err(MediaError::BackendNotInstalled {
                 kind: "image".to_string(),
                 backend: "mflux / comfyui-mcp".to_string(),
-                install_hint: "Install `mflux` (1-click in Models Hub -> Runtimes), start ComfyUI (:8188), or configure `DEX_IMAGE_URL` / `OPENAI_API_KEY`. Do NOT retry `image_generate` in a loop.".to_string(),
+                install_hint: "Install `mflux` (1-click in Models Hub -> Runtimes), start ComfyUI (:8188), or configure `DEX_IMAGE_URL` / `OPENAI_API_KEY`. Do NOT retry `image_generate` in a loop. [dex-install:mflux]".to_string(),
             });
         }
     }
@@ -218,7 +218,7 @@ pub async fn generate_image(
                 MediaError::BackendNotInstalled {
                     kind: "image".to_string(),
                     backend: "http-images".to_string(),
-                    install_hint: "Set `DEX_IMAGE_URL` or `OPENAI_API_KEY`, or install `mflux` (1-click in Models Hub).".to_string(),
+                    install_hint: "Set `DEX_IMAGE_URL` or `OPENAI_API_KEY`, or install `mflux` (1-click in Models Hub). [dex-install:mflux]".to_string(),
                 }
             })?;
             generate_via_openai_http(
@@ -277,7 +277,7 @@ pub async fn generate_image(
                     return Err(MediaError::BackendNotInstalled {
                         kind: "image".to_string(),
                         backend: "mflux / comfyui-mcp".to_string(),
-                        install_hint: "Install `mflux` (1-click in Models Hub -> Runtimes) or start ComfyUI (:8188). Do NOT retry `image_generate` in a loop.".to_string(),
+                        install_hint: "Install `mflux` (1-click in Models Hub -> Runtimes) or start ComfyUI (:8188). Do NOT retry `image_generate` in a loop. [dex-install:mflux]".to_string(),
                     });
                 }
             }
@@ -489,7 +489,7 @@ async fn generate_via_mlx(
             kind: "image".to_string(),
             backend: "mflux".to_string(),
             install_hint: format!(
-                "MLX sidecar not reachable at '{base}' and `mflux-generate` CLI is not installed. Install `mflux` with 1 click right here or in Models Hub -> Runtimes."
+                "MLX sidecar not reachable at '{base}' and `mflux-generate` CLI is not installed. Install `mflux` with 1 click right here or in Models Hub -> Runtimes. [dex-install:mflux]"
             ),
         });
     };

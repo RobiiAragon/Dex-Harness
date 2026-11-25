@@ -373,9 +373,8 @@ pub fn list_runtimes() {
 
 pub async fn install_runtime_cli(runtime: &str, event_bus: EventBus) -> Result<()> {
     let Some(kind) = RuntimeKind::from_str_loose(runtime) else {
-        bail!(
-            "Unknown runtime '{runtime}'. Valid: mlx, llamacpp, mlx-whisper, mflux, mlx-audio, parakeet-mlx, faster-whisper, audiogen"
-        );
+        let valid: Vec<&str> = harness_models::ALL_RUNTIMES.iter().map(|k| k.as_id()).collect();
+        bail!("Unknown component '{runtime}'. Valid: {}", valid.join(", "));
     };
     println!("Installing {} ...", kind.display_name());
     let mut rx = event_bus.subscribe();

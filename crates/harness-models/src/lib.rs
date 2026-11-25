@@ -27,7 +27,7 @@ pub use ollama_bridge::{OllamaBridge, OllamaModelDetails, OllamaModelTag};
 pub use registry::{ModelMetadata, ModelRegistry, ModelSource};
 pub use runtime::{
     build_launch_spec, detect_runtime_binary, detect_runtimes, install_runtime,
-    ActiveLoadedModel, LoadModelOutcome, RuntimeKind, RuntimeLaunchSpec, RuntimeStatus,
+    ActiveLoadedModel, LoadModelOutcome, RuntimeKind, RuntimeLaunchSpec, RuntimeStatus, ALL_RUNTIMES,
     DEX_LLAMA_PORT, DEX_MLX_PORT, DEX_RUNTIME_SIDECAR_ID, LOCAL_MODEL_STARTUP_TIMEOUT_SECS,
 };
 pub use scanner::{

@@ -267,6 +267,8 @@ pub struct ToolActivityHook {
     pub printer: StreamPrinter,
     pub style: Style,
     pub verbose: bool,
+    /// Collects `[dex-install:<id>]` markers from failed tools so the CLI can offer an install.
+    pub missing_runtimes: Arc<Mutex<Vec<String>>>,
 }
 
 #[async_trait]
@@ -285,8 +287,20 @@ impl Hook for ToolActivityHook {
                 );
             }
             AgentEvent::PostToolUse { result, .. } => {
+                if result.is_error {
+                    let ids = harness_core::parse_install_markers(&result.output);
+                    if !ids.is_empty() {
+                        let mut missing = self.missing_runtimes.lock().unwrap_or_else(|p| p.into_inner());
+                        for id in ids {
+                            if !missing.contains(&id) {
+                                missing.push(id);
+                            }
+                        }
+                    }
+                }
                 let max = if self.verbose { 40 } else { 3 };
-                let lines = summarize_output(&result.output, max);
+                let output = harness_core::strip_install_markers(&result.output);
+                let lines = summarize_output(&output, max);
                 for (i, line) in lines.iter().enumerate() {
                     let gutter = if i == 0 { "  ⎿ " } else { "    " };
                     let body = if result.is_error {

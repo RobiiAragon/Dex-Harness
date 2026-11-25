@@ -184,6 +184,8 @@ pub struct SessionParts {
     pub style: Style,
     pub always_allowed: Arc<Mutex<HashSet<String>>>,
     pub printer: StreamPrinter,
+    /// Runtime ids that failed tools reported as not installed during the current turn.
+    pub missing_runtimes: Arc<std::sync::Mutex<Vec<String>>>,
     /// Builds the tool registry for a provider (also kicks off background MCP connections).
     pub make_tools: Arc<dyn Fn(Arc<dyn LlmProvider>) -> ToolRegistry + Send + Sync>,
 }
@@ -198,6 +200,7 @@ impl SessionParts {
             printer: self.printer.clone(),
             style: self.style,
             verbose: self.verbose,
+            missing_runtimes: self.missing_runtimes.clone(),
         }));
         hooks.register(Arc::new(CliSecurityHook {
             mode: self.mode.clone(),
@@ -220,7 +223,74 @@ impl SessionParts {
 }
 
 /// Runs one goal, rendering the answer. Returns `false` if interrupted with Ctrl-C.
+/// When a tool failed because a backend is not installed, offers to install it and retries once.
 pub async fn run_turn(agent: &mut ReActAgent, parts: &SessionParts, goal: &str) -> bool {
+    let mut retried = false;
+    let mut current = goal.to_string();
+    loop {
+        if let Ok(mut m) = parts.missing_runtimes.lock() {
+            m.clear();
+        }
+        let completed = run_turn_once(agent, parts, &current).await;
+        let missing: Vec<String> = parts
+            .missing_runtimes
+            .lock()
+            .map(|m| m.clone())
+            .unwrap_or_default();
+        if !completed || missing.is_empty() || retried {
+            return completed;
+        }
+        if !offer_install(parts, &missing).await {
+            return completed;
+        }
+        retried = true;
+        println!("{} {}", parts.style.accent("⏺"), parts.style.dim("Installed. Trying again…"));
+        // Keep the conversation: tell the model the dependency now exists.
+        current = format!(
+            "The missing component ({}) is now installed. Try the previous request again: {goal}",
+            missing.join(", ")
+        );
+    }
+}
+
+/// Explains what is missing and installs it on confirmation. Returns true if it installed.
+async fn offer_install(parts: &SessionParts, ids: &[String]) -> bool {
+    let style = parts.style;
+    let names = ids
+        .iter()
+        .map(|id| {
+            harness_models::RuntimeKind::from_str_loose(id)
+                .map(|k| k.display_name().to_string())
+                .unwrap_or_else(|| id.clone())
+        })
+        .collect::<Vec<_>>()
+        .join(" + ");
+    println!("\n{} Dex needs {} for this.", style.accent("⏺"), style.bold(&names));
+    if !parts.input.interactive {
+        let cmds: Vec<String> = ids.iter().map(|id| format!("dex install {id}")).collect();
+        println!("  {}", style.dim(&format!("Install it with: {}", cmds.join(" && "))));
+        return false;
+    }
+    print!("  Install {names} now? [Y/n] ");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    // EOF (no answer) means "no": never install without an explicit confirmation.
+    let Some(line) = parts.input.next_line().await else {
+        return false;
+    };
+    let answer = line.trim().to_lowercase();
+    if !(answer.is_empty() || matches!(answer.as_str(), "y" | "yes" | "s" | "si" | "sí")) {
+        return false;
+    }
+    match crate::install_cli::install_all(ids).await {
+        Ok(()) => true,
+        Err(e) => {
+            println!("  {} {e:#}", style.red("✗"));
+            false
+        }
+    }
+}
+
+async fn run_turn_once(agent: &mut ReActAgent, parts: &SessionParts, goal: &str) -> bool {
     parts.printer.begin_turn();
     let started = Instant::now();
     let outcome = tokio::select! {

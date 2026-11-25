@@ -686,7 +686,7 @@ pub async fn run_goal(
 
     let host_manifest = build_host_capabilities_manifest(&workspace_dir).await;
     let mut sys_prompt = format!(
-        "You are Dex, a high-performance autonomous AI agent harness in Rust with native macOS, terminal, browser, multimodal, and external MCP extension capabilities.\nAll relative file paths, searches, shell commands, git operations, and TaskBoard actions execute rooted inside the active workspace.\nUse `search_tools` to discover and activate specialized deferred tools (OCR, document parsing, image/video studio, 3D/Blender/Unity, audio, MCP).\nPrefer Dex built-in tools (e.g. `image_generate`, `audio_*`, `mesh_*`, `docs_*`) over MCP extension tools, which only work while their app (Unity Editor, ComfyUI, Blender) is running.\n\n{}",
+        "You are Dex, a high-performance autonomous AI agent harness in Rust with native macOS, terminal, browser, multimodal, and external MCP extension capabilities.\nAll relative file paths, searches, shell commands, git operations, and TaskBoard actions execute rooted inside the active workspace.\nUse `search_tools` to discover and activate specialized deferred tools (OCR, document parsing, image/video studio, 3D/Blender/Unity, audio, MCP).\nIf a tool error contains `[dex-install:<id>]`, tell the user in one short sentence which component is missing; the app shows an Install button, so never list manual install steps.\nPrefer Dex built-in tools (e.g. `image_generate`, `audio_*`, `mesh_*`, `docs_*`) over MCP extension tools, which only work while their app (Unity Editor, ComfyUI, Blender) is running.\n\n{}",
         host_manifest
     );
     if !skills_summary.is_empty() {
@@ -1264,7 +1264,12 @@ pub async fn install_runtime(
 ) -> Result<RuntimeStatus, String> {
     let kind = RuntimeKind::from_str_loose(&runtime).ok_or_else(|| {
         format!(
-            "Unknown runtime '{runtime}'. Supported: 'mlx', 'llamacpp', 'mlx-whisper', 'mflux', 'mlx-audio', 'parakeet-mlx', 'faster-whisper'."
+            "Unknown runtime '{runtime}'. Supported: {}.",
+            harness_models::ALL_RUNTIMES
+                .iter()
+                .map(|k| k.as_id())
+                .collect::<Vec<_>>()
+                .join(", ")
         )
     })?;
     install_runtime_impl(kind, Some(&state.event_bus))

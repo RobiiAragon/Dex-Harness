@@ -574,7 +574,7 @@ pub async fn inspect_video(path: &Path) -> Result<VideoMetadata, MediaError> {
         if e.kind() == std::io::ErrorKind::NotFound {
             MediaError::BackendUnavailable {
                 kind: "video".to_string(),
-                reason: "`ffprobe` not found in $PATH. Install FFmpeg with `brew install ffmpeg`."
+                reason: "`ffprobe` not found in $PATH. Install FFmpeg with 1 click (`brew install ffmpeg`). [dex-install:ffmpeg]"
                     .to_string(),
             }
         } else {
@@ -819,7 +819,7 @@ async fn run_ffmpeg(args: &[String], op_name: &str) -> Result<(), MediaError> {
         if e.kind() == std::io::ErrorKind::NotFound {
             MediaError::BackendUnavailable {
                 kind: "video".to_string(),
-                reason: "`ffmpeg` not found in $PATH. Install FFmpeg with `brew install ffmpeg`."
+                reason: "`ffmpeg` not found in $PATH. Install FFmpeg with 1 click (`brew install ffmpeg`). [dex-install:ffmpeg]"
                     .to_string(),
             }
         } else {

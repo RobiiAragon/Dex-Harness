@@ -45,7 +45,7 @@ pub fn audiogen_default_base_url() -> String {
     format!("http://127.0.0.1:{DEX_AUDIOGEN_PORT}")
 }
 
-fn venv_has_module(venv_dir: &Path, module_rel: &str) -> bool {
+pub(crate) fn venv_has_module(venv_dir: &Path, module_rel: &str) -> bool {
     let Ok(rd) = std::fs::read_dir(venv_dir.join("lib")) else {
         return false;
     };

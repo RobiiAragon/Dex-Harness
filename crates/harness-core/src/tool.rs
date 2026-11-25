@@ -3,7 +3,7 @@ use std::sync::{Arc, RwLock, Weak};
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::error::ToolError;
 use crate::event::{DexEvent, EventBus};
@@ -440,7 +440,7 @@ impl ToolRegistry {
             }
             Err(e) => {
                 let err_msg = e.to_string();
-                error!(tool = %call.name, error = %err_msg, "Tool execution failed");
+                warn!(tool = %call.name, error = %err_msg, "Tool execution failed");
                 ToolResult::error(&call.id, &call.name, err_msg)
             }
         }

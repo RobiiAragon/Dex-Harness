@@ -943,7 +943,7 @@ impl AutoSttEngine {
                 Err(AudioError::BackendNotInstalled {
                     kind: "stt".to_string(),
                     backend: "mlx-whisper".to_string(),
-                    install_hint: "Install `mlx-whisper` (1-click in Audio & Docs -> Audio Models or Models Hub).".to_string(),
+                    install_hint: "Install `mlx-whisper` (1-click in Audio & Docs -> Audio Models or Models Hub). [dex-install:mlx-whisper]".to_string(),
                 })
             }
             "parakeet-mlx" | "parakeet_mlx" | "parakeet" => {
@@ -955,7 +955,7 @@ impl AutoSttEngine {
                 Err(AudioError::BackendNotInstalled {
                     kind: "stt".to_string(),
                     backend: "parakeet-mlx".to_string(),
-                    install_hint: "Install `parakeet-mlx` (1-click in Audio & Docs -> Audio Models or Models Hub).".to_string(),
+                    install_hint: "Install `parakeet-mlx` (1-click in Audio & Docs -> Audio Models or Models Hub). [dex-install:parakeet-mlx]".to_string(),
                 })
             }
             "faster-whisper" | "faster_whisper" => {
@@ -965,7 +965,7 @@ impl AutoSttEngine {
                 Err(AudioError::BackendNotInstalled {
                     kind: "stt".to_string(),
                     backend: "faster-whisper".to_string(),
-                    install_hint: "Install `faster-whisper` (1-click in Audio & Docs -> Audio Models or Models Hub).".to_string(),
+                    install_hint: "Install `faster-whisper` (1-click in Audio & Docs -> Audio Models or Models Hub). [dex-install:faster-whisper]".to_string(),
                 })
             }
             "whisper-cli" | "whispercpp" | "whisper.cpp" => {
@@ -975,7 +975,7 @@ impl AutoSttEngine {
                 Err(AudioError::BackendNotInstalled {
                     kind: "stt".to_string(),
                     backend: "whisper-cli".to_string(),
-                    install_hint: "Install `whisper-cpp` via Homebrew (`brew install whisper-cpp`) or switch to `mlx-whisper`.".to_string(),
+                    install_hint: "Install `whisper-cpp` via Homebrew (`brew install whisper-cpp`) or switch to `mlx-whisper`. [dex-install:mlx-whisper]".to_string(),
                 })
             }
             #[cfg(target_os = "macos")]
@@ -1055,7 +1055,7 @@ impl AutoSttEngine {
         Err(AudioError::BackendNotInstalled {
             kind: "stt".to_string(),
             backend: "mlx-whisper".to_string(),
-            install_hint: "Install Voice Engine (`mlx-whisper` / `parakeet-mlx`) with 1 click in Audio & Docs or Models Hub.".to_string(),
+            install_hint: "Install Voice Engine (`mlx-whisper` / `parakeet-mlx`) with 1 click in Audio & Docs or Models Hub. [dex-install:mlx-whisper]".to_string(),
         })
     }
 

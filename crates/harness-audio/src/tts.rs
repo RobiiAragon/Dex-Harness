@@ -318,7 +318,7 @@ pub async fn synthesize_speech_with_options(
         return Err(AudioError::BackendNotInstalled {
             kind: "tts".to_string(),
             backend: "mlx-audio".to_string(),
-            install_hint: "Install Voice Engine (`mlx-audio`) with 1 click in Audio & Docs to run Qwen3-TTS, Chatterbox, Kokoro, and voice cloning locally on Apple Silicon.".to_string(),
+            install_hint: "Install Voice Engine (`mlx-audio`) with 1 click in Audio & Docs to run Qwen3-TTS, Chatterbox, Kokoro, and voice cloning locally on Apple Silicon. [dex-install:mlx-audio]".to_string(),
         });
     }
 
@@ -393,7 +393,7 @@ pub async fn synthesize_speech_with_options(
         Err(AudioError::BackendNotInstalled {
             kind: "tts".to_string(),
             backend: "mlx-audio".to_string(),
-            install_hint: "Install `mlx-audio` or configure a local HTTP TTS sidecar (`DEX_TTS_URL`).".to_string(),
+            install_hint: "Install `mlx-audio` or configure a local HTTP TTS sidecar (`DEX_TTS_URL`). [dex-install:mlx-audio]".to_string(),
         })
     }
 }
