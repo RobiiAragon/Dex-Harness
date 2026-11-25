@@ -52,14 +52,14 @@ fn backend_not_installed(kind: &str, tool: &str, base_url: &str, detail: &str) -
     }
 }
 
-/// Builds the `LocalSidecar` manifest for Dex's managed MusicGen/AudioLDM server.
+/// Builds the `LocalSidecar` manifest for Dex's managed MusicGen music/SFX server.
 pub fn audiogen_sidecar_manifest(python: &Path, script: &Path) -> ExtensionManifest {
     let port = harness_core::DEX_AUDIOGEN_PORT;
     ExtensionManifest {
         id: harness_core::DEX_AUDIOGEN_SIDECAR_ID.to_string(),
         name: "Dex Music & SFX Gen (MusicGen)".to_string(),
         category: ExtensionCategory::Audio,
-        description: "Local music (Meta MusicGen) and sound-effect (AudioLDM) generation on Apple Silicon MPS.".to_string(),
+        description: "Local music (Meta MusicGen) and sound-effect generation (MusicGen; AudioLDM opt-in via DEX_SFX_BACKEND) on Apple Silicon MPS.".to_string(),
         kind: ExtensionKind::LocalSidecar {
             command: python.to_string_lossy().to_string(),
             args: harness_core::audiogen_launch_args(script, port),
@@ -205,7 +205,7 @@ pub async fn generate_music(
     dispatch_audio_generation("music", &endpoint, payload, dest, trimmed, Some(duration), event_bus).await
 }
 
-/// Generates a sound effect (SFX) through the same local sidecar (AudioLDM when available, MusicGen otherwise).
+/// Generates a sound effect (SFX) through the same local sidecar (MusicGen by default, AudioLDM opt-in).
 pub async fn generate_sfx(
     prompt: &str,
     duration_secs: f64,

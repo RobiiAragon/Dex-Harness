@@ -1,5 +1,5 @@
 //! Shared locations and bootstrap helpers for Dex's managed local music/SFX sidecar
-//! (`dex-audiogen`: MusicGen + optional AudioLDM, served over HTTP on `127.0.0.1:8189`).
+//! (`dex-audiogen`: MusicGen for music and SFX, optional AudioLDM, served over HTTP on `127.0.0.1:8189`).
 //!
 //! The Python server ships embedded in this crate and is materialized into
 //! `~/.dex/runtimes/audiogen/` on demand, then executed with the managed
@@ -16,15 +16,8 @@ pub const DEX_AUDIOGEN_PORT: u16 = 8189;
 /// Default Hugging Face model used for music generation.
 pub const DEFAULT_MUSICGEN_MODEL: &str = "facebook/musicgen-small";
 /// Python packages installed into the managed venv by the 1-click `audiogen` runtime installer.
-pub const AUDIOGEN_PIP_PACKAGES: &[&str] = &[
-    "torch",
-    "transformers",
-    "soundfile",
-    "numpy",
-    "scipy",
-    "diffusers",
-    "accelerate",
-];
+/// (AudioLDM via `diffusers` is opt-in with `DEX_SFX_BACKEND=audioldm` and not installed by default.)
+pub const AUDIOGEN_PIP_PACKAGES: &[&str] = &["torch", "transformers", "soundfile", "numpy", "scipy"];
 
 /// Embedded source of the sidecar server script.
 pub const AUDIOGEN_SERVER_SOURCE: &str = include_str!("../assets/dex_audiogen_server.py");

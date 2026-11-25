@@ -440,9 +440,9 @@ async fn build_host_capabilities_manifest(workspace_dir: &Path) -> String {
     let music_line = if has_audio_env {
         "READY (external music/SFX server via `DEX_AUDIO_GEN_URL`)".to_string()
     } else if has_audiogen_sidecar {
-        "READY (`dex-audiogen` MusicGen/AudioLDM sidecar running on :8189; instrumental only, lyrics are not sung)".to_string()
+        "READY (`dex-audiogen` MusicGen music+SFX sidecar running on :8189; instrumental only, lyrics are not sung)".to_string()
     } else if has_audiogen_runtime {
-        "READY (`dex-audiogen` MusicGen/AudioLDM; sidecar auto-starts on first call, first run downloads weights; instrumental only, lyrics are not sung)".to_string()
+        "READY (`dex-audiogen` MusicGen music+SFX; sidecar auto-starts on first call, first run downloads weights; instrumental only, lyrics are not sung)".to_string()
     } else {
         "NOT INSTALLED (install 'Music & SFX Gen (MusicGen)' with 1 click in Models Hub -> Runtimes, runtime id `audiogen`)".to_string()
     };

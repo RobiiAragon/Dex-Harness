@@ -52,7 +52,7 @@ impl RuntimeKind {
             Self::MlxAudio => "Voice Studio Engine (mlx-audio)",
             Self::ParakeetMlx => "Parakeet TDT v3 ASR (MLX)",
             Self::FasterWhisper => "Faster-Whisper (CPU Fallback)",
-            Self::AudioGen => "Music & SFX Gen (MusicGen + AudioLDM)",
+            Self::AudioGen => "Music & SFX Gen (MusicGen)",
         }
     }
 
@@ -96,7 +96,7 @@ impl RuntimeKind {
                 "Click 'Install Faster-Whisper (1-click)' for cross-platform CPU/CTranslate2 Whisper transcription."
             }
             Self::AudioGen => {
-                "Click 'Install Music & SFX Gen (1-click)' (or run `dex models install-runtime audiogen`) to install torch + transformers MusicGen + diffusers AudioLDM into ~/.dex/runtimes/mlx-venv."
+                "Click 'Install Music & SFX Gen (1-click)' (or run `dex models install-runtime audiogen`) to install torch + transformers MusicGen into ~/.dex/runtimes/mlx-venv."
             }
         }
     }

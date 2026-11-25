@@ -289,7 +289,7 @@ impl Tool for AudioGenerateSfxTool {
     }
 
     fn description(&self) -> &str {
-        "Generates a sound effect (.wav) from a text description and duration using local AudioLDM on Apple Silicon (with an automatic local fallback model)."
+        "Generates a sound effect (.wav) from a text description and duration using a local generative audio model on Apple Silicon (foley-style; no external API)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -378,7 +378,7 @@ pub fn register_audio_tools(
             "audio".to_string(),
             "sfx".to_string(),
             "sound".to_string(),
-            "audioldm".to_string(),
+            "foley".to_string(),
             "effects".to_string(),
         ],
     );

@@ -3,7 +3,7 @@ use crate::manifest::{
     ExtensionCategory, ExtensionKind, ExtensionManifest, DEFAULT_IDLE_TIMEOUT_SECS,
 };
 
-/// Dex-managed local music & SFX sidecar (Meta MusicGen via transformers + AudioLDM via diffusers),
+/// Dex-managed local music & SFX sidecar (Meta MusicGen via transformers; AudioLDM opt-in),
 /// executed with the managed `~/.dex/runtimes/mlx-venv` interpreter. The server script is written by the
 /// `audiogen` runtime installer (and on demand by `harness-audio` before launch).
 fn audiogen_recipe() -> ExtensionManifest {
@@ -13,7 +13,7 @@ fn audiogen_recipe() -> ExtensionManifest {
         id: harness_core::DEX_AUDIOGEN_SIDECAR_ID.to_string(),
         name: "Dex Music & SFX Gen (MusicGen)".to_string(),
         category: ExtensionCategory::Audio,
-        description: "Generación local de música instrumental (Meta MusicGen) y efectos de sonido (AudioLDM) en GPU Apple Silicon (MPS), servida en http://127.0.0.1:8189.".to_string(),
+        description: "Generación local de música instrumental (Meta MusicGen) y efectos de sonido (MusicGen; AudioLDM opcional con `DEX_SFX_BACKEND=audioldm`) en GPU Apple Silicon (MPS), servida en http://127.0.0.1:8189.".to_string(),
         kind: ExtensionKind::LocalSidecar {
             command: harness_core::managed_venv_python().to_string_lossy().to_string(),
             args: harness_core::audiogen_launch_args(&script, port),
@@ -23,14 +23,14 @@ fn audiogen_recipe() -> ExtensionManifest {
         },
         estimated_ram_mb: 4096,
         idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
-        install_hint: "Instala el runtime 'Music & SFX Gen' con 1 clic (Models Hub › Runtimes) o `dex models install-runtime audiogen` (torch + transformers MusicGen + diffusers AudioLDM en ~/.dex/runtimes/mlx-venv). Modelos: `DEX_MUSICGEN_MODEL` (por defecto facebook/musicgen-small), `DEX_SFX_MODEL`.".to_string(),
+        install_hint: "Instala el runtime 'Music & SFX Gen' con 1 clic (Models Hub › Runtimes) o `dex models install-runtime audiogen` (torch + transformers MusicGen en ~/.dex/runtimes/mlx-venv). Modelos: `DEX_MUSICGEN_MODEL` (por defecto facebook/musicgen-small), `DEX_SFX_MODEL`.".to_string(),
         enabled: false,
         tags: vec![
             "audio".to_string(),
             "music".to_string(),
             "sfx".to_string(),
             "musicgen".to_string(),
-            "audioldm".to_string(),
+            "foley".to_string(),
         ],
     }
 }

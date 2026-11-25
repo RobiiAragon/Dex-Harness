@@ -15,9 +15,13 @@ Endpoints (all bound to 127.0.0.1):
 Backends:
   music: Meta MusicGen through Hugging Face transformers (MPS on Apple Silicon).
          Model id from DEX_MUSICGEN_MODEL (default facebook/musicgen-small).
-  sfx:   AudioLDM through diffusers when installed (DEX_SFX_MODEL, default
-         cvssp/audioldm-s-full-v2); otherwise MusicGen conditioned on the effect
-         description. The backend used is reported in the X-Dex-Backend header.
+  sfx:   MusicGen conditioned on the effect description (default). Set
+         DEX_SFX_BACKEND=audioldm to use diffusers AudioLDM (DEX_SFX_MODEL, default
+         cvssp/audioldm-s-full-v2); note diffusers' AudioLDM pipeline is deprecated
+         and yields near-silent audio with transformers 5.x, so silent output falls
+         back to MusicGen. The backend used is reported in the X-Dex-Backend header.
+
+Every response is checked for silence; a silent render is never returned as success.
 """
 
 from __future__ import annotations
@@ -35,6 +39,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 VERSION = "1"
 MUSICGEN_MODEL = os.environ.get("DEX_MUSICGEN_MODEL", "facebook/musicgen-small")
 SFX_MODEL = os.environ.get("DEX_SFX_MODEL", "cvssp/audioldm-s-full-v2")
+SFX_BACKEND = os.environ.get("DEX_SFX_BACKEND", "musicgen").strip().lower()
+SILENCE_PEAK = 1e-3
 MAX_MUSIC_SECS = 120.0
 MAX_SFX_SECS = 30.0
 
@@ -55,6 +61,14 @@ def _device():
     if torch.cuda.is_available():
         return "cuda"
     return "cpu"
+
+
+def _use_audioldm() -> bool:
+    return SFX_BACKEND == "audioldm" and _diffusers_available()
+
+
+class SilentOutput(RuntimeError):
+    pass
 
 
 def _diffusers_available() -> bool:
@@ -103,7 +117,10 @@ def _wav_bytes(samples, sample_rate: int) -> bytes:
     arr = np.asarray(samples, dtype=np.float32)
     if arr.ndim == 2 and arr.shape[0] < arr.shape[1]:
         arr = arr.T  # (channels, frames) -> (frames, channels)
+    arr = np.nan_to_num(arr)
     peak = float(np.max(np.abs(arr))) if arr.size else 0.0
+    if peak < SILENCE_PEAK:
+        raise SilentOutput(f"model produced silent audio (peak={peak:.6f})")
     if peak > 0.99:
         arr = arr * (0.99 / peak)
     buf = io.BytesIO()
@@ -194,8 +211,8 @@ class Handler(BaseHTTPRequestHandler):
                     "service": "dex-audiogen",
                     "version": VERSION,
                     "music_model": MUSICGEN_MODEL,
-                    "sfx_backend": "audioldm" if _diffusers_available() else "musicgen",
-                    "sfx_model": SFX_MODEL if _diffusers_available() else MUSICGEN_MODEL,
+                    "sfx_backend": "audioldm" if _use_audioldm() else "musicgen",
+                    "sfx_model": SFX_MODEL if _use_audioldm() else MUSICGEN_MODEL,
                     "music_loaded": _musicgen is not None,
                     "sfx_loaded": _audioldm is not None,
                 },
@@ -234,10 +251,15 @@ class Handler(BaseHTTPRequestHandler):
                     data, backend = generate_musicgen(prompt, duration, seed)
                 else:
                     duration = _clamp(req.get("duration_secs"), 0.5, MAX_SFX_SECS, 4.0)
-                    if _diffusers_available():
-                        data, backend = generate_audioldm(prompt, duration, seed)
+                    sfx_prompt = f"sound effect, foley, no music: {prompt}"
+                    if _use_audioldm():
+                        try:
+                            data, backend = generate_audioldm(prompt, duration, seed)
+                        except SilentOutput as exc:
+                            log(f"AudioLDM {exc}; falling back to MusicGen")
+                            data, backend = generate_musicgen(sfx_prompt, duration, seed)
                     else:
-                        data, backend = generate_musicgen(f"sound effect: {prompt}", duration, seed)
+                        data, backend = generate_musicgen(sfx_prompt, duration, seed)
                 log(f"{path} done in {time.time() - t0:.1f}s via {backend} ({len(data)} bytes)")
         except Exception as exc:  # noqa: BLE001
             traceback.print_exc(file=sys.stderr)

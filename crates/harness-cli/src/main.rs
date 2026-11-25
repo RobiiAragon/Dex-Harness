@@ -354,7 +354,7 @@ enum AudioCommands {
         #[arg(short, long)]
         out: Option<String>,
     },
-    /// Generate a sound effect (.wav) locally (AudioLDM, or MusicGen fallback)
+    /// Generate a sound effect (.wav) locally (MusicGen; AudioLDM opt-in via DEX_SFX_BACKEND=audioldm)
     Sfx {
         /// Sound effect description (e.g. "glass shattering on a stone floor")
         prompt: String,
