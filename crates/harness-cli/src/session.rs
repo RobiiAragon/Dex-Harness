@@ -497,10 +497,13 @@ pub async fn repl(mut parts: SessionParts, initial_goal: Option<String>) -> Resu
                                         };
                                         parts.endpoint.base_url = Some(active.base_url.clone());
                                         parts.endpoint.label = format!("Dex runtime · {}", active.name);
-                                        parts.endpoint.native = Some(crate::endpoint::NativeHandle {
-                                            supervisor: native.supervisor.clone(),
-                                            model: active.clone(),
-                                        });
+                                        parts.endpoint.native = Some(
+                                            crate::endpoint::NativeHandle::new(
+                                                native.supervisor.clone(),
+                                                active.clone(),
+                                            )
+                                            .await,
+                                        );
                                         agent = parts.build_agent();
                                         for m in history {
                                             agent.context_mut().push(m);

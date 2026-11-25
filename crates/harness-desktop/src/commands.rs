@@ -561,6 +561,7 @@ pub async fn run_goal(
     let mut effective_api_base = api_base.filter(|s| !s.trim().is_empty());
     let mut active_local_runtime: Option<String> = None;
     let mut active_sidecar_id: Option<String> = None;
+    let mut active_model_path: Option<String> = None;
 
     // If using Dex Native Runtime (`dex-local`), resolve live mounted model endpoint & refresh idle timer
     if provider_name.eq_ignore_ascii_case("dex-local") || provider_name.eq_ignore_ascii_case("dex_local") {
@@ -568,6 +569,7 @@ pub async fn run_goal(
         if let Some(active) = active_opt {
             active_local_runtime = Some(active.runtime.clone());
             active_sidecar_id = Some(active.sidecar_id.clone());
+            active_model_path = Some(active.path.clone());
             state
                 .extension_supervisor
                 .touch_last_used(&active.sidecar_id)
@@ -605,6 +607,7 @@ pub async fn run_goal(
                     Ok(active) => {
                         active_local_runtime = Some(active.runtime.clone());
                         active_sidecar_id = Some(active.sidecar_id.clone());
+                        active_model_path = Some(active.path.clone());
                         effective_api_base = Some(active.base_url.clone());
                         model_name = if active.runtime == "mlx" {
                             active.path.clone()
@@ -688,11 +691,19 @@ pub async fn run_goal(
     // Dex's own runtime: reload the model by itself if it was unloaded (idle, or to make room
     // for an image / music / 3D model).
     if let Some(ref sidecar) = active_sidecar_id {
-        provider_instance = Arc::new(harness_models::NativeReloadProvider::new(
-            provider_instance,
-            state.extension_supervisor.clone(),
-            sidecar.clone(),
-        ));
+        // Each answer may run as long as the RAM that is free at that moment allows.
+        let budget = match active_model_path.as_deref() {
+            Some(path) => harness_models::OutputBudget::for_model_path(path).await,
+            None => harness_models::OutputBudget::default(),
+        };
+        provider_instance = Arc::new(
+            harness_models::NativeReloadProvider::new(
+                provider_instance,
+                state.extension_supervisor.clone(),
+                sidecar.clone(),
+            )
+            .with_output_budget(budget),
+        );
     }
 
     let workspace_dir = state.active_workspace_dir.read().await.clone();

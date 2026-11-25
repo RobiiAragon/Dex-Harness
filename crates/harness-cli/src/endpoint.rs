@@ -16,7 +16,7 @@ use harness_llm::{OllamaProvider, OpenAiProvider};
 use harness_models::{
     detect_local_servers, discover_native_chat_models, find_local_model, is_chat_model_id,
     load_native_chat_model, pick_chat_endpoint, pick_default_chat_model, total_ram_bytes,
-    ActiveLoadedModel, DiscoveredModel, LocalServerInfo, NativeReloadProvider,
+    ActiveLoadedModel, DiscoveredModel, LocalServerInfo, NativeReloadProvider, OutputBudget,
 };
 
 /// Persistent CLI preferences (`~/.dex/cli.json`), written by `/model` and `/mode` in the REPL.
@@ -63,6 +63,15 @@ impl CliConfig {
 pub struct NativeHandle {
     pub supervisor: Arc<ExtensionSupervisor>,
     pub model: ActiveLoadedModel,
+    /// How long answers may run for this model, given the RAM free at each answer.
+    pub budget: OutputBudget,
+}
+
+impl NativeHandle {
+    pub async fn new(supervisor: Arc<ExtensionSupervisor>, model: ActiveLoadedModel) -> Self {
+        let budget = OutputBudget::for_model_path(&model.path).await;
+        Self { supervisor, model, budget }
+    }
 }
 
 impl std::fmt::Debug for NativeHandle {
@@ -117,11 +126,14 @@ impl Endpoint {
             }
         };
         match &self.native {
-            Some(native) => Arc::new(NativeReloadProvider::new(
-                base,
-                native.supervisor.clone(),
-                native.model.sidecar_id.clone(),
-            )),
+            Some(native) => Arc::new(
+                NativeReloadProvider::new(
+                    base,
+                    native.supervisor.clone(),
+                    native.model.sidecar_id.clone(),
+                )
+                .with_output_budget(native.budget),
+            ),
             None => base,
         }
     }
@@ -279,10 +291,7 @@ pub async fn resolve(
                         base_url: Some(active.base_url.clone()),
                         label: "Dex runtime".to_string(),
                         local: true,
-                        native: Some(NativeHandle {
-                            supervisor: sup.clone(),
-                            model: active,
-                        }),
+                        native: Some(NativeHandle::new(sup.clone(), active).await),
                     });
                 }
                 Err(e) => {

@@ -252,6 +252,12 @@ impl Agent for ReActAgent {
 
         // Check if agent concluded without requesting further tools
         if tool_calls.is_empty() {
+            if response.finish_reason.as_deref() == Some("length") {
+                tracing::warn!(
+                    iteration = iteration,
+                    "Model stopped at its output token limit; the answer is truncated"
+                );
+            }
             let answer = response.content.unwrap_or_default();
             debug!(iteration = iteration, "Agent finished: no tool calls requested");
 

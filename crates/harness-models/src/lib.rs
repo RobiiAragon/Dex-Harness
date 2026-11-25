@@ -27,7 +27,7 @@ pub use local_servers::{
 pub use native::{
     discover_native_chat_models, ensure_native_runtime_running, estimated_runtime_ram_mb,
     find_local_model, is_native_chat_candidate, load_native_chat_model, pick_default_chat_model,
-    total_ram_bytes, NativeReloadProvider, CHAT_MODEL_MAX_RAM_FRACTION,
+    total_ram_bytes, NativeReloadProvider, OutputBudget, CHAT_MODEL_MAX_RAM_FRACTION,
 };
 pub use ollama_bridge::{OllamaBridge, OllamaModelDetails, OllamaModelTag};
 pub use registry::{ModelMetadata, ModelRegistry, ModelSource};

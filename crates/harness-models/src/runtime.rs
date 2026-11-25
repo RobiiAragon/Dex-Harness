@@ -11,6 +11,11 @@ use crate::error::ModelError;
 
 pub const DEX_MLX_PORT: u16 = 8088;
 pub const DEX_LLAMA_PORT: u16 = 8089;
+/// Server-side answer cap, used only when a request does not set `max_tokens`.
+/// `mlx_lm.server` defaults to 512 tokens, which cut long answers off mid-sentence; Dex's own
+/// requests set a per-answer limit from free RAM (see `native::OutputBudget`), so the server
+/// default just has to stay out of the way. llama.cpp uses `-1` (until the context is full).
+pub const DEX_SERVER_MAX_TOKENS_FALLBACK: u32 = 262_144;
 pub const DEX_RUNTIME_SIDECAR_ID: &str = "dex-local-runtime";
 pub const LOCAL_MODEL_STARTUP_TIMEOUT_SECS: u64 = 90;
 const RUNTIME_INSTALL_TIMEOUT_SECS: u64 = 600;
@@ -427,6 +432,8 @@ pub fn build_launch_spec(
             "127.0.0.1".to_string(),
             "--port".to_string(),
             port.to_string(),
+            "--max-tokens".to_string(),
+            DEX_SERVER_MAX_TOKENS_FALLBACK.to_string(),
         ]);
         return Ok(RuntimeLaunchSpec {
             runtime: RuntimeKind::Mlx,
@@ -459,6 +466,8 @@ pub fn build_launch_spec(
                 port.to_string(),
                 "-ngl".to_string(),
                 "99".to_string(),
+                "-n".to_string(),
+                "-1".to_string(),
             ],
             port,
             base_url,
@@ -972,6 +981,15 @@ mod tests {
         assert!(mlx_spec.args.contains(&"--host".to_string()));
         assert!(mlx_spec.args.contains(&"127.0.0.1".to_string()));
         assert!(mlx_spec.args.contains(&"8088".to_string()));
+        let max_tokens_at = mlx_spec
+            .args
+            .iter()
+            .position(|a| a == "--max-tokens")
+            .expect("mlx spec sets --max-tokens");
+        assert_eq!(
+            mlx_spec.args[max_tokens_at + 1],
+            DEX_SERVER_MAX_TOKENS_FALLBACK.to_string()
+        );
 
         let gguf_spec = build_launch_spec(
             "gguf",
