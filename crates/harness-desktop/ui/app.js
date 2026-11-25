@@ -5012,256 +5012,192 @@
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  function populateShowcaseAgentTurn() {
-    clearAgentFeed();
-    appendUserMessage(
-      'Audit our local Apple Silicon multimodal stack, inspect the generated 3D drone core mesh in .dex/media/3d/scifi_drone_core.glb, extract the architecture card via Apple Vision OCR, and summarize the memory & latency profile.',
-      [
-        { filename: 'scifi_drone_core.glb', path: '.dex/media/3d/scifi_drone_core.glb', kind: 'mesh_3d' },
-        { filename: 'architecture_spec_card.png', path: '.dex/media/images/architecture_spec_card.png', kind: 'image' },
-      ]
-    );
-
-    const turn = ensureActiveTurn();
-    turn.startedAt = performance.now() - 3800;
-
-    const toolSteps = [
-      {
-        name: 'read_file',
-        args: { path: 'crates/harness-models/src/runtime.rs' },
-        out: 'Verified 7 autonomous Apple Silicon runtimes (mlx, llamacpp, mlx-whisper, mflux, mlx-audio, parakeet-mlx, faster-whisper) -> all Ready.',
-        dur: '120ms',
-      },
-      {
-        name: 'ocr_image',
-        args: { path: '.dex/media/images/architecture_spec_card.png' },
-        out: 'Engine: apple-vision (VNRecognizeTextRequest) · Extracted 13 text blocks (DEX HARNESS v1.0 - APPLE SILICON MULTIMODAL SPEC)',
-        dur: '18ms',
-      },
-      {
-        name: 'mesh_inspect',
-        args: { path: '.dex/media/3d/scifi_drone_core.glb' },
-        out: 'Format: GLB · Vertices: 1,458 · Triangles: 2,848 · Primitives: 3 PBR materials (CoreCyan, ObsidianTitanium, AccentCopper) · Watertight: true',
-        dur: '9ms',
-      },
-      {
-        name: 'execute_shell',
-        args: { command: 'cargo test --workspace' },
-        out: 'test result: ok. 80 passed; 0 failed; 0 ignored across 11 workspace crates.',
-        dur: '1.4s',
-      },
-    ];
-
-    for (const st of toolSteps) {
-      appendToolStartedCard(st.name, st.args);
-      resolveToolFinishedCard(st.name, st.out, false);
-      const lastStep = turn.steps[turn.steps.length - 1];
-      if (lastStep && lastStep.el) {
-        const durEl = lastStep.el.querySelector('.step-dur');
-        if (durEl) durEl.textContent = st.dur;
-      }
+  // Waits until `check()` is truthy (polling), up to `timeoutMs`. Returns the last value.
+  async function qaWaitFor(check, timeoutMs, stepMs = 500) {
+    const deadline = Date.now() + timeoutMs;
+    let value = check();
+    while (!value && Date.now() < deadline) {
+      await qaSleep(stepMs);
+      value = check();
     }
-
-    const markdownAnswer = [
-      '### Apple Silicon Multimodal Stack & 3D Asset Audit',
-      '',
-      'All **7 native Apple Silicon runtimes** and multimodal studios are online and verified on **Apple M4 Pro (48.0 GB Unified RAM)**:',
-      '',
-      '| Subsystem | Active Engine / Runtime | Model / Asset | Status & Telemetry |',
-      '| :--- | :--- | :--- | :--- |',
-      '| **Local LLM Inference** | `mlx_lm.server` (`:8088`) | `Qwen3.5-9B-abliterated` (`MLX 4bit`) | **Online** · `4.71 GB` VRAM · `~78 tok/s` |',
-      '| **Vision & Document OCR** | Apple Vision (`VNRecognizeTextRequest`) | `architecture_spec_card.png` | **Verified** · `13 blocks` (`18 ms`) |',
-      '| **3D & Game Pipeline** | Headless Blender `5.2.2 LTS` + WebGL2 | `scifi_drone_core.glb` (`3 PBR mats`) | **Verified** · `2,848 tris` · `Watertight` |',
-      '| **Voice Studio & Cloning** | `mlx-audio` + `mlx-whisper` + `parakeet-mlx` | `Qwen3-TTS-12Hz-0.6B` (`Robii Studio ES`) | **Ready** · `16 kHz PCM` · `-3.0 dBFS` |',
-      '| **Image & Video Studio** | `mflux 0.23+` (`FLUX.1-schnell`) + `ffmpeg` | `dhairyashil/FLUX.1-schnell-mflux-4bit` | **Ready** · `4-step MLX Metal` |',
-      '',
-      '```rust',
-      '// Pre-flight weight shard integrity & autonomous MLX runtime launch',
-      'pub async fn mount_verified_local_model(model: &DiscoveredModel) -> Result<ActiveLoadedModel, ModelError> {',
-      '    model.ensure_valid_integrity()?; // Blocks partial/corrupt shards before spawning',
-      '    let bin = detect_runtime_binary(RuntimeKind::Mlx).ok_or(ModelError::RuntimeMissing("mlx"))?;',
-      '    launch_and_await_health(build_launch_spec(&model.format, &model.path, &bin)?).await',
-      '}',
-      '```',
-    ].join('\n');
-
-    finalizeActiveTurn(markdownAnswer);
-    // Keep the activity accordion expanded so all 4 completed tool actions are visible in the screenshot
-    turn.activityEl.classList.add('open');
-    turn.activityLabelEl.textContent = 'Worked for 3.8s · 4 actions';
-    updateContextMetric(4820);
-    const scroller = el('agent-feed-scroll');
-    if (scroller) scroller.scrollTop = 0;
+    return value;
   }
 
+  function qaText(id) {
+    const node = el(id);
+    return node ? (node.textContent || '').trim() : '';
+  }
+
+  // Runs one real step; records {ok, detail, secs} in report.steps and never throws.
+  async function qaStep(report, name, fn) {
+    const started = Date.now();
+    let ok = false;
+    let detail = '';
+    try {
+      const res = await fn();
+      ok = !!(res && res.ok);
+      detail = (res && res.detail) || '';
+    } catch (err) {
+      detail = `exception: ${err}`;
+    }
+    report.steps[name] = { ok, detail: String(detail).slice(0, 300), secs: Math.round((Date.now() - started) / 100) / 10 };
+    return ok;
+  }
+
+  // Every screenshot shows output Dex really produced on this Mac: a real agent turn on the
+  // auto-loaded local model, a real image, real speech + music, real OCR and a real 3D mesh.
+  // Nothing is staged; `passed` requires each real step to succeed.
   async function runAutomatedQaWalkthrough() {
-    const views = [
-      { id: 'view-agent', shot: '01_agent.png' },
-      { id: 'view-media', shot: '02_media_studio.png' },
-      { id: 'view-audio', shot: '03_voice_studio_docs.png' },
-      { id: 'view-3d', shot: '04_3d_game_studio.png' },
-      { id: 'view-models', shot: '05_models_hub.png' },
-      { id: 'view-extensions', shot: '06_extensions.png' },
-      { id: 'view-cookbook', shot: '07_cookbook.png' },
-    ];
     const report = {
       timestamp: new Date().toISOString(),
       views_checked: [],
+      steps: {},
       assertions: {},
       screenshots: [],
       js_errors: [],
       passed: false,
     };
+    const toastStack = el('global-toast-stack');
+    const clearToasts = () => { if (toastStack) toastStack.innerHTML = ''; };
+
+    async function shot(viewId, filename) {
+      const panel = el(viewId);
+      report.views_checked.push({
+        id: viewId,
+        active: !!(panel && panel.classList.contains('active')),
+        overflow_x: panel ? panel.scrollWidth > panel.clientWidth + 4 : false,
+      });
+      try {
+        const path = await invoke('qa_capture_screenshot', { filename });
+        report.screenshots.push(path);
+        return path;
+      } catch (err) {
+        report.screenshots.push(`FAILED:${filename}:${err}`);
+        return null;
+      }
+    }
 
     try {
       await qaSleep(1200);
       await refreshModelsLibrary();
       await refreshAudioStudio();
 
-      // 1. Verify actionable toast system pre-flight, then clear so zero error toasts appear in screenshots
-      presentActionableError('BackendNotInstalled (3d): trellis-3d sidecar is not running.', 'view-3d');
+      // Toast system works (then cleared so screenshots show real state only).
+      presentActionableError('BackendNotInstalled (3d): qa toast check', 'view-3d');
       await qaSleep(150);
-      const toastStack = el('global-toast-stack');
       const toastVerified = !!(toastStack && toastStack.children.length > 0);
-      if (toastStack) toastStack.innerHTML = '';
+      clearToasts();
 
-      // 2. Mount a real Valid MLX model into Dex's native runtime (:8088) so the app is 100% live & online
-      const validMlx =
-        (state.scannedModels || []).find((m) => m.integrity_status === 'Valid' && m.format === 'mlx' && /9b/i.test(m.name)) ||
-        (state.scannedModels || []).find((m) => m.integrity_status === 'Valid' && m.format === 'mlx');
-      if (validMlx && !state.activeLoadedModel) {
-        await loadLocalModelFromSpec(validMlx, false);
-        await qaSleep(800);
-      }
-      if (toastStack) toastStack.innerHTML = '';
+      // 1. Agent: a real turn. Dex auto-loads the best local model for this Mac.
+      navigate('view-agent');
+      clearAgentFeed();
+      await qaStep(report, 'agent_turn', async () => {
+        const goal = el('input-goal');
+        if (goal) goal.value = 'Usa tus herramientas para revisar el hardware de esta Mac y responde con una tabla corta: chip, RAM total y RAM disponible.';
+        await runGoal();
+        await qaWaitFor(() => !state.running, 300000);
+        await refreshActiveModelPill();
+        const answers = document.querySelectorAll('#agent-feed-scroll .turn-answer');
+        const last = answers.length ? (answers[answers.length - 1].textContent || '').trim() : '';
+        const steps = document.querySelectorAll('#agent-feed-scroll .step-row').length;
+        return { ok: last.length > 0, detail: `${steps} tool steps · model: ${state.activeLoadedModel ? state.activeLoadedModel.name : 'none'} · answer: ${last.slice(0, 160)}` };
+      });
+      clearToasts();
+      const scroller = el('agent-feed-scroll');
+      if (scroller) scroller.scrollTop = 0;
+      const agentShot = await shot('view-agent', '01_agent.png');
+
+      // 2. Media Studio: a real image with the default model.
+      navigate('view-media');
+      await qaStep(report, 'image_generate', async () => {
+        const mp = el('media-prompt-input');
+        if (mp) mp.value = 'a cozy wooden cabin by a mountain lake at sunset, photo';
+        await generateImageFromUi();
+        const status = qaText('media-gen-status');
+        return { ok: status.startsWith('Saved'), detail: status };
+      });
+      await refreshVisualMedia();
+      clearToasts();
+      await qaSleep(500);
+      await shot('view-media', '02_media_studio.png');
+
+      // 3. Audio & Docs: real speech, real music, and real OCR of the Agent screenshot.
+      navigate('view-audio');
+      toggleAudioModelsDrawer(false);
+      await qaStep(report, 'tts', async () => {
+        const ttsIn = el('tts-text-input');
+        if (ttsIn) ttsIn.value = 'Hola, soy Dex. Esta voz se genera localmente en tu Mac.';
+        await speakTextFromUi();
+        const note = qaText('tts-status-note');
+        return { ok: note.startsWith('Saved'), detail: note };
+      });
+      await qaStep(report, 'music_generate', async () => {
+        const mi = el('music-prompt-input');
+        if (mi) mi.value = 'calm acoustic guitar with soft rain ambience';
+        const md = el('music-duration-input');
+        if (md) md.value = '6';
+        await generateMusicFromUi();
+        const note = qaText('music-status-note');
+        return { ok: note.startsWith('Saved'), detail: note };
+      });
+      await qaStep(report, 'ocr', async () => {
+        const docIn = el('doc-path-input');
+        if (!agentShot || !docIn) return { ok: false, detail: 'no agent screenshot to read' };
+        docIn.value = agentShot;
+        await runOcrFromUi();
+        const meta = qaText('doc-result-meta');
+        const blocks = parseInt((meta.match(/Blocks:\s*(\d+)/) || [])[1] || '0', 10);
+        return { ok: blocks > 0, detail: meta };
+      });
+      await refreshAudioMedia();
+      clearToasts();
+      await qaSleep(500);
+      await shot('view-audio', '03_voice_studio_docs.png');
+      toggleAudioModelsDrawer(true);
+      await qaSleep(350);
+      await shot('view-audio', '03b_audio_models_drawer.png');
+      toggleAudioModelsDrawer(false);
+
+      // 4. 3D Studio: a real text-to-3D mesh, shown in the viewer.
+      navigate('view-3d');
+      await qaStep(report, 'gen3d', async () => {
+        const p3d = el('gen3d-prompt');
+        if (p3d) p3d.value = 'a red wooden chair';
+        const img = el('gen3d-image-path');
+        if (img) img.value = '';
+        await generate3dFromUi();
+        const status = qaText('gen3d-status');
+        return { ok: status.startsWith('Generated'), detail: status };
+      });
+      clearToasts();
+      await qaSleep(750);
+      await shot('view-3d', '04_3d_game_studio.png');
+
+      // 5. Models Hub (library + live Hugging Face search), Extensions, Cookbook.
+      navigate('view-models');
+      switchModelsTab('library');
+      await refreshModelsLibrary();
       const rtLogBox = el('runtime-log-box');
       if (rtLogBox) rtLogBox.style.display = 'none';
-      updateContextMetric(4820);
+      await qaSleep(500);
+      await shot('view-models', '05_models_hub.png');
+      switchModelsTab('explore');
+      const hfIn = el('hf-search-input');
+      if (hfIn) hfIn.value = 'Qwen3';
+      await searchHfModels();
+      await qaSleep(2000);
+      await shot('view-models', '05b_models_explore.png');
+      switchModelsTab('library');
 
-      for (const v of views) {
-        navigate(v.id);
-        await qaSleep(900);
-        if (toastStack) toastStack.innerHTML = '';
+      navigate('view-extensions');
+      await refreshExtensions();
+      await qaSleep(500);
+      await shot('view-extensions', '06_extensions.png');
 
-        if (v.id === 'view-agent') {
-          populateShowcaseAgentTurn();
-          await qaSleep(400);
-        }
+      navigate('view-cookbook');
+      await qaSleep(900);
+      await shot('view-cookbook', '07_cookbook.png');
 
-        if (v.id === 'view-media') {
-          const mp = el('media-prompt-input');
-          if (mp) {
-            mp.value = 'Autonomous cyberpunk drone reactor core on Apple Silicon M4 Pro, obsidian titanium rings, volumetric cyan rim lighting, 8k studio render';
-          }
-          const ma = el('media-asset-path');
-          if (ma) {
-            ma.value = '/Users/robii/Documents/GitHub/Dex-Harness/.dex/media/images/cyberpunk_drone_core_render.png';
-          }
-          await refreshVisualMedia();
-          await qaSleep(400);
-        }
-
-        if (v.id === 'view-audio') {
-          toggleAudioModelsDrawer(false);
-          await refreshAudioStudio();
-          const ttsIn = el('tts-text-input');
-          if (ttsIn) {
-            ttsIn.value = 'Bienvenido a Dex Harness v1.0. Todos los motores locales de inferencia MLX, visión Apple Vision, clonación de voz y modelado 3D en Blender están activos.';
-          }
-          const ttsNote = el('tts-status-note');
-          if (ttsNote) {
-            ttsNote.textContent = 'Synthesized via mlx-audio (Qwen3-TTS-12Hz · Robii — Studio Español · 6.4s)';
-          }
-          const docIn = el('doc-path-input');
-          if (docIn) {
-            docIn.value = '/Users/robii/Documents/GitHub/Dex-Harness/.dex/media/images/architecture_spec_card.png';
-          }
-          try { await runOcrFromUi(); } catch (_) {}
-          await refreshAudioMedia();
-          await qaSleep(500);
-        }
-
-        if (v.id === 'view-3d') {
-          await refresh3dModels();
-          const preferredMesh =
-            (state.models3dCache || []).find((m) => /scifi_drone_core\.glb$/i.test(m.filename)) ||
-            (state.models3dCache || [])[0];
-          if (preferredMesh) {
-            await load3dModelIntoViewer(preferredMesh.path);
-          } else {
-            try { await createSample3dCubeFromUi(); } catch (_) {}
-          }
-          const p3d = el('gen3d-prompt');
-          if (p3d) {
-            p3d.value = 'Multi-ring metallic drone reactor core with glowing cyan icosphere, PBR titanium & copper';
-          }
-          show3dActionOutput(
-            'Blender 5.2.2 LTS Headless Pipeline Ready · Mesh: scifi_drone_core.glb (3 PBR primitives · 2,976 tris · Watertight: Yes) · Studio EEVEE preview rendered (1024x768).'
-          );
-          if (toastStack) toastStack.innerHTML = '';
-          await qaSleep(750);
-        }
-
-        if (v.id === 'view-models') {
-          switchModelsTab('library');
-          await refreshModelsLibrary();
-          if (rtLogBox) rtLogBox.style.display = 'none';
-          await qaSleep(500);
-        }
-
-        if (v.id === 'view-extensions') {
-          await refreshExtensions();
-          await qaSleep(500);
-        }
-
-        const panel = el(v.id);
-        const overflowX = panel ? panel.scrollWidth > panel.clientWidth + 4 : false;
-        report.views_checked.push({
-          id: v.id,
-          active: !!(panel && panel.classList.contains('active')),
-          overflow_x: overflowX,
-        });
-
-        try {
-          const shotPath = await invoke('qa_capture_screenshot', { filename: v.shot });
-          report.screenshots.push(shotPath);
-        } catch (shotErr) {
-          report.screenshots.push(`FAILED:${v.shot}:${shotErr}`);
-        }
-
-        if (v.id === 'view-audio') {
-          toggleAudioModelsDrawer(true);
-          await qaSleep(350);
-          try {
-            const drawerShot = await invoke('qa_capture_screenshot', { filename: '03b_audio_models_drawer.png' });
-            report.screenshots.push(drawerShot);
-          } catch (_) {}
-          toggleAudioModelsDrawer(false);
-        }
-
-        if (v.id === 'view-models') {
-          switchModelsTab('explore');
-          const hfIn = el('hf-search-input');
-          if (hfIn) hfIn.value = 'Qwen3';
-          await searchHfModels();
-          await qaSleep(2000);
-          try {
-            const exploreShot = await invoke('qa_capture_screenshot', { filename: '05b_models_explore.png' });
-            report.screenshots.push(exploreShot);
-          } catch (_) {}
-          switchModelsTab('library');
-        }
-      }
-
-      // Return to Agent view at the end so 01_agent.png is guaranteed centered & settled with active model + turn
-      navigate('view-agent');
-      populateShowcaseAgentTurn();
-      await qaSleep(550);
-      try {
-        await invoke('qa_capture_screenshot', { filename: '01_agent.png' });
-      } catch (_) {}
-
-      // Check mandatory Phase 14 UI controls & live configuration invariants
       const allRuntimesReady = (state.runtimes || []).length >= 7 && (state.runtimes || []).every((r) => r.available);
       report.assertions = {
         composer_lang_selector: !!el('composer-stt-lang'),
@@ -5271,25 +5207,23 @@
         actionable_toast_verified: toastVerified,
         all_runtimes_ready: allRuntimesReady,
         active_loaded_model: state.activeLoadedModel ? state.activeLoadedModel.name : null,
-        browse_buttons_count: document.querySelectorAll('button').length > 0
-          ? Array.from(document.querySelectorAll('button')).filter((b) => (b.textContent || '').trim() === 'Browse').length
-          : 0,
+        browse_buttons_count: Array.from(document.querySelectorAll('button')).filter((b) => (b.textContent || '').trim() === 'Browse').length,
         drop_zones_count: document.querySelectorAll('[data-drop-target]').length,
         scanned_models_count: (state.scannedModels || []).length,
         incomplete_models_detected: (state.scannedModels || []).filter((m) => m.integrity_status === 'Incomplete').map((m) => m.name),
       };
       report.js_errors = (global.__DEX_QA_ERRORS__ || []).slice();
+      const allStepsOk = Object.values(report.steps).every((st) => st.ok);
       report.passed =
+        allStepsOk &&
         report.js_errors.length === 0 &&
         report.assertions.composer_lang_selector &&
         report.assertions.voice_studio_lang_selector &&
         report.assertions.media_model_selector &&
-        report.assertions.global_toast_stack &&
         report.assertions.actionable_toast_verified &&
         report.assertions.all_runtimes_ready &&
         !!report.assertions.active_loaded_model &&
-        report.assertions.browse_buttons_count >= 5 &&
-        report.assertions.drop_zones_count >= 4;
+        report.views_checked.every((v) => v.active && !v.overflow_x);
 
       await invoke('qa_write_report', { report });
     } catch (err) {

@@ -485,7 +485,8 @@ async fn build_host_capabilities_manifest(workspace_dir: &Path) -> String {
 ### Capability Routing Rules (MANDATORY)
 1. Never invent hardware specs — rely directly on the Host Manifest above.
 2. If the user asks for an image, video, AI music/SFX, or AI image-to-3D reconstruction whose backend is listed as `NOT INSTALLED` (or if a tool returns `BackendNotInstalled`), DO NOT retry that tool in a loop.
-3. Instead, transparently tell the user which backend is needed (and how to install it with 1 click in Dex's Models Hub / Extensions) AND proactively offer concrete alternatives that ARE `READY` right now (for example: building procedural 3D meshes in Blender via Python + exporting `.glb` and inspecting with `mesh_inspect`, or creating SVG/HTML visual prototypes).",
+3. Instead, transparently tell the user which backend is needed (and how to install it with 1 click in Dex's Models Hub / Extensions) AND proactively offer concrete alternatives that ARE `READY` right now (for example: building procedural 3D meshes in Blender via Python + exporting `.glb` and inspecting with `mesh_inspect`, or creating SVG/HTML visual prototypes).
+4. Always reply in the same language the user writes in (Spanish in, Spanish out), including tables and headings.",
         chip = profile.cpu_brand,
         cores = profile.cpu_cores,
         arch = profile.arch,
