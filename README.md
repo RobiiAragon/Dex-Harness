@@ -52,7 +52,7 @@ flowchart TB
     subgraph UI["User Interfaces"]
         APP["Dex.app (macOS Tauri v2 + WKWebView + WebGL2)"]
         CLI["dex CLI / REPL"]
-        TUI["Ratatui Terminal UI & Axum Web Dashboard"]
+        TUI["Ratatui Terminal Dashboard"]
     end
 
     subgraph CORE["harness-core & harness-llm"]
@@ -95,7 +95,7 @@ crates/
 ├── harness-docs/        # Native macOS Apple Vision OCR (`dex-vision-ocr`), Tesseract fallback, Docling & pure-Rust PDF parser
 ├── harness-media/       # Apple Silicon `mflux` CLI/HTTP image gen, ComfyUI workflows, pure-Rust image ops, FFmpeg declarative video
 ├── harness-3d/          # Pure-Rust glTF 2.0 / OBJ geometry inspector, image-to-3D sidecars, headless Blender & Unity exporter
-├── harness-ui/          # Ratatui terminal dashboard (`dex tui`) & Axum WebSocket web monitor (`dex web`)
+├── harness-ui/          # Ratatui terminal dashboard (`dex tui`)
 ├── harness-cli/         # Unified command-line interface (`dex`)
 └── harness-desktop/     # Native macOS Desktop Application (`Dex.app`) with automated E2E QA walkthrough (`DEX_QA_WALKTHROUGH=1`)
 ```
@@ -146,13 +146,36 @@ cargo tauri build --bundles app --debug --no-sign
 open ../../target/debug/bundle/macos/Dex.app
 ```
 
-### 3. CLI Quick Reference (`dex`)
+### 3. CLI Quick Start (`dex`)
+
+`dex` needs **zero configuration**: it auto-detects a running local model server
+(LM Studio on `:1234`/`:1235`, Ollama, Dex MLX, llama.cpp), starts LM Studio's headless
+server if it is installed but off, and picks a loaded chat model.
 
 ```bash
-# Autonomous Agent Execution
-dex run "Inspect workspace and run tests" --mode autopilot
+dex                                      # interactive session in the current folder
+dex "arregla el test que falla"          # interactive session with a first task
+dex run "summarize README.md"            # one-shot, non-interactive
+echo "explain this" | dex                # piped input
+dex doctor                               # servers, models, runtimes, extensions + exact fixes
+```
+
+Inside the session:
+
+| Command | What it does |
+|---|---|
+| `/model [id]` | list chat models on the current server, or switch (remembered in `~/.dex/cli.json`) |
+| `/mode safe\|plan\|autopilot` | **safe** (default) asks before edits/shell — `y`/`n`/`a`lways; **plan** is read-only; **autopilot** never asks |
+| `/clear` | fresh conversation |
+| `/tools`, `/doctor`, `/help`, `/exit` | — |
+| `Ctrl-C` | interrupt the current task (twice at the prompt to quit) |
+
+Overrides: `--provider lmstudio|ollama|mlx|llamacpp|openai`, `--model <id>`,
+`--api-base <url>`, `--mode <mode>`, `--no-stream`, `--max-steps <n>` (or `DEX_*` env vars).
+
+```bash
+# Dashboards & hardware
 dex tui                                  # Ratatui terminal dashboard
-dex web --port 3000                      # Embedded WebSocket web dashboard
 dex cookbook                             # Host hardware & Apple Silicon RAM profile
 
 # Local Models Hub & Integrity Check

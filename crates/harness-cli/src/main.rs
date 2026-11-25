@@ -1,9 +1,9 @@
-use std::io::{self, Write};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
-use async_trait::async_trait;
 use clap::{Parser, Subcommand, ValueEnum};
+use tokio::sync::{Mutex, RwLock};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
@@ -12,11 +12,9 @@ use harness_computer::{
     BrowserSession, BrowserTypeTool, DesktopKeyboardTool, DesktopMouseTool, DesktopScreenshotTool,
 };
 use harness_core::{
-    Agent, AgentEvent, AgentStep, CoreError, EventBus, HardwareProfile, Hook, HookAction,
-    HookRegistry, LlmProvider, LoadSkillTool, ManageTasksTool, ProgressiveSkillLoader, ReActAgent,
-    ScheduleRegistry, SpawnSubagentTool, ToolRegistry,
+    Agent, EventBus, HardwareProfile, HookRegistry, LlmProvider, LoadSkillTool, ManageTasksTool,
+    ProgressiveSkillLoader, ReActAgent, ScheduleRegistry, SpawnSubagentTool, ToolRegistry,
 };
-use harness_llm::{OllamaProvider, OpenAiProvider};
 use harness_mcp::McpServer;
 use harness_tools::{
     EditFileTool, ExecuteShellTool, FindFilesTool, GitWorktreeTool, GrepSearchTool, PtyShellTool,
@@ -25,16 +23,24 @@ use harness_tools::{
 use harness_3d::register_3d_tools;
 use harness_audio::register_audio_tools;
 use harness_docs::register_docs_tools;
-use harness_extensions::{register_enabled_mcp_extensions, ExtensionSupervisor};
+use harness_extensions::{connect_enabled_mcp_extensions, ExtensionSupervisor};
 use harness_media::register_media_tools;
-use harness_ui::{run_tui, start_web_dashboard};
+use harness_ui::run_tui;
 
 mod audio_cli;
 mod docs_cli;
+mod doctor;
+mod endpoint;
 mod ext_cli;
 mod media_cli;
 mod models_cli;
+mod session;
 mod threed_cli;
+mod ui;
+
+use endpoint::{CliConfig, Endpoint, EndpointRequest};
+use session::{CliSecurityHook, Input, SessionParts};
+use ui::{Style, StreamPrinter};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ExecutionMode {
@@ -48,33 +54,42 @@ pub enum ExecutionMode {
 
 #[derive(Parser, Debug)]
 #[command(name = "dex")]
-#[command(author = "Dex-Harness Contributors")]
-#[command(version = "0.3.0")]
-#[command(about = "High-Performance Autonomous Agent Harness in Rust", long_about = None)]
+#[command(version)]
+#[command(about = "Dex — local-first AI agent for your terminal and Mac", long_about = None)]
+#[command(
+    after_help = "Examples:\n  dex                         start an interactive session (auto-detects LM Studio / Ollama / MLX)\n  dex \"fix the failing test\"  start a session with a first task\n  dex run \"summarize README\"  one-shot, non-interactive\n  dex doctor                  check servers, models and runtimes"
+)]
 struct Cli {
-    /// LLM inference provider (ollama, openai)
-    #[arg(short, long, default_value = "ollama", env = "DEX_PROVIDER")]
-    provider: String,
+    /// Model server: auto (default), lmstudio, ollama, mlx, llamacpp, openai
+    #[arg(short, long, env = "DEX_PROVIDER", global = true)]
+    provider: Option<String>,
 
-    /// Model identifier to use (e.g. qwen2.5:7b, llama3.1:8b, gpt-4o-mini)
-    #[arg(short, long, default_value = "qwen2.5:7b", env = "DEX_MODEL")]
-    model: String,
+    /// Model id (defaults to the last one you picked with /model, else the first loaded model)
+    #[arg(short, long, env = "DEX_MODEL", global = true)]
+    model: Option<String>,
 
-    /// Execution security mode (autopilot, safe, plan)
-    #[arg(long, value_enum, default_value_t = ExecutionMode::Autopilot, env = "DEX_MODE")]
-    mode: ExecutionMode,
+    /// Permission mode: safe asks before edits/shell (default), plan is read-only, autopilot never asks
+    #[arg(long, value_enum, env = "DEX_MODE", global = true)]
+    mode: Option<ExecutionMode>,
 
-    /// Optional API base URL override (e.g. http://localhost:11434 for Ollama)
-    #[arg(long, env = "DEX_API_BASE")]
+    /// OpenAI-compatible base URL override (e.g. http://127.0.0.1:8080/v1)
+    #[arg(long, env = "DEX_API_BASE", global = true)]
     api_base: Option<String>,
 
-    /// Enable live streaming of reasoning tokens
-    #[arg(long, default_value_t = true)]
-    stream: bool,
+    /// Disable live token streaming (print only the final answer)
+    #[arg(long, global = true)]
+    no_stream: bool,
 
-    /// Enable verbose debug output
+    /// Maximum agent steps per task
+    #[arg(long, default_value_t = 40, global = true)]
+    max_steps: usize,
+
+    /// Verbose output: debug logs and longer tool previews
     #[arg(short, long, global = true)]
     verbose: bool,
+
+    /// Optional first task for the interactive session
+    prompt: Option<String>,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -82,24 +97,20 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Execute a single autonomous objective
+    /// Run one task non-interactively and print the answer
     Run {
-        /// The objective or task for the agent to accomplish
+        /// The task for the agent
         #[arg(required = true)]
         goal: String,
     },
-    /// Launch the interactive agent REPL
+    /// Interactive session (same as running `dex` with no arguments)
     Repl,
+    /// Diagnose model servers, models, runtimes and extensions
+    Doctor,
     /// Start as a native Model Context Protocol (MCP) server over stdio
     McpServe,
-    /// Launch the live interactive Terminal UI (TUI) dashboard
+    /// Live terminal dashboard of agent events and tasks
     Tui,
-    /// Launch the real-time embedded Web dashboard
-    Web {
-        /// Web server port
-        #[arg(short, long, default_value_t = 3000)]
-        port: u16,
-    },
     /// Analyze host hardware and provide local LLM model size recommendations
     Cookbook,
     /// Manage scheduled autonomous tasks (.dex/schedules.json)
@@ -491,112 +502,6 @@ enum ScheduleCommands {
     },
 }
 
-/// Security guard hook enforcing Autopilot, Safe, or Plan restrictions across all sensitive tools.
-struct SecurityHook {
-    mode: ExecutionMode,
-}
-
-impl SecurityHook {
-    fn is_modifying_or_sensitive(tool_name: &str) -> bool {
-        matches!(
-            tool_name,
-            "write_file"
-                | "edit_file"
-                | "execute_shell"
-                | "pty_shell"
-                | "git_worktree"
-                | "desktop_mouse"
-                | "desktop_keyboard"
-                | "browser_click"
-                | "browser_type"
-                | "image_generate"
-                | "image_upscale"
-                | "image_process"
-                | "video_generate"
-                | "video_extract_frames"
-                | "video_edit"
-                | "mesh_generate_3d"
-                | "blender_convert_mesh"
-                | "blender_render_preview"
-                | "unity_export_asset"
-        )
-    }
-}
-
-#[async_trait]
-impl Hook for SecurityHook {
-    async fn on_event(&self, event: &AgentEvent) -> Result<HookAction, CoreError> {
-        if let AgentEvent::PreToolUse {
-            ref tool_name,
-            ref arguments,
-        } = event
-        {
-            if Self::is_modifying_or_sensitive(tool_name) {
-                match self.mode {
-                    ExecutionMode::Autopilot => Ok(HookAction::Continue),
-                    ExecutionMode::Plan => {
-                        let reason = format!(
-                            "Execution halted: tool '{tool_name}' is blocked in Plan mode (read-only mode active)"
-                        );
-                        Ok(HookAction::Halt(reason))
-                    }
-                    ExecutionMode::Safe => {
-                        println!("\n⚠️  [SAFE MODE] Permission requested to execute tool '{}'", tool_name);
-                        println!("   Arguments: {}", arguments);
-                        print!("   Allow execution? [y/N]: ");
-                        let _ = io::stdout().flush();
-
-                        let mut answer = String::new();
-                        if io::stdin().read_line(&mut answer).is_err() {
-                            return Ok(HookAction::Halt("Failed to read user input".to_string()));
-                        }
-
-                        let trimmed = answer.trim();
-                        if trimmed.eq_ignore_ascii_case("y") || trimmed.eq_ignore_ascii_case("yes") {
-                            Ok(HookAction::Continue)
-                        } else {
-                            Ok(HookAction::Halt(format!(
-                                "User denied authorization to execute tool '{tool_name}'"
-                            )))
-                        }
-                    }
-                }
-            } else {
-                Ok(HookAction::Continue)
-            }
-        } else {
-            Ok(HookAction::Continue)
-        }
-    }
-}
-
-fn build_provider(provider_type: &str, model: &str, api_base: Option<&str>) -> Result<Arc<dyn LlmProvider>> {
-    match provider_type.to_lowercase().as_str() {
-        "ollama" => {
-            let mut p = OllamaProvider::new(model);
-            if let Some(base) = api_base {
-                p = p.with_base_url(base);
-            }
-            Ok(Arc::new(p))
-        }
-        "openai" => {
-            let mut p = OpenAiProvider::new(model);
-            if let Some(base) = api_base {
-                p = p.with_base_url(base);
-            }
-            Ok(Arc::new(p))
-        }
-        "lmstudio" | "lm_studio" | "bionic" | "mlx" => {
-            let mut p = OpenAiProvider::lm_studio(model);
-            if let Some(base) = api_base {
-                p = p.with_base_url(base);
-            }
-            Ok(Arc::new(p))
-        }
-        other => anyhow::bail!("Unsupported provider '{other}'. Supported: ollama, openai, lmstudio"),
-    }
-}
-
 fn build_tools(
     provider: Arc<dyn LlmProvider>,
     skill_loader: ProgressiveSkillLoader,
@@ -672,38 +577,48 @@ fn build_tools(
     registry
 }
 
-fn print_step(step: &AgentStep) {
-    println!("\n━━━ [Step {}] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", step.iteration);
-    if let Some(ref thought) = step.thought {
-        if !thought.trim().is_empty() {
-            println!("\n🧠 Thought:\n{thought}");
-        }
-    }
+fn system_prompt(skills_index: &str) -> String {
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| ".".to_string());
+    let is_git = std::path::Path::new(".git").exists();
+    format!(
+        "You are Dex, a local-first autonomous coding and creative agent running in the user's terminal.\n\
+         Working directory: {cwd} (git repo: {is_git}). Platform: {os}/{arch}.\n\
+         Guidelines:\n\
+         - Reply in the same language the user writes in. Be concise; use Markdown.\n\
+         - Inspect before you change: read files and search the repo instead of guessing.\n\
+         - Prefer `edit_file` for surgical changes; verify with tests or commands when possible.\n\
+         - If a tool is denied, do not retry it; explain or ask the user.\n\
+         - Use `search_tools` to discover specialized tools (audio, image, video, 3D, OCR, MCP extensions).\n\
+         - Track long multi-step work with `manage_tasks`; delegate focused research with `spawn_subagent`.\n\
+         {skills_index}",
+        os = std::env::consts::OS,
+        arch = std::env::consts::ARCH,
+    )
+}
 
-    for (call, result) in step.tool_calls.iter().zip(step.tool_results.iter()) {
-        println!("\n🛠️  Tool Call: {}", call.name);
-        println!("   Arguments: {}", call.arguments);
-        if result.is_error {
-            println!("   Status: ❌ FAILED");
-        } else {
-            println!("   Status: ✅ SUCCESS");
+/// Connects enabled MCP extensions in the background so they never delay the first prompt.
+/// Their tools appear in `registry` (shared handle) as soon as each server answers.
+fn connect_extensions_in_background(supervisor: Arc<ExtensionSupervisor>, registry: &ToolRegistry) {
+    let mut shared = registry.clone();
+    tokio::spawn(async move {
+        let report = connect_enabled_mcp_extensions(supervisor, &mut shared).await;
+        session::mark_external_tools(&report.registered_tools);
+        if !report.failed.is_empty() {
+            info!(failed = report.failed.len(), "Some MCP extensions are unavailable (see `dex doctor`)");
         }
-        let preview = if result.output.len() > 1000 {
-            format!("{}...\n[Output truncated: {} bytes total]", &result.output[..1000], result.output.len())
-        } else {
-            result.output.clone()
-        };
-        println!("   Output:\n{preview}");
-    }
+    });
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Initialize structured tracing
-    let default_filter = if cli.verbose { "debug" } else { "warn" };
+    // Structured tracing goes to stderr and is quiet unless --verbose / RUST_LOG.
+    let default_filter = if cli.verbose { "debug" } else { "error" };
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter)),
         )
@@ -719,12 +634,12 @@ async fn main() -> Result<()> {
             return Ok(());
         }
         Some(Commands::Tui) => {
-            let mode_str = format!("{:?}", cli.mode);
+            let mode_str = format!("{:?}", cli.mode.unwrap_or(ExecutionMode::Safe));
             run_tui(event_bus, &mode_str).await.context("Failed to run TUI")?;
             return Ok(());
         }
-        Some(Commands::Web { port }) => {
-            start_web_dashboard(event_bus, port).await.map_err(|e| anyhow::anyhow!(e))?;
+        Some(Commands::Doctor) => {
+            doctor::run(Style::detect()).await?;
             return Ok(());
         }
         Some(Commands::Schedule { action }) => {
@@ -978,94 +893,119 @@ async fn main() -> Result<()> {
             }
             return Ok(());
         }
-        Some(Commands::McpServe) => {
-            let mut skill_loader = ProgressiveSkillLoader::new();
-            skill_loader.scan_standard_locations().await;
-
-            let provider = build_provider(&cli.provider, &cli.model, cli.api_base.as_deref())?;
-            let ext_supervisor = Arc::new(ExtensionSupervisor::new(event_bus.clone()));
-            let tools = build_tools(provider, skill_loader, ext_supervisor, event_bus);
-
-            let server = McpServer::new(tools);
-            server.run_stdio().await.context("MCP stdio server terminated with error")?;
-            return Ok(());
-        }
         _ => {}
     }
 
-    // Agent execution commands
+    // ── Agent commands ────────────────────────────────────────────────────────────────
+    let cfg = CliConfig::load().await;
+    let style = Style::detect();
+    let req = EndpointRequest {
+        provider: cli.provider.clone().or(cfg.provider.clone()),
+        model: cli.model.clone().or(cfg.model.clone()),
+        api_base: cli.api_base.clone().or(cfg.api_base.clone()),
+    };
+    let mode = cli
+        .mode
+        .or_else(|| cfg.mode.as_deref().and_then(session::parse_mode))
+        .unwrap_or(ExecutionMode::Safe);
+
     let mut skill_loader = ProgressiveSkillLoader::new();
     skill_loader.scan_standard_locations().await;
-
-    let provider = build_provider(&cli.provider, &cli.model, cli.api_base.as_deref())
-        .context("Failed to configure LLM provider")?;
+    let skills_index = skill_loader.generate_prompt_index();
     let ext_supervisor = Arc::new(ExtensionSupervisor::new(event_bus.clone()));
-    let mut tools = build_tools(
-        provider.clone(),
-        skill_loader.clone(),
-        ext_supervisor.clone(),
-        event_bus.clone(),
-    );
 
-    // Dynamically discover enabled external MCP extensions as Deferred tools
-    let deferred_loaded = register_enabled_mcp_extensions(ext_supervisor, &mut tools).await;
-    if !deferred_loaded.is_empty() {
-        info!(count = deferred_loaded.len(), "Loaded deferred MCP extension tools");
+    let make_tools: Arc<dyn Fn(Arc<dyn LlmProvider>) -> ToolRegistry + Send + Sync> = {
+        let skill_loader = skill_loader.clone();
+        let ext_supervisor = ext_supervisor.clone();
+        let event_bus = event_bus.clone();
+        Arc::new(move |provider: Arc<dyn LlmProvider>| {
+            let tools = build_tools(
+                provider,
+                skill_loader.clone(),
+                ext_supervisor.clone(),
+                event_bus.clone(),
+            );
+            connect_extensions_in_background(ext_supervisor.clone(), &tools);
+            tools
+        })
+    };
+
+    if let Some(Commands::McpServe) = cli.command {
+        // stdout carries the MCP protocol: status lines must go to stderr.
+        let endpoint = match endpoint::resolve(&req, &|m| eprintln!("{m}")).await {
+            Ok(ep) => ep,
+            Err(e) => {
+                eprintln!("dex mcp-serve: no chat model available for subagents ({e}); continuing.");
+                Endpoint {
+                    kind: "openai".to_string(),
+                    model: req.model.clone().unwrap_or_default(),
+                    base_url: Some(harness_models::LM_STUDIO_DEFAULT_URL.to_string()),
+                    label: "LM Studio".to_string(),
+                    local: true,
+                }
+            }
+        };
+        let tools = make_tools(endpoint.build_provider());
+        let server = McpServer::new(tools);
+        server.run_stdio().await.context("MCP stdio server terminated with error")?;
+        return Ok(());
     }
 
-    let mut hooks = HookRegistry::new();
-    hooks.register(Arc::new(SecurityHook { mode: cli.mode }));
+    let status = |m: &str| eprintln!("{}", style.dim(m));
+    let endpoint = match endpoint::resolve(&req, &status).await {
+        Ok(ep) => ep,
+        Err(e) => {
+            eprintln!("{} {e}", style.red("✗"));
+            std::process::exit(2);
+        }
+    };
 
-    let skills_index = skill_loader.generate_prompt_index();
-    let base_system_prompt = format!(
-        "You are Dex, a world-class autonomous software engineering and systems agent.\n\
-         You operate with high precision, surgical file edits, computer vision perception, and safety awareness.\n\
-         Mode: {:?}\n\
-         {}\n\
-         Track complex objectives using `manage_tasks` (.dex/tasks.json).\n\
-         Delegate specialized tasks using `spawn_subagent` (Explorer, Coder, Reviewer).\n\
-         You can inspect web pages with `browser_*` and take desktop screenshots with `desktop_*`.",
-        cli.mode, skills_index
-    );
+    let input = Input::spawn();
+    let parts = SessionParts {
+        endpoint,
+        system_prompt: system_prompt(&skills_index),
+        event_bus: event_bus.clone(),
+        mode: Arc::new(RwLock::new(mode)),
+        input: input.clone(),
+        stream: !cli.no_stream,
+        verbose: cli.verbose,
+        max_steps: cli.max_steps,
+        style,
+        always_allowed: Arc::new(Mutex::new(HashSet::new())),
+        printer: StreamPrinter::new(style),
+        make_tools,
+    };
 
     match cli.command {
         Some(Commands::Run { goal }) => {
-            println!("🚀 Dex-Harness (Provider: {}, Model: {}, Mode: {:?})", cli.provider, cli.model, cli.mode);
-            println!("🎯 Objective: {goal}");
-
-            let observer = Arc::new(|step: &AgentStep| {
-                print_step(step);
-            });
-
-            let mut agent = ReActAgent::new(provider, tools)
-                .with_system_prompt(base_system_prompt)
-                .with_observer(observer)
-                .with_hooks(hooks)
-                .with_event_bus(event_bus);
-
-            if cli.stream {
-                let stream_cb = Arc::new(|token: &str| {
-                    print!("{token}");
-                    let _ = io::stdout().flush();
-                });
-                agent = agent.with_token_callback(stream_cb);
-            }
-
-            match agent.run(&goal).await {
-                Ok(answer) => {
-                    println!("\n════════════════════════════════════════════════════════");
-                    println!("🏁 Final Answer:\n\n{answer}");
-                    println!("════════════════════════════════════════════════════════");
-                }
-                Err(e) => {
-                    eprintln!("\n❌ Execution failed: {e}");
-                    std::process::exit(1);
-                }
+            let mut agent = parts.build_agent();
+            eprintln!(
+                "{}",
+                style.dim(&format!(
+                    "dex · {} ({}) · {}",
+                    parts.endpoint.model,
+                    parts.endpoint.label,
+                    session::mode_label(mode)
+                ))
+            );
+            let ok = session::run_turn(&mut agent, &parts, &goal).await;
+            if !ok {
+                std::process::exit(130);
             }
         }
         Some(Commands::Daemon) => {
-            println!("🤖 Dex-Harness Background Scheduler Daemon started...");
+            println!("Dex scheduler daemon started ({}).", parts.endpoint.model);
             let mut reg = ScheduleRegistry::load_or_default(ScheduleRegistry::DEFAULT_PATH).await;
+            let provider = parts.endpoint.build_provider();
+            let tools = (parts.make_tools)(provider.clone());
+            // Nobody can answer prompts in a daemon: Safe-mode tools stop the task (use --mode autopilot).
+            let mut hooks = HookRegistry::new();
+            hooks.register(Arc::new(CliSecurityHook {
+                mode: parts.mode.clone(),
+                input: None,
+                always_allowed: parts.always_allowed.clone(),
+                style,
+            }));
 
             loop {
                 let now = SystemTime::now()
@@ -1083,13 +1023,15 @@ async fn main() -> Result<()> {
                 for (id, goal) in due_tasks {
                     info!(task_id = %id, goal = %goal, "Executing scheduled autonomous task");
                     let mut agent = ReActAgent::new(provider.clone(), tools.clone())
-                        .with_system_prompt(base_system_prompt.clone())
+                        .with_system_prompt(parts.system_prompt.clone())
                         .with_hooks(hooks.clone())
+                        .with_max_steps(parts.max_steps)
                         .with_event_bus(event_bus.clone());
 
                     match agent.run(&goal).await {
                         Ok(ans) => {
-                            info!(task_id = %id, "Scheduled task finished: {}", &ans[..ans.len().min(100)]);
+                            let preview: String = ans.chars().take(100).collect();
+                            info!(task_id = %id, "Scheduled task finished: {preview}");
                         }
                         Err(e) => {
                             error!(task_id = %id, "Scheduled task error: {e}");
@@ -1097,63 +1039,35 @@ async fn main() -> Result<()> {
                     }
 
                     reg.mark_executed(&id, now);
-                    let _ = reg.save().await;
+                    if let Err(e) = reg.save().await {
+                        error!(task_id = %id, "Failed to persist schedule: {e}");
+                    }
                 }
 
                 tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
             }
         }
         Some(Commands::Repl) | None => {
-            println!("========================================================");
-            println!("       🤖 Dex-Harness Interactive REPL (dex)            ");
-            println!("  Provider: {} | Model: {} | Mode: {:?}", cli.provider, cli.model, cli.mode);
-            println!("  Type 'exit' or 'quit' to leave, or enter your goal.   ");
-            println!("========================================================\n");
-
-            let observer = Arc::new(|step: &AgentStep| {
-                print_step(step);
-            });
-
-            let mut agent = ReActAgent::new(provider, tools)
-                .with_system_prompt(base_system_prompt)
-                .with_observer(observer)
-                .with_hooks(hooks)
-                .with_event_bus(event_bus);
-
-            if cli.stream {
-                let stream_cb = Arc::new(|token: &str| {
-                    print!("{token}");
-                    let _ = io::stdout().flush();
-                });
-                agent = agent.with_token_callback(stream_cb);
-            }
-
-            loop {
-                print!("\ndex> ");
-                io::stdout().flush().context("Failed to flush stdout")?;
-
-                let mut input = String::new();
-                if io::stdin().read_line(&mut input)? == 0 {
-                    break;
+            if !input.interactive {
+                // Piped stdin (`echo task | dex`): run it once instead of an interactive loop.
+                let mut goal = String::new();
+                while let Some(line) = input.next_line().await {
+                    goal.push_str(&line);
+                    goal.push('\n');
                 }
-
-                let trimmed = input.trim();
-                if trimmed.is_empty() {
-                    continue;
+                let goal = match cli.prompt {
+                    Some(p) if goal.trim().is_empty() => p,
+                    Some(p) => format!("{p}\n\n{goal}"),
+                    None => goal,
+                };
+                if goal.trim().is_empty() {
+                    eprintln!("Nothing to do: pass a task, e.g. `dex run \"...\"`.");
+                    std::process::exit(2);
                 }
-                if trimmed.eq_ignore_ascii_case("exit") || trimmed.eq_ignore_ascii_case("quit") {
-                    println!("Goodbye!");
-                    break;
-                }
-
-                match agent.run(trimmed).await {
-                    Ok(answer) => {
-                        println!("\n🏁 Answer:\n{answer}");
-                    }
-                    Err(e) => {
-                        eprintln!("\n❌ Agent error: {e}");
-                    }
-                }
+                let mut agent = parts.build_agent();
+                session::run_turn(&mut agent, &parts, goal.trim()).await;
+            } else {
+                session::repl(parts, cli.prompt).await?;
             }
         }
         _ => {}
@@ -1173,6 +1087,19 @@ mod tests {
     }
 
     #[test]
+    fn bare_prompt_and_flags_parse() {
+        let cli = Cli::try_parse_from(["dex", "hola mundo"]).expect("parse");
+        assert_eq!(cli.prompt.as_deref(), Some("hola mundo"));
+        assert!(cli.command.is_none());
+        let cli = Cli::try_parse_from(["dex", "--mode", "plan", "run", "x"]).expect("parse");
+        assert_eq!(cli.mode, Some(ExecutionMode::Plan));
+        assert!(matches!(cli.command, Some(Commands::Run { .. })));
+        // The old `web` subcommand is gone: the word is now just a prompt.
+        let cli = Cli::try_parse_from(["dex", "web"]).expect("parse");
+        assert_eq!(cli.prompt.as_deref(), Some("web"));
+    }
+
+    #[test]
     fn test_security_hook_covers_disk_writing_media_tools() {
         for tool in [
             "image_generate",
@@ -1187,12 +1114,12 @@ mod tests {
             "unity_export_asset",
         ] {
             assert!(
-                SecurityHook::is_modifying_or_sensitive(tool),
+                session::is_sensitive_tool(tool),
                 "Expected '{tool}' to be gated by SecurityHook"
             );
         }
-        assert!(!SecurityHook::is_modifying_or_sensitive("video_inspect"));
-        assert!(!SecurityHook::is_modifying_or_sensitive("mesh_inspect"));
-        assert!(!SecurityHook::is_modifying_or_sensitive("unity_inspect_project"));
+        assert!(!session::is_sensitive_tool("video_inspect"));
+        assert!(!session::is_sensitive_tool("mesh_inspect"));
+        assert!(!session::is_sensitive_tool("unity_inspect_project"));
     }
 }

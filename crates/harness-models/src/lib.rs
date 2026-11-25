@@ -19,7 +19,8 @@ pub use huggingface::{
 };
 pub use importer::{import_local_gguf, import_local_model};
 pub use local_servers::{
-    detect_local_servers, LocalServerInfo, LLAMA_SERVER_DEFAULT_PORT, LM_STUDIO_DEFAULT_URL,
+    detect_local_servers, is_chat_model_id, pick_chat_endpoint, LocalServerInfo,
+    LLAMA_SERVER_DEFAULT_PORT, LM_STUDIO_CANDIDATE_PORTS, LM_STUDIO_DEFAULT_URL,
     MLX_LM_DEFAULT_PORT,
 };
 pub use ollama_bridge::{OllamaBridge, OllamaModelDetails, OllamaModelTag};

@@ -34,7 +34,6 @@ async-trait = "0.1"
 
 # Networking & HTTP Client
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "stream", "rustls-tls"] }
-axum = { version = "0.8", features = ["ws"] }
 
 # Audio & Document Parsing
 cpal = "0.15"

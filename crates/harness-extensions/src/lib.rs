@@ -10,5 +10,8 @@ pub use manifest::{
     ExtensionCategory, ExtensionKind, ExtensionManifest, ExtensionRegistry,
     DEFAULT_IDLE_TIMEOUT_SECS,
 };
-pub use mcp_bridge::{connect_mcp_extension, register_enabled_mcp_extensions, ExtensionMcpTool};
+pub use mcp_bridge::{
+    connect_enabled_mcp_extensions, connect_mcp_extension, register_enabled_mcp_extensions,
+    ExtensionMcpTool, McpStartupReport,
+};
 pub use supervisor::{ExtensionRuntimeInfo, ExtensionStatus, ExtensionSupervisor};

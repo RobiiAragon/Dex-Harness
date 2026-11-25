@@ -107,7 +107,7 @@ impl Hook for DesktopSecurityHook {
                             tool_name
                         );
                         tracing::warn!("{}", reason);
-                        Ok(HookAction::Halt(reason))
+                        Ok(HookAction::Deny(reason))
                     }
                     ExecutionMode::Safe => {
                         tracing::info!(tool = %tool_name, "Safe mode requesting UI approval");

@@ -18,7 +18,7 @@ pub fn builtin_catalog() -> Vec<ExtensionManifest> {
             },
             estimated_ram_mb: 2560,
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
-            install_hint: "Requiere `uv` (brew install uv). Ejecuta `uvx soundbox-mcp` o configura tu clave/modelo local.".to_string(),
+            install_hint: "Experimental: no hay un paquete público `soundbox-mcp`. Apunta `DEX_AUDIO_GEN_URL` a tu servidor local de música/SFX (p. ej. ACE-Step) o registra tu propio MCP con `dex ext add-mcp`.".to_string(),
             enabled: false,
             tags: vec![
                 "audio".to_string(),
@@ -35,7 +35,14 @@ pub fn builtin_catalog() -> Vec<ExtensionManifest> {
             description: "OCR de alta precisión y extracción estructurada de PDFs, tablas, DOCX y presentaciones.".to_string(),
             kind: ExtensionKind::McpStdio {
                 command: "uvx".to_string(),
-                args: vec!["--from".to_string(), "docling-mcp".to_string(), "docling-mcp-server".to_string()],
+                // docling-mcp >= 2.0 defaults to streamable-http on :8000; force stdio.
+                args: vec![
+                    "--from".to_string(),
+                    "docling-mcp".to_string(),
+                    "docling-mcp-server".to_string(),
+                    "--transport".to_string(),
+                    "stdio".to_string(),
+                ],
                 env: HashMap::new(),
             },
             estimated_ram_mb: 1800,
@@ -81,7 +88,7 @@ pub fn builtin_catalog() -> Vec<ExtensionManifest> {
             description: "Orquestación de pipelines visuales en ComfyUI: LoRAs, ControlNet, inpainting y generación de texturas.".to_string(),
             kind: ExtensionKind::McpStdio {
                 command: "npx".to_string(),
-                args: vec!["-y".to_string(), "comfyui-mcp-server".to_string()],
+                args: vec!["-y".to_string(), "comfyui-mcp".to_string()],
                 env: HashMap::from([("COMFYUI_URL".to_string(), "http://127.0.0.1:8188".to_string())]),
             },
             estimated_ram_mb: 8192,
@@ -125,12 +132,18 @@ pub fn builtin_catalog() -> Vec<ExtensionManifest> {
             description: "Inspección y edición de escenas de Unity, creación de scripts C#, prefabs y lectura de la consola del editor.".to_string(),
             kind: ExtensionKind::McpStdio {
                 command: "uvx".to_string(),
-                args: vec!["unity-mcp".to_string()],
+                args: vec![
+                    "--from".to_string(),
+                    "mcpforunityserver".to_string(),
+                    "mcp-for-unity".to_string(),
+                    "--transport".to_string(),
+                    "stdio".to_string(),
+                ],
                 env: HashMap::new(),
             },
             estimated_ram_mb: 2048,
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
-            install_hint: "Añade el paquete Unity MCP Bridge en Unity Package Manager y ejecuta `uvx unity-mcp`.".to_string(),
+            install_hint: "Requiere `uv` (brew install uv) y el paquete del editor `com.coplaydev.unity-mcp` (Unity Package Manager › Add from git URL). Servidor: `uvx --from mcpforunityserver mcp-for-unity`.".to_string(),
             enabled: false,
             tags: vec![
                 "unity".to_string(),

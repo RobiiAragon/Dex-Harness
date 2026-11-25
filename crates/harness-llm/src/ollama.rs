@@ -25,11 +25,12 @@ impl OllamaProvider {
         Self {
             base_url: Self::DEFAULT_BASE_URL.to_string(),
             model: model.into(),
+            // No whole-request timeout: it would cut long streamed generations.
             client: Client::builder()
-                .timeout(Duration::from_secs(120))
+                .connect_timeout(Duration::from_secs(10))
                 .build()
                 .unwrap_or_else(|_| Client::new()),
-            timeout: Duration::from_secs(120),
+            timeout: Duration::from_secs(300),
         }
     }
 
@@ -63,6 +64,12 @@ struct OllamaMessage {
     content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<OllamaToolCall>>,
+    /// Reasoning text returned by thinking models (never sent back).
+    #[serde(default, skip_serializing)]
+    thinking: Option<String>,
+    /// Name of the tool whose result this `tool` message carries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_name: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -127,10 +134,25 @@ impl LlmProvider for OllamaProvider {
                     Role::Assistant => "assistant",
                     Role::Tool => "tool",
                 };
+                let tool_calls = m.tool_calls.filter(|c| !c.is_empty()).map(|calls| {
+                    calls
+                        .into_iter()
+                        .map(|c| OllamaToolCall {
+                            id: Some(c.id),
+                            function: OllamaCallFunction {
+                                name: c.name,
+                                arguments: c.arguments,
+                            },
+                        })
+                        .collect()
+                });
+                let tool_name = if matches!(m.role, Role::Tool) { m.name } else { None };
                 OllamaMessage {
                     role: role.to_string(),
                     content: m.content,
-                    tool_calls: None,
+                    tool_calls,
+                    thinking: None,
+                    tool_name,
                 }
             })
             .collect();
@@ -162,12 +184,15 @@ impl LlmProvider for OllamaProvider {
 
         debug!(url = %url, streaming = is_streaming, "Sending request to Ollama /api/chat");
 
-        let response = self
-            .client
-            .post(&url)
-            .json(&payload)
-            .send()
+        let response = tokio::time::timeout(self.timeout, self.client.post(&url).json(&payload).send())
             .await
+            .map_err(|_| ProviderError::Custom {
+                provider: "ollama".to_string(),
+                message: format!(
+                    "Timed out after {}s waiting for Ollama at {url} (model may still be loading).",
+                    self.timeout.as_secs()
+                ),
+            })?
             .map_err(|e| ProviderError::Http(format!("Failed to reach Ollama at {url}: {e}")))?;
 
         if !response.status().is_success() {
@@ -184,26 +209,50 @@ impl LlmProvider for OllamaProvider {
             let mut byte_stream = response.bytes_stream();
             let mut accumulated_content = String::new();
             let mut accumulated_tool_calls = Vec::new();
-            let mut line_buffer = String::new();
+            let mut line_buffer: Vec<u8> = Vec::new();
             let mut finish_reason = None;
+            let mut in_thinking = false;
+            let idle = Duration::from_secs(120);
 
-            while let Some(chunk_result) = byte_stream.next().await {
+            loop {
+                let next = tokio::time::timeout(idle, byte_stream.next())
+                    .await
+                    .map_err(|_| ProviderError::Custom {
+                        provider: "ollama".to_string(),
+                        message: format!("Stream stalled for {}s while reading from {url}.", idle.as_secs()),
+                    })?;
+                let Some(chunk_result) = next else { break };
                 let chunk = chunk_result.map_err(|e| ProviderError::Http(e.to_string()))?;
-                let text = String::from_utf8_lossy(&chunk);
-                line_buffer.push_str(&text);
+                // Byte-level split keeps multi-byte UTF-8 characters intact across chunks.
+                line_buffer.extend_from_slice(&chunk);
 
-                while let Some(pos) = line_buffer.find('\n') {
-                    let line = line_buffer[..pos].trim().to_string();
-                    line_buffer = line_buffer[pos + 1..].to_string();
+                while let Some(pos) = line_buffer.iter().position(|b| *b == b'\n') {
+                    let raw_line: Vec<u8> = line_buffer.drain(..=pos).collect();
+                    let line = String::from_utf8_lossy(&raw_line).trim().to_string();
 
                     if line.is_empty() {
                         continue;
                     }
 
                     if let Ok(chat_resp) = serde_json::from_str::<OllamaChatResponse>(&line) {
+                        if let Some(ref thinking) = chat_resp.message.thinking {
+                            if !thinking.is_empty() {
+                                if let Some(ref cb) = token_callback {
+                                    if !in_thinking {
+                                        cb("<think>");
+                                        in_thinking = true;
+                                    }
+                                    cb(thinking);
+                                }
+                            }
+                        }
                         if let Some(ref delta) = chat_resp.message.content {
                             if !delta.is_empty() {
                                 if let Some(ref cb) = token_callback {
+                                    if in_thinking {
+                                        cb("</think>");
+                                        in_thinking = false;
+                                    }
                                     cb(delta);
                                 }
                                 accumulated_content.push_str(delta);
@@ -226,6 +275,12 @@ impl LlmProvider for OllamaProvider {
                             finish_reason = chat_resp.done_reason;
                         }
                     }
+                }
+            }
+
+            if in_thinking {
+                if let Some(ref cb) = token_callback {
+                    cb("</think>");
                 }
             }
 

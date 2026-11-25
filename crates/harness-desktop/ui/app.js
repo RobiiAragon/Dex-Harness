@@ -1555,6 +1555,10 @@
     const attachmentPaths = pendingAttachments.map((a) => a.path);
 
     closeModelPopover();
+    // Prior turns (before this one) so the agent remembers the conversation.
+    const history = (state.sessionMessages || [])
+      .filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content)
+      .map((m) => ({ role: m.role, content: String(m.content) }));
     appendUserMessage(goal, pendingAttachments);
     state.sessionMessages.push({
       role: 'user',
@@ -1578,6 +1582,7 @@
         model: model || null,
         apiBase,
         attachments: attachmentPaths.length > 0 ? attachmentPaths : null,
+        history,
       });
     } catch (err) {
       appendSystemNote(`Failed to launch agent: ${err}`, 'error');
@@ -4663,7 +4668,7 @@
         updateContextMetric(d.estimated_tokens || 0);
         appendSystemNote(`Context compacted to ~${d.estimated_tokens} tokens`);
       } else if (ev.type === 'SecurityBlocked') {
-        appendSystemNote(`Security hook halted ${d.tool_name}: ${d.reason}`, 'warn');
+        appendSystemNote(`Blocked ${d.tool_name}: ${d.reason}`, 'warn');
       } else if (ev.type === 'ModelDownloadProgress') {
         const box = el('download-progress-box');
         if (box) {
